@@ -15,3 +15,5 @@ lerna-debug.log*
 # Build output
 dist/
 build/
+
+firebase-service-account.json

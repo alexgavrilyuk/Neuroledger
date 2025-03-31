@@ -1,25 +1,35 @@
+// backend/src/app.js
+// ** UPDATED FILE **
 const express = require('express');
 const cors = require('cors');
+const mainRouter = require('./routes');
+const errorHandler = require('./shared/middleware/error.handler');
+const logger = require('./shared/utils/logger');
 
 const app = express();
 
 // --- Middleware ---
-// Enable CORS for all origins (adjust for production later)
-app.use(cors());
-// Parse JSON request bodies
-app.use(express.json());
+app.use(cors()); // Enable CORS
+app.use(express.json()); // Parse JSON request bodies
 
-// --- Basic Test Route ---
-app.get('/api/v1', (req, res) => {
-  res.json({ message: 'NeuroLedger Backend is running!' });
+// Request Logging (Simple)
+app.use((req, res, next) => {
+  logger.info(`${req.method} ${req.originalUrl}`);
+  next();
 });
 
-// --- (Future routes will be added here) ---
-// const mainRouter = require('./routes');
-// app.use('/api/v1', mainRouter);
+
+// --- API Routes ---
+app.use('/api/v1', mainRouter);
 
 
-// --- Error Handling (Add later) ---
+// --- Catch 404 Routes ---
+app.use((req, res, next) => {
+    res.status(404).json({ status: 'error', message: 'Resource not found.'});
+});
 
+// --- Global Error Handler ---
+// IMPORTANT: Must be the last middleware added
+app.use(errorHandler);
 
 module.exports = app;
