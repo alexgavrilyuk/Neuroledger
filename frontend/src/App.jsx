@@ -1,11 +1,19 @@
+// frontend/src/App.jsx
+// ** UPDATED FILE **
+import React from 'react';
+import { AuthProvider } from './shared/contexts/AuthContext';
+import { ThemeProvider } from './shared/contexts/ThemeContext';
+import AppRouter from './routes'; // Import the router configuration
+
 function App() {
   return (
-    <div className="min-h-screen bg-gray-100 flex items-center justify-center">
-      <h1 className="text-3xl font-bold text-blue-600">
-        NeuroLedger Frontend (Tailwind is working!)
-      </h1>
-    </div>
-  )
+    <ThemeProvider>
+      <AuthProvider>
+        {/* AppRouter now handles all routing logic */}
+        <AppRouter />
+      </AuthProvider>
+    </ThemeProvider>
+  );
 }
 
-export default App
+export default App;
