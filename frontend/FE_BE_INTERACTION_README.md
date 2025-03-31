@@ -4,7 +4,7 @@
 
 This document defines the contract for communication between the NeuroLedger frontend (React) and backend (Node.js/Express) services.
 
-**Last Updated:** [Date - Update on significant changes]
+**Last Updated:** [Date - After Phase 3 Implementation]
 
 ## 1. Base API URL
 
@@ -56,50 +56,66 @@ Backend endpoints should adhere to the following response structures where possi
     }
     ```
 
-## 4. Endpoint Specifications (Phase 1)
+## 4. Endpoint Specifications
 
 ---
 
 ### Feature: Authentication
 
-*   **Endpoint:** `POST /api/v1/auth/session`
-*   **Description:** Verifies the provided Firebase ID token. If valid, finds the corresponding user in the application database or creates a new user record if it's their first time. Returns the application user data.
-*   **Auth:** Required (implicit, token is the subject of verification).
-*   **Request:**
-    *   Headers: `Authorization: Bearer <Firebase ID Token>`
-    *   Body: None
-*   **Success Response (200 OK):**
-    *   Status Code: `200`
-    *   Body:
-        ```json
-        {
-          "status": "success",
-          "data": {
-            "_id": "mongodb_object_id",
-            "firebaseUid": "firebase_user_uid",
-            "email": "user@example.com",
-            "name": "User Name",
-            "createdAt": "iso_timestamp",
-            "subscriptionInfo": { /* Placeholder object */ },
-            "settings": { /* Placeholder object */ },
-            "teams": [ /* Placeholder array */ ]
-            // ... other User model fields
-          }
-        }
-        ```
-*   **Error Responses:**
-    *   `401 Unauthorized`: Token missing, invalid signature, expired, or malformed. Body: `{ status: 'error', message: '...', code?: '...' }`
-    *   `500 Internal Server Error`: Database error or other unexpected server issue during user lookup/creation. Body: `{ status: 'error', message: '...' }`
+*   **`POST /api/v1/auth/session`**
+    *   **Description:** Verifies Firebase token, gets/creates application user.
+    *   **Auth:** Implicit (Token provided for verification).
+    *   **Request:** Headers: `Authorization: Bearer <Token>`. Body: None.
+    *   **Success (200):** `{ status: 'success', data: User }`
+    *   **Errors:** `401`, `500`.
 
 ---
 
-*(Add specifications for endpoints from future phases here as they are implemented)*
+### Feature: Subscriptions (Phase 2 - Dummy)
+
+*   **`GET /api/v1/subscriptions/status`**
+    *   **Description:** Gets current subscription status, checks trial expiry.
+    *   **Auth:** Required (Login).
+    *   **Success (200):** `{ status: 'success', data: SubscriptionInfo }`
+    *   **Errors:** `401`, `500`.
+*   **`POST /api/v1/subscriptions/select`**
+    *   **Description:** Selects a dummy plan for the user.
+    *   **Auth:** Required (Login).
+    *   **Request Body:** `{ "planId": string }`
+    *   **Success (200):** `{ status: 'success', data: User }` (Returns full updated user object).
+    *   **Errors:** `400` (Invalid planId), `401`, `500`.
+
+---
+
+### Feature: Datasets (Phase 3 MVP)
+
+*   **`GET /api/v1/datasets/upload-url`**
+    *   **Description:** Generates a v4 signed URL for direct GCS file upload, requiring the exact file size for signature validity.
+    *   **Auth:** Required (Login + Active Subscription).
+    *   **Query Params:**
+        *   `filename` (string, required): The original name of the file.
+        *   `fileSize` (number, required): The exact size of the file in bytes.
+    *   **Success Response (200):** `{ status: 'success', data: { signedUrl: string, gcsPath: string } }`
+    *   **Error Responses:** `400` (Missing or invalid `filename`/`fileSize`), `401`, `403`, `500`.
+*   **`POST /api/v1/datasets`**
+    *   **Description:** Creates dataset metadata in DB after GCS upload. Parses file headers.
+    *   **Auth:** Required (Login + Active Subscription).
+    *   **Request Body:** `{ "gcsPath": string, "originalFilename": string, "name"?: string, "fileSizeBytes"?: number }`
+    *   **Success Response (201 Created):** `{ status: 'success', data: Dataset }` (Includes parsed `schemaInfo`).
+    *   **Error Responses:** `400` (Missing required fields), `401`, `403`, `500`.
+*   **`GET /api/v1/datasets`**
+    *   **Description:** Lists datasets owned by the user.
+    *   **Auth:** Required (Login + Active Subscription).
+    *   **Success Response (200):** `{ status: 'success', data: Dataset[] }` (Excludes `schemaInfo` by default).
+    *   **Error Responses:** `401`, `403`, `500`.
+
+---
+
+*(Add specifications for endpoints from future phases here)*
 
 ## 5. Key Data Models (Exchanged Objects)
 
-*(This section will grow significantly in later phases)*
-
-### User (Returned by `POST /auth/session`)
+### User (From `POST /auth/session`, `POST /subscriptions/select`)
 
 ```typescript
 interface User {
@@ -108,7 +124,56 @@ interface User {
   email: string;
   name?: string;
   createdAt: string; // ISO 8601 Date string
-  subscriptionInfo: object; // Structure defined later
-  settings: object; // Structure defined later
-  teams: string[]; // Array of Team ObjectIds (as strings) - defined later
+  onboardingCompleted: boolean;
+  subscriptionInfo: SubscriptionInfo;
+  settings: object; // Placeholder
+  teams: string[]; // Placeholder: Array of Team ObjectIds (as strings)
 }
+
+interface SubscriptionInfo {
+    tier: 'free' | 'trial' | 'plus' | 'pro';
+    status: 'active' | 'inactive' | 'trialing' | 'past_due' | 'canceled';
+    trialEndsAt?: string | null; // ISO 8601 Date string or null
+    subscriptionEndsAt?: string | null; // ISO 8601 Date string or null
+    stripeCustomerId?: string | null;
+    stripeSubscriptionId?: string | null;
+}
+
+```
+
+### Dataset (From POST /datasets, GET /datasets)
+
+```typescript
+
+interface ColumnSchemaInfo {
+    name: string; // Header name
+    type: string; // Basic inferred type (e.g., 'string')
+}
+
+interface Dataset {
+  _id: string; // MongoDB ObjectId as string
+  name: string;
+  description?: string;
+  gcsPath: string;
+  originalFilename: string;
+  fileSizeBytes?: number;
+  ownerId: string; // User ObjectId as string
+  teamId?: string | null; // Team ObjectId as string
+  schemaInfo?: ColumnSchemaInfo[]; // Array of column info (present on POST, excluded on GET list by default)
+  columnDescriptions?: Record<string, string>; // Map of headerName -> description (Phase 8)
+  isIgnored: boolean;
+  createdAt: string; // ISO 8601 Date string
+  lastUpdatedAt: string; // ISO 8601 Date string
+}
+
+```
+
+### Upload URL Response Data (GET /datasets/upload-url)
+
+```typescript
+interface UploadUrlData {
+    signedUrl: string; // The v4 signed URL for PUT request
+    gcsPath: string;   // The destination path in GCS for the file
+}
+
+```

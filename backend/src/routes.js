@@ -2,11 +2,11 @@
 // ** UPDATED FILE **
 const express = require('express');
 const authRoutes = require('./features/auth/auth.routes');
-const subscriptionRoutes = require('./features/subscriptions/subscription.routes'); // Import subscription routes
+const subscriptionRoutes = require('./features/subscriptions/subscription.routes');
+const datasetRoutes = require('./features/datasets/dataset.routes'); // Import dataset routes
 // Import other feature routes here as they are created
 // const userRoutes = require('./features/users/user.routes');
-// const datasetRoutes = require('./features/datasets/dataset.routes');
-// const promptRoutes = require('./features/prompts/prompt.routes'); // For Phase 4
+// const promptRoutes = require('./features/prompts/prompt.routes');
 
 const router = express.Router();
 
@@ -17,9 +17,9 @@ router.get('/', (req, res) => {
 
 // Mount feature routers
 router.use('/auth', authRoutes);
-router.use('/subscriptions', subscriptionRoutes); // Mount subscription routes
+router.use('/subscriptions', subscriptionRoutes);
+router.use('/datasets', datasetRoutes); // Mount dataset routes
 // router.use('/users', userRoutes);
-// router.use('/datasets', datasetRoutes);
-// router.use('/prompts', promptRoutes); // Will be protected by subscription guard later
+// router.use('/prompts', promptRoutes);
 
 module.exports = router;

@@ -1,124 +1,129 @@
 // frontend/src/shared/components/Sidebar.jsx
-// ** NEW FILE **
+// ** UPDATED FILE - Fixed inactive link visibility in dark mode **
 import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 import {
-  HomeIcon,
-  Cog6ToothIcon,
-  ChartBarIcon, // Example icon
-  CircleStackIcon, // Example icon for Datasets
-  UsersIcon, // Example icon for Teams
-  QuestionMarkCircleIcon, // Example icon for Onboarding/Help
+  HomeIcon, Cog6ToothIcon, CircleStackIcon, UsersIcon, QuestionMarkCircleIcon,
+  UserCircleIcon, BuildingOfficeIcon
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../hooks/useAuth';
 
-// Combine static and dynamic nav items if needed
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
-  { name: 'Datasets', href: '/account/datasets', icon: CircleStackIcon }, // Example future link
-  { name: 'Teams', href: '/account/teams', icon: UsersIcon }, // Example future link
+];
+const accountNavigation = [
+   { name: 'Profile', href: '/account/profile', icon: UserCircleIcon },
+   { name: 'Datasets', href: '/account/datasets', icon: CircleStackIcon },
+   { name: 'Teams', href: '/account/teams', icon: UsersIcon },
+   { name: 'Settings', href: '/account/settings', icon: Cog6ToothIcon },
 ];
 const secondaryNavigation = [
-  { name: 'Settings', href: '/account/settings', icon: Cog6ToothIcon }, // Example future link
-  { name: 'Help/Tutorial', href: '/onboarding', icon: QuestionMarkCircleIcon }, // Example future link
+  { name: 'Help/Tutorial', href: '/onboarding', icon: QuestionMarkCircleIcon },
 ];
 
 function classNames(...classes) {
   return classes.filter(Boolean).join(' ')
 }
 
+// Helper for NavLink active style
+const getNavLinkClass = ({ isActive }) => {
+     return classNames(
+        isActive
+        ? 'bg-gray-100 dark:bg-gray-800 text-blue-600 dark:text-blue-300'
+        // --- FIX: Changed dark:text-gray-300 to dark:text-gray-400 for better inactive visibility ---
+        : 'text-gray-700 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-300 hover:bg-gray-50 dark:hover:bg-gray-800/50',
+        'group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold transition-colors duration-150'
+     );
+}
+ // Helper for Icon class (remains the same)
+ const getIconClass = (isActive) => {
+    return classNames(
+        isActive
+            ? 'text-blue-600 dark:text-blue-300'
+            : 'text-gray-400 dark:text-gray-500 group-hover:text-blue-600 dark:group-hover:text-blue-300',
+        'h-6 w-6 shrink-0 transition-colors duration-150'
+    );
+}
+
+
 const Sidebar = () => {
-    const location = useLocation();
-    const { user } = useAuth(); // Get user info if needed at bottom
+    const { user } = useAuth();
 
     return (
-        <div className="flex grow flex-col gap-y-5 overflow-y-auto border-r border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-6 w-64 fixed inset-y-0 z-10">
-             {/* Logo */}
-            <div className="flex h-16 shrink-0 items-center">
-                 {/* Replace with your actual logo component or SVG */}
-                <svg
-                    className="h-8 w-auto text-blue-600 dark:text-blue-400"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 48 48" // Adjust viewBox if using a real logo
-                    aria-hidden="true"
-                 >
-                     <path
-                         strokeLinecap="round"
-                         strokeLinejoin="round"
-                         strokeWidth={2}
-                         d="M9 3v4m6-4v4m6-4v4M9 15h6m-6 4h6m-6 4h6m6-4h6M15 3h6m-6 4h6m-6 4h6m-6 4h6m6-12h6M15 15h6m-6 4h6m6-4h6M15 23h6m6-4h6m6 4h6M21 3v4m6-4v4m6-4v4m6 8h6" // Placeholder shape
-                     />
-                 </svg>
-                 <span className="ml-3 text-xl font-bold text-gray-900 dark:text-white">NeuroLedger</span>
-            </div>
+        // Using hidden lg:fixed etc. for responsiveness handled in AppLayout potentially
+        <div className="hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-64 lg:flex-col">
+            <div className="flex grow flex-col gap-y-5 overflow-y-auto border-r border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-6 pb-4">
+                {/* Logo */}
+                <Link to="/dashboard" className="flex h-16 shrink-0 items-center gap-x-3">
+                     <svg className="h-8 w-auto text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 48 48" aria-hidden="true">
+                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 3v4m6-4v4m6-4v4M9 15h6m-6 4h6m-6 4h6m6-4h6M15 3h6m-6 4h6m-6 4h6m-6 4h6m6-12h6M15 15h6m-6 4h6m6-4h6M15 23h6m6-4h6m6 4h6M21 3v4m6-4v4m6-4v4m6 8h6" />
+                     </svg>
+                     <span className="text-xl font-bold text-gray-900 dark:text-white">NeuroLedger</span>
+                </Link>
 
-            {/* Navigation */}
-            <nav className="flex flex-1 flex-col">
-                <ul role="list" className="flex flex-1 flex-col gap-y-7">
-                    {/* Main Nav */}
-                    <li>
-                        <ul role="list" className="-mx-2 space-y-1">
-                            {navigation.map((item) => (
-                            <li key={item.name}>
-                                <Link
-                                to={item.href}
-                                className={classNames(
-                                    location.pathname.startsWith(item.href) // Basic active check
-                                    ? 'bg-gray-100 dark:bg-gray-800 text-blue-600 dark:text-blue-300'
-                                    : 'text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-300 hover:bg-gray-50 dark:hover:bg-gray-800/50',
-                                    'group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold'
-                                )}
-                                >
-                                <item.icon
-                                    className={classNames(
-                                    location.pathname.startsWith(item.href)
-                                        ? 'text-blue-600 dark:text-blue-300'
-                                        : 'text-gray-400 dark:text-gray-500 group-hover:text-blue-600 dark:group-hover:text-blue-300',
-                                    'h-6 w-6 shrink-0'
-                                    )}
-                                    aria-hidden="true"
-                                />
-                                {item.name}
-                                </Link>
-                            </li>
-                            ))}
-                        </ul>
-                    </li>
-
-                    {/* Secondary Nav - Pushed towards bottom */}
-                    <li className="mt-auto">
-                         <ul role="list" className="-mx-2 space-y-1 mb-4">
-                            {secondaryNavigation.map((item) => (
+                {/* Navigation */}
+                <nav className="flex flex-1 flex-col">
+                    <ul role="list" className="flex flex-1 flex-col gap-y-7">
+                        {/* Main Nav */}
+                        <li>
+                            <div className="text-xs font-semibold leading-6 text-gray-400 dark:text-gray-500">Main</div>
+                            <ul role="list" className="-mx-2 mt-2 space-y-1">
+                                {navigation.map((item) => (
                                 <li key={item.name}>
-                                    <Link
-                                        to={item.href}
-                                        className={classNames(
-                                            location.pathname.startsWith(item.href)
-                                            ? 'bg-gray-100 dark:bg-gray-800 text-blue-600 dark:text-blue-300'
-                                            : 'text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-300 hover:bg-gray-50 dark:hover:bg-gray-800/50',
-                                            'group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold'
+                                    <NavLink to={item.href} className={getNavLinkClass}>
+                                        {({ isActive }) => (
+                                            <>
+                                                <item.icon className={getIconClass(isActive)} aria-hidden="true" />
+                                                {item.name}
+                                            </>
                                         )}
-                                    >
-                                     <item.icon
-                                        className={classNames(
-                                        location.pathname.startsWith(item.href)
-                                            ? 'text-blue-600 dark:text-blue-300'
-                                            : 'text-gray-400 dark:text-gray-500 group-hover:text-blue-600 dark:group-hover:text-blue-300',
-                                        'h-6 w-6 shrink-0'
-                                        )}
-                                        aria-hidden="true"
-                                    />
-                                        {item.name}
-                                    </Link>
+                                    </NavLink>
                                 </li>
-                            ))}
-                         </ul>
-                         {/* Optional: User profile link at bottom */}
-                         {/* <div className="border-t border-gray-200 dark:border-gray-700 pt-4"> ... user avatar/name ... </div> */}
-                    </li>
-                </ul>
-            </nav>
+                                ))}
+                            </ul>
+                        </li>
+
+                         {/* Account Nav */}
+                         <li>
+                            <div className="text-xs font-semibold leading-6 text-gray-400 dark:text-gray-500">Account</div>
+                            <ul role="list" className="-mx-2 mt-2 space-y-1">
+                                {accountNavigation.map((item) => (
+                                <li key={item.name}>
+                                    <NavLink to={item.href} className={getNavLinkClass} end={item.href === '/account'}>
+                                         {({ isActive }) => (
+                                            <>
+                                                <item.icon className={getIconClass(isActive)} aria-hidden="true" />
+                                                {item.name}
+                                            </>
+                                        )}
+                                    </NavLink>
+                                </li>
+                                ))}
+                            </ul>
+                        </li>
+
+
+                        {/* Secondary Nav - Pushed towards bottom */}
+                        <li className="mt-auto">
+                             <div className="text-xs font-semibold leading-6 text-gray-400 dark:text-gray-500">Support</div>
+                             <ul role="list" className="-mx-2 mt-2 space-y-1">
+                                {secondaryNavigation.map((item) => (
+                                    <li key={item.name}>
+                                        <NavLink to={item.href} className={getNavLinkClass}>
+                                             {({ isActive }) => (
+                                                <>
+                                                    <item.icon className={getIconClass(isActive)} aria-hidden="true" />
+                                                    {item.name}
+                                                </>
+                                            )}
+                                        </NavLink>
+                                    </li>
+                                ))}
+                             </ul>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
         </div>
     );
 }

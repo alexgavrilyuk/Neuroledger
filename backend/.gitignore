@@ -17,3 +17,4 @@ dist/
 build/
 
 firebase-service-account.json
+gcs-service-account.json
