@@ -1,46 +1,47 @@
-
 # frontend/src/features/subscription/README.md
-# ** NEW FILE **
+# ** UPDATED FILE **
 
 ## Feature: Frontend Subscription Selection
 
-This feature provides the UI for users to select a subscription plan (using dummy data and backend logic in Phase 2). It is typically shown to users after login if they do not have an active subscription status.
+This feature provides the UI for users to select a subscription plan (using dummy data and backend logic in Phase 2). It is typically shown to users after login if they do not have an active subscription status and is designed with a modern, visually distinct presentation.
 
 ### Core Flow
 
-1.  **Routing:** The `ProtectedRoute` component in `src/routes.jsx` checks the `user.subscriptionInfo` status from the `AuthContext`. If the user does not have an active or trialing subscription, they are redirected to the `/select-plan` route (unless they are already there).
+1.  **Routing:** The `ProtectedRoute` component directs users lacking an active subscription to the `/select-plan` route, rendered within the `AppLayout`.
 2.  **Page (`pages/SubscriptionPage.jsx`):**
-    *   Displays available subscription plans (currently using `DUMMY_PLANS_DATA`).
-    *   Renders `PlanSelectorCard` components for each plan.
-    *   Manages loading and error states for the plan selection process.
-    *   When a plan is selected, it calls the backend `POST /api/v1/subscriptions/select` endpoint via `apiClient`.
-    *   On successful selection, it receives the **updated user object** from the backend.
-    *   **Crucially, it calls the `setUser` function (exposed via `useAuth` from `AuthContext`)** to update the global user state with the new subscription information.
-    *   Navigates the user to `/dashboard` (or potentially onboarding if that logic is refined later).
+    *   Sets a distinct page background (`bg-white dark:bg-gray-950`) to contrast with plan containers.
+    *   Displays a clear page header (title, subtitle).
+    *   Arranges `PlanSelectorCard` components in a responsive flex/grid layout.
+    *   Manages loading/error states for the selection process.
+    *   Calls the backend (`POST /api/v1/subscriptions/select`) on plan selection.
+    *   Updates `AuthContext` user state via `setUser` upon success.
+    *   Navigates the user to the appropriate next view (usually `/dashboard`).
 3.  **Component (`components/PlanSelectorCard.jsx`):**
-    *   A presentational component that displays the details of a single plan (name, price, features).
-    *   Uses shared `Card` and `Button` components.
-    *   Highlights if it's the currently selected plan during the API call.
-    *   Triggers the `onSelect` callback passed from `SubscriptionPage`.
+    *   Renders a single plan option within a styled container (using borders, backgrounds, and shadows for visual distinction, especially for a 'Recommended' plan).
+    *   Emphasizes the price and plan name with larger/bolder typography.
+    *   Clearly lists features using check icons.
+    *   Uses flexbox structure to push the CTA `Button` to the bottom for consistent alignment.
+    *   Includes visual elements like a 'Recommended' badge/banner.
+    *   Triggers the `onSelect` callback.
 
 ### Files
 
 *   **`components/`**
-    *   `PlanSelectorCard.jsx`: Displays a single subscription plan option.
+    *   `PlanSelectorCard.jsx`: Displays a single subscription plan option with enhanced styling.
 *   **`pages/`**
-    *   `SubscriptionPage.jsx`: Main page for viewing and selecting subscription plans.
+    *   `SubscriptionPage.jsx`: Main page for viewing and selecting subscription plans, with updated layout and styling.
 *   **`README.md`**: This file.
 
 ### Dependencies
 
 *   `react-router-dom` (`useNavigate`)
-*   `shared/ui/Card`, `shared/ui/Button`, `shared/ui/Spinner`
-*   `@heroicons/react` (for check icon)
-*   `shared/hooks/useAuth` (to get `setUser` function)
-*   `shared/services/apiClient` (to call the backend)
-*   `shared/layouts/AppLayout` (used by the router for this page)
+*   `shared/ui/Card` (No longer directly used by PlanSelectorCard, but page uses Card concepts), `shared/ui/Button`, `shared/ui/Spinner`
+*   `@heroicons/react` (CheckIcon, StarIcon)
+*   `shared/hooks/useAuth` (to get `setUser`)
+*   `shared/services/apiClient`
+*   `shared/layouts/AppLayout`
 
 ### State Management
 
-*   Local state within `SubscriptionPage` manages the currently selected plan ID during submission (`selectedPlanId`), loading state (`isLoading`), and error messages (`error`).
-*   Global user state (including subscription status) is updated via `AuthContext`'s `setUser` function upon successful plan selection.
+*   Local state within `SubscriptionPage` manages `selectedPlanId`, `isLoading`, and `error`.
+*   Global user state is updated via `AuthContext`'s `setUser` function upon success.
