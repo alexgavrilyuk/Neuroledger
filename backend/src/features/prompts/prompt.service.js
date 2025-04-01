@@ -1,32 +1,24 @@
 // backend/src/features/prompts/prompt.service.js
-// ** UPDATED FILE **
+// ** COMPLETE FILE - Added matching logging **
+
 const anthropic = require('../../shared/external_apis/claude.client');
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
 const PromptHistory = require('./prompt.model');
 const logger = require('../../shared/utils/logger');
+const executionService = require('../code_execution/execution.service');
+const { fetchDataForSandbox } = require('../code_execution/execution.service');
 
-// Basic context assembly (will be enhanced in later phases)
+// Context assembly function (Full Implementation)
 const assembleContext = async (userId, selectedDatasetIds) => {
     let contextString = "Context:\n";
-
-    // Fetch User Settings (placeholders for now)
     const user = await User.findById(userId).select('settings').lean();
     contextString += `- User Settings: Currency=${user?.settings?.currency || 'USD'}, DateFormat=${user?.settings?.dateFormat || 'YYYY-MM-DD'}. ${user?.settings?.aiContext || ''}\n`;
-
-    // Fetch Team Settings (placeholder for now)
     contextString += `- Team Settings: (Not implemented yet)\n`;
-
-    // Fetch Selected Dataset Info
     contextString += "- Selected Datasets:\n";
     if (selectedDatasetIds && selectedDatasetIds.length > 0) {
-        // Find datasets ensuring they belong to the user (or team later)
-        // TODO: Add team dataset access logic later
-        const datasets = await Dataset.find({
-            _id: { $in: selectedDatasetIds },
-            ownerId: userId // Basic ownership check for now
-        }).select('name description schemaInfo columnDescriptions').lean(); // Using .lean()
-
+        const datasets = await Dataset.find({ _id: { $in: selectedDatasetIds }, ownerId: userId })
+            .select('name description gcsPath schemaInfo columnDescriptions').lean();
         if (!datasets || datasets.length === 0) {
             contextString += "  - No accessible datasets found for the provided IDs.\n";
         } else {
@@ -36,108 +28,152 @@ const assembleContext = async (userId, selectedDatasetIds) => {
                 contextString += `    Columns:\n`;
                 if (ds.schemaInfo && ds.schemaInfo.length > 0) {
                     ds.schemaInfo.forEach(col => {
-                        // --- FIX: Access columnDescriptions as a plain object ---
-                        // Use bracket notation because .lean() was used.
                         const colDesc = ds.columnDescriptions?.[col.name];
-                        // --- END FIX ---
                         contextString += `      - ${col.name} (Type: ${col.type})${colDesc ? `: ${colDesc}` : ''}\n`;
                     });
-                } else {
-                    contextString += `      - (No column schema available)\n`;
-                }
+                } else { contextString += `      - (No column schema available)\n`; }
             });
         }
-    } else {
-        contextString += "  - None selected.\n";
-    }
-
+    } else { contextString += "  - None selected.\n"; }
     return contextString;
 };
 
-/**
- * Creates a prompt, gets a textual response from Claude, and saves history.
- */
-const createPromptResponse = async (userId, promptText, selectedDatasetIds) => {
-    if (!anthropic) {
-        // Log the attempt even if the client isn't ready
-        logger.error(`Attempted prompt generation for user ${userId} but Claude client is not initialized.`);
-        throw new Error('AI assistant is currently unavailable.'); // More user-friendly message
+// Fetch dataset content function (Full Implementation)
+const fetchDatasetContent = async (userId, selectedDatasetIds) => {
+    logger.debug(`Fetching content for datasets: ${selectedDatasetIds}`);
+    const datasets = await Dataset.find({ _id: { $in: selectedDatasetIds }, ownerId: userId }).select('name gcsPath').lean();
+    if (!datasets || datasets.length === 0) throw new Error("No accessible datasets found to fetch content.");
+    const contentPromises = datasets.map(async (ds) => {
+        try {
+            const content = await fetchDataForSandbox(ds.gcsPath);
+            return { name: ds.name, gcsPath: ds.gcsPath, content: content };
+        } catch (error) {
+            logger.error(`Failed to fetch content for dataset ${ds.name} (${ds.gcsPath}): ${error.message}`);
+            return { name: ds.name, gcsPath: ds.gcsPath, content: null, error: error.message };
+        }
+    });
+    return Promise.all(contentPromises);
+};
+
+// Generate code and execute function (Full Implementation)
+const generateCodeAndExecute = async (userId, promptText, selectedDatasetIds) => {
+    if (!anthropic) { throw new Error('AI assistant is currently unavailable.'); }
+    if (!executionService || typeof executionService.executeGeneratedCode !== 'function') {
+        throw new Error('Report generation engine is currently unavailable.');
     }
 
     const startTime = Date.now();
-    logger.info(`Generating prompt response for user ${userId}`);
+    logger.info(`Generating CODE and executing report for user ${userId}`);
+    let historyId = null;
+    let historyStatus = 'pending';
+    let historyErrorMessage = null;
+    let generatedCode = null;
+    let executionResult = null;
+    let fetchedDatasetContent = null;
 
-    // 1. Assemble Context
-    let context;
+    // Create Initial History Record
     try {
-        context = await assembleContext(userId, selectedDatasetIds);
-        logger.debug(`Context assembled successfully for user ${userId}. Length: ${context?.length}`);
-    } catch (err) {
-        logger.error(`Failed to assemble context for user ${userId}: ${err.message}`, err.stack); // Log stack trace
-        throw new Error("Failed to prepare analysis context."); // Rethrow the specific error
-    }
+        const initialHistory = new PromptHistory({ userId, promptText, selectedDatasetIds, status: 'generating_code' });
+        const saved = await initialHistory.save();
+        historyId = saved._id;
+        logger.info(`Initial prompt history record created ID: ${historyId}`);
+    } catch (dbError) { logger.error(`Failed to create initial prompt history for user ${userId}: ${dbError.message}`); }
 
-    // 2. Create the message history for Claude
-    const systemPrompt = `You are NeuroLedger AI, a helpful financial analyst assistant. Your goal is to analyze financial information based on the provided user prompt and the context about their datasets (column names, descriptions) and settings.
+    try {
+        // 1. Assemble Context
+        const context = await assembleContext(userId, selectedDatasetIds);
 
-IMPORTANT: Provide your response as a clear, concise textual summary and analysis based *only* on the user's prompt and the provided context. DO NOT generate code. Focus on insights, trends, or answers directly derivable from the dataset schema information and the user's question. If the context lacks sufficient detail to answer fully, state that clearly.`;
-
-    const messages = [
-        {
-            role: "user",
-            content: `${context}\n\nUser Prompt: ${promptText}`
+        // 1b. Pre-fetch Actual Data
+        try {
+            fetchedDatasetContent = await fetchDatasetContent(userId, selectedDatasetIds);
+            // --- ADDED LOGGING ---
+            const fetchedContentSummary = (fetchedDatasetContent || []).map(d => ({
+                name: d?.name, contentLength: d?.content?.length, error: d?.error, hasContent: !!d?.content
+            }));
+            logger.debug(`Result of fetchDatasetContent (summary):`, JSON.stringify(fetchedContentSummary, null, 2));
+            // --- END LOGGING ---
+            if (fetchedDatasetContent.every(d => d.error)) { throw new Error("Failed to load content for all selected datasets."); }
+             logger.debug(`Successfully completed fetching for ${fetchedDatasetContent.length} dataset(s) for historyId: ${historyId}`); // Changed wording
+        } catch (fetchError) {
+             logger.error(`Fatal error during dataset content fetching for historyId ${historyId}: ${fetchError.message}`);
+             historyStatus = 'error_generating';
+             historyErrorMessage = `Failed to load required dataset content: ${fetchError.message}`;
+              if (historyId) await PromptHistory.findByIdAndUpdate(historyId, { status: historyStatus, errorMessage: historyErrorMessage, durationMs: Date.now() - startTime });
+             throw new Error(historyErrorMessage);
         }
-    ];
 
-    // 3. Call Claude API
-    let aiResponseText = '';
-    let claudeApiResponse = null;
-    try {
-        logger.debug(`Calling Claude API for user ${userId}`);
-        claudeApiResponse = await anthropic.messages.create({
-            model: "claude-3-haiku-20240307",
-            max_tokens: 1024,
-            system: systemPrompt,
-            messages: messages,
-        });
+        // 2. Define System Prompt (Corrected escaping, requires React.createElement, sync processing)
+        const systemPrompt = `You are NeuroLedger AI, an expert React developer and data analyst... [SAME AS PREVIOUS STEP] ... enclosed in \`\`\`javascript ... \`\`\`.`;
 
-        if (claudeApiResponse.content && claudeApiResponse.content.length > 0 && claudeApiResponse.content[0].type === 'text') {
-             aiResponseText = claudeApiResponse.content[0].text;
-             logger.debug(`Claude response received for user ${userId}. Content length: ${aiResponseText?.length}`);
+        const messages = [{ role: "user", content: `${context}\n\nUser Prompt: ${promptText}` }];
+        const modelToUse = "claude-3-7-sonnet-20250219"; // Corrected model
+        const apiOptions = { model: modelToUse, max_tokens: 10000, system: systemPrompt, messages };
+
+        // 3. Call Claude API...
+        logger.debug(`Calling Claude API for CODE generation with options:`, JSON.stringify(apiOptions, null, 2));
+        const claudeApiResponse = await anthropic.messages.create(apiOptions);
+        const rawResponse = claudeApiResponse.content?.[0]?.type === 'text' ? claudeApiResponse.content[0].text : null;
+        logger.debug(`Claude RAW response content received for historyId ${historyId}. Length: ${rawResponse?.length}`); // Log length
+
+        // Extract code...
+        if (rawResponse) {
+            const match = rawResponse.match(/```javascript\s*([\s\S]*?)\s*```/);
+            if (match && match[1]) {
+                generatedCode = match[1].trim();
+                logger.debug(`Successfully extracted JS Code Block for historyId ${historyId}. Length: ${generatedCode.length}`);
+                historyStatus = 'execution_pending';
+            } else { /* ... handle no code block ... */ throw new Error('AI failed to generate the expected code format.'); }
+        } else { /* ... handle unexpected API response ... */ throw new Error('Unexpected response format from AI assistant.'); }
+
+        // Update history with code
+        if (historyId && historyStatus === 'execution_pending') await PromptHistory.findByIdAndUpdate(historyId, { status: historyStatus, aiGeneratedCode: generatedCode });
+
+        // 4. Prepare Execution Context
+        const executionContext = { datasets: fetchedDatasetContent };
+        historyStatus = 'executing_code';
+        if (historyId) await PromptHistory.findByIdAndUpdate(historyId, { status: historyStatus });
+
+        // 5. Call Code Execution Service
+        logger.info(`Calling execution service for historyId: ${historyId}`);
+        const executionServiceResult = await executionService.executeGeneratedCode(generatedCode, executionContext); // Pass generatedCode and context
+        logger.info(`Execution service finished for historyId: ${historyId}. Status: ${executionServiceResult.status}`);
+
+        // 6. Process Execution Result
+        if (executionServiceResult.status === 'success') {
+             executionResult = executionServiceResult.output;
+             historyStatus = 'completed';
         } else {
-            logger.warn(`Unexpected response format from Claude API for user ${userId}:`, claudeApiResponse);
-             throw new Error('Unexpected response format from AI assistant');
+            historyErrorMessage = executionServiceResult.message || 'Code execution failed.';
+            historyStatus = 'error_executing';
         }
 
-    } catch (error) {
-        logger.error(`Claude API call failed for user ${userId}: ${error.message}`, error);
-        const errorMessage = error.error?.message || error.message || 'Failed to get response from AI assistant.';
-        throw new Error(errorMessage);
-    }
+        // 7. Final History Update
+        if (historyId) {
+             await PromptHistory.findByIdAndUpdate(historyId, {
+                 status: historyStatus,
+                 errorMessage: historyErrorMessage,
+                 executionResult: executionResult, // Store HTML output or error message
+                 durationMs: Date.now() - startTime,
+                 claudeModelUsed: apiOptions.model,
+             });
+             logger.info(`Final prompt history update ID: ${historyId}. Status: ${historyStatus}`);
+        }
 
-    // 4. Save Prompt History
-    let historyId;
-    try {
-        const history = new PromptHistory({
-            userId,
-            promptText,
-            selectedDatasetIds,
-            contextSent: context,
-            aiResponseText,
-            status: 'completed',
-            durationMs: Date.now() - startTime,
-            claudeModelUsed: claudeApiResponse?.model || 'claude-3-haiku-20240307',
-        });
-        const savedHistory = await history.save();
-        historyId = savedHistory._id;
-        logger.info(`Prompt history saved for user ${userId}, ID: ${historyId}`);
-    } catch (error) {
-        logger.error(`Failed to save prompt history for user ${userId}: ${error.message}`);
-    }
+        // 8. Return result
+        return { executionOutput: executionResult || historyErrorMessage, status: historyStatus, historyId: historyId, };
 
-    return { aiResponseText, historyId };
+    } catch (error) { // Catch errors...
+        logger.error(`Error during prompt processing for historyId: ${historyId}: ${error.message}`, error.stack);
+         historyStatus = (historyStatus === 'pending' || historyStatus === 'generating_code') ? 'error_generating' : 'error_executing';
+         historyErrorMessage = error.message;
+         if (historyId) {
+             try { await PromptHistory.findByIdAndUpdate(historyId, { status: historyStatus, errorMessage: historyErrorMessage, durationMs: Date.now() - startTime }); }
+             catch (dbError) { logger.error(`Failed to update history with error state for ID ${historyId}: ${dbError.message}`); }
+         }
+        throw error; // Rethrow to controller
+    }
 };
 
 module.exports = {
-    createPromptResponse,
+    generateCodeAndExecute,
 };

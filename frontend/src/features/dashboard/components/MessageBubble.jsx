@@ -1,69 +1,97 @@
 // frontend/src/features/dashboard/components/MessageBubble.jsx
-// ** NEW FILE **
+// ** UPDATED FILE - Render 'View Report' button, handle simple text/errors **
 import React from 'react';
-import { UserIcon, CpuChipIcon } from '@heroicons/react/24/solid'; // Solid icons for bubbles
-import Spinner from '../../../shared/ui/Spinner'; // Import Spinner
+import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid';
+import Spinner from '../../../shared/ui/Spinner';
+import Button from '../../../shared/ui/Button'; // Import Button
+// DynamicRenderer is NO LONGER rendered here
 
-const MessageBubble = ({ message }) => {
+const MessageBubble = ({ message, onViewReport }) => { // Added onViewReport prop
     const isUser = message.type === 'user';
-    const isError = message.isError; // Check for error flag
-    const isLoading = message.isLoading; // Check for loading flag
+    const isError = message.isError || message.contentType === 'error';
+    const isLoading = message.isLoading;
+    const isReportAvailable = message.contentType === 'report_available' && message.reportHtml; // Check for new type and HTML
 
-    // Base styles common to both types
+    // --- Styles ---
     const bubbleBaseStyle = `max-w-[80%] lg:max-w-[70%] rounded-xl px-4 py-2.5 text-sm shadow-sm`;
-
-    // Styles specific to user vs AI
     const bubbleAlignment = isUser ? 'ml-auto' : 'mr-auto';
     const bubbleColor = isUser
         ? 'bg-blue-600 text-white'
         : isError
-            ? 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-700/50' // Error specific style
-            : 'bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100';
+            ? 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-700/50'
+            : isReportAvailable // Style for the message *containing* the report button
+                ? 'bg-gray-100 dark:bg-gray-700/80 text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-600/50'
+                : 'bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100'; // Default AI text bubble
 
-     // Icon specific styles
-     const iconBaseStyle = `h-6 w-6 rounded-full p-1 flex-shrink-0`;
-     const userIconColor = `bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300`;
-     const aiIconColor = `bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300`;
+    const iconBaseStyle = `h-6 w-6 rounded-full p-1 flex-shrink-0 self-start`; // Added self-start
+    const userIconColor = `bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300`;
+    const aiIconColor = isError
+        ? `bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300`
+        : `bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300`;
+
+    // --- Content Rendering Logic ---
+    const renderContent = () => {
+        if (isLoading) {
+            return (
+                <div className="flex items-center gap-x-2 py-1">
+                   <Spinner size="sm" color={isUser ? "text-white" : "text-gray-500"} />
+                   <span className="italic text-gray-500 dark:text-gray-400">{message.content || "Processing..."}</span>
+                </div>
+            );
+        }
+
+        // --- Handle Report Available state ---
+        if (isReportAvailable) {
+            return (
+                <div className="space-y-2">
+                    <p>{message.content || "Report generated."}</p>
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => onViewReport(message.reportHtml)} // Call handler with the HTML
+                        leftIcon={DocumentChartBarIcon}
+                    >
+                        View Report
+                    </Button>
+                </div>
+            );
+        }
+
+        // --- Handle Plain Text (User, Simple AI, Error) ---
+        if (typeof message.content === 'string') {
+             // Replace newline characters with <br /> for display
+             return message.content.split('\n').map((line, index, arr) => (
+                <React.Fragment key={index}>
+                    {line || (index > 0 && index < arr.length -1 ? '\u00A0' : '')}
+                    {index < arr.length - 1 && <br />}
+                </React.Fragment>
+            ));
+        }
+
+        // Fallback for unexpected content
+        return <span className="italic text-gray-400">Unsupported message format</span>;
+    };
 
     return (
         <div className={`flex items-start gap-x-3 ${isUser ? 'justify-end' : ''}`}>
-            {/* Icon */}
+            {/* AI/Error Icon */}
             {!isUser && (
                  <div className={`${iconBaseStyle} ${aiIconColor}`}>
-                     <CpuChipIcon className="h-full w-full" />
+                     {isError ? <ExclamationCircleIcon className="h-full w-full" /> : <CpuChipIcon className="h-full w-full" />}
                  </div>
             )}
 
             {/* Bubble Content */}
             <div className={`${bubbleBaseStyle} ${bubbleAlignment} ${bubbleColor}`}>
-                {isLoading ? (
-                     <div className="flex items-center justify-center h-5">
-                        <Spinner size="sm" color={isUser ? "text-white" : "text-gray-500"} />
-                     </div>
-                 ) : typeof message.content === 'string' && message.content.trim() === '' && !isLoading ? (
-                     <span className="italic text-gray-400">Empty response</span>
-                 ) : typeof message.content === 'string' ? (
-                     // Render simple text, potentially handle markdown later
-                      // Replace newline characters with <br /> for display
-                      message.content.split('\n').map((line, index, arr) => (
-                        <React.Fragment key={index}>
-                            {line}
-                            {index < arr.length - 1 && <br />}
-                        </React.Fragment>
-                    ))
-                 ) : (
-                     // Placeholder for structured content/artefacts later
-                     <span className="italic">Unsupported message content</span>
-                 )}
+                {renderContent()}
             </div>
 
-             {/* Icon */}
+             {/* User Icon */}
              {isUser && (
                   <div className={`${iconBaseStyle} ${userIconColor}`}>
                       <UserIcon className="h-full w-full" />
                   </div>
              )}
-
         </div>
     );
 };

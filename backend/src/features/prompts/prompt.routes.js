@@ -1,5 +1,5 @@
 // backend/src/features/prompts/prompt.routes.js
-// ** NEW FILE **
+// ** UPDATED FILE - Point to new controller method **
 const express = require('express');
 const promptController = require('./prompt.controller');
 const { protect } = require('../../shared/middleware/auth.middleware');
@@ -7,11 +7,10 @@ const { requireActiveSubscription } = require('../../shared/middleware/subscript
 
 const router = express.Router();
 
-// ALL prompt routes require login AND an active subscription
 router.use(protect);
 router.use(requireActiveSubscription);
 
-// POST /api/v1/prompts (Generate textual analysis)
-router.post('/', promptController.generateTextResponse);
+// POST /api/v1/prompts (Generate React code and execute it)
+router.post('/', promptController.generateAndExecuteReport); // Use the updated controller method
 
 module.exports = router;

@@ -1,43 +1,46 @@
 // backend/src/features/prompts/prompt.controller.js
-// ** NEW FILE **
+// ** UPDATED FILE - Renamed handler for clarity **
 const promptService = require('./prompt.service');
 const logger = require('../../shared/utils/logger');
 
-const generateTextResponse = async (req, res, next) => {
+// Renamed to reflect the new core purpose
+const generateAndExecuteReport = async (req, res, next) => {
     const { promptText, selectedDatasetIds } = req.body;
     const userId = req.user?._id;
 
+    // Basic validation remains the same
     if (!userId) {
-        // Should be caught by 'protect' middleware, but safeguard
         return res.status(401).json({ status: 'error', message: 'User not authenticated.' });
     }
-
     if (!promptText || typeof promptText !== 'string' || promptText.trim() === '') {
         return res.status(400).json({ status: 'error', message: 'promptText is required.' });
     }
-
     if (!selectedDatasetIds || !Array.isArray(selectedDatasetIds) || selectedDatasetIds.length === 0) {
-        // For Phase 4, let's require at least one dataset selection for context
         return res.status(400).json({ status: 'error', message: 'At least one dataset must be selected.' });
     }
 
     try {
-        const result = await promptService.createPromptResponse(userId, promptText, selectedDatasetIds);
+        // Call the updated service function which now handles code gen + execution
+        const result = await promptService.generateCodeAndExecute(userId, promptText, selectedDatasetIds);
 
         res.status(200).json({
             status: 'success',
             data: {
-                aiResponse: result.aiResponseText,
-                promptId: result.historyId, // ID of the saved history record
+                // Send back the result from the execution service
+                executionOutput: result.executionOutput, // e.g., HTML string or error message
+                executionStatus: result.status, // 'completed' or 'error_executing'
+                promptId: result.historyId,
             }
         });
     } catch (error) {
-        logger.error(`Error in generateTextResponse for user ${userId}: ${error.message}`);
-        // Pass error to the global handler
+        // Log errors from the service layer (e.g., context assembly, Claude call)
+        logger.error(`Error in generateAndExecuteReport for user ${userId}: ${error.message}`);
+        // Pass error to the global handler (might send 500 or a specific error if handled)
         next(error);
     }
 };
 
 module.exports = {
-    generateTextResponse,
+    // Export the renamed handler
+    generateAndExecuteReport,
 };

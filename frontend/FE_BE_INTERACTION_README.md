@@ -1,36 +1,24 @@
 # FE_BE_INTERACTION_README.md
-# ** UPDATED FILE - Add Prompts Endpoint **
+# ** UPDATED FILE - Update Prompts Endpoint Response **
 
 # NeuroLedger: Frontend / Backend API Interaction
 
 This document defines the contract for communication between the NeuroLedger frontend (React) and backend (Node.js/Express) services.
 
-**Last Updated:** [Date - After Phase 4 Implementation]
+**Last Updated:** [Date - After Phase 5 Implementation]
 
 ## 1. Base API URL
 
-All backend API routes are prefixed with:
-
-`/api/v1`
-
-The full base URL depends on the environment (development, production).
-*   **Development (Default):** `http://localhost:5001/api/v1` (Configured in `frontend/.env` via `VITE_API_BASE_URL`)
+`/api/v1` (Default Dev: `http://localhost:5001/api/v1`)
 
 ## 2. Authentication
 
-*   **Method:** JSON Web Tokens (JWT) issued by Firebase Authentication. The frontend obtains an ID token from Firebase upon user login/signup.
-*   **Header:** For all **protected** backend endpoints, the frontend **must** include the Firebase ID token in the `Authorization` header:
-    ```
-    Authorization: Bearer <Firebase ID Token>
-    ```
-*   **Implementation:** Frontend (`apiClient.js` interceptor), Backend (`protect` middleware).
-*   **Session Initialization:** `POST /api/v1/auth/session` verifies token, gets/creates application user.
+`Authorization: Bearer <Firebase ID Token>` on protected routes. Verified by `protect` middleware. Session init via `POST /auth/session`.
 
 ## 3. Standard Responses
 
-*   **Success (Typically 200 OK, 201 Created):** `{ "status": "success", "data": <Payload> | null }`
-*   **Client Error (Typically 4xx):** `{ "status": "error", "message": string, "code"?: string, "details"?: any }`
-*   **Server Error (Typically 500):** `{ "status": "error", "message": "Internal error message." }`
+*   **Success:** `{ "status": "success", "data": <Payload> | null }`
+*   **Error:** `{ "status": "error", "message": string, "code"?: string, "details"?: any }`
 
 ## 4. Endpoint Specifications
 
@@ -39,73 +27,76 @@ The full base URL depends on the environment (development, production).
 ### Feature: Authentication
 
 *   **`POST /api/v1/auth/session`**
-    *   **Description:** Verifies Firebase token, gets/creates application user.
-    *   **Auth:** Implicit (Token provided).
-    *   **Request:** Headers: `Authorization: Bearer <Token>`. Body: None.
+    *   Verifies token, gets/creates user.
     *   **Success (200):** `{ status: 'success', data: User }`
-    *   **Errors:** `401`, `500`.
 
 ---
 
-### Feature: Subscriptions (Phase 2 - Dummy)
+### Feature: Subscriptions (Dummy)
 
 *   **`GET /api/v1/subscriptions/status`**
-    *   **Description:** Gets current subscription status, checks trial expiry.
-    *   **Auth:** Required (Login).
+    *   Gets current status, checks trial expiry.
+    *   **Auth:** Required.
     *   **Success (200):** `{ status: 'success', data: SubscriptionInfo }`
-    *   **Errors:** `401`, `500`.
 *   **`POST /api/v1/subscriptions/select`**
-    *   **Description:** Selects a dummy plan for the user.
-    *   **Auth:** Required (Login).
-    *   **Request Body:** `{ "planId": string }`
-    *   **Success (200):** `{ status: 'success', data: User }` (Returns full updated user object).
-    *   **Errors:** `400`, `401`, `500`.
+    *   Selects dummy plan.
+    *   **Auth:** Required.
+    *   **Request:** `{ "planId": string }`
+    *   **Success (200):** `{ status: 'success', data: User }`
 
 ---
 
-### Feature: Datasets (Phase 3 MVP)
+### Feature: Datasets
 
 *   **`GET /api/v1/datasets/upload-url`**
-    *   **Description:** Generates v4 signed URL for GCS upload (requires `fileSize`).
-    *   **Auth:** Required (Login + Active Subscription).
-    *   **Query Params:** `filename` (req), `fileSize` (req).
-    *   **Success (200):** `{ status: 'success', data: { signedUrl: string, gcsPath: string } }`
-    *   **Errors:** `400`, `401`, `403`, `500`.
+    *   Generates GCS signed URL for PUT upload.
+    *   **Auth:** Required (Login + Sub).
+    *   **Query:** `filename` (req), `fileSize` (req).
+    *   **Success (200):** `{ data: { signedUrl, gcsPath } }`
 *   **`POST /api/v1/datasets`**
-    *   **Description:** Creates dataset metadata in DB after GCS upload. Parses headers.
-    *   **Auth:** Required (Login + Active Subscription).
-    *   **Request Body:** `{ "gcsPath": string, "originalFilename": string, "name"?: string, "fileSizeBytes"?: number }`
-    *   **Success (201):** `{ status: 'success', data: Dataset }`
-    *   **Errors:** `400`, `401`, `403`, `500`.
+    *   Creates dataset metadata after GCS upload.
+    *   **Auth:** Required (Login + Sub).
+    *   **Request:** `{ gcsPath, originalFilename, name?, fileSizeBytes? }`
+    *   **Success (201):** `{ data: Dataset }`
 *   **`GET /api/v1/datasets`**
-    *   **Description:** Lists datasets owned by the user.
-    *   **Auth:** Required (Login + Active Subscription).
-    *   **Success (200):** `{ status: 'success', data: Dataset[] }`
-    *   **Errors:** `401`, `403`, `500`.
+    *   Lists user's datasets.
+    *   **Auth:** Required (Login + Sub).
+    *   **Success (200):** `{ data: Dataset[] }`
 
 ---
 
-### Feature: Prompts (Phase 4 - Textual Analysis)
+### Feature: Prompts (Phase 5 - Code Gen & Execution)
 
 *   **`POST /api/v1/prompts`**
-    *   **Description:** Takes a user prompt and selected dataset IDs, generates a textual analysis using Claude, saves the interaction, and returns the AI response.
+    *   **Description:** Takes prompt/datasets, triggers AI code gen, executes code securely on backend, returns rendered output or error.
     *   **Auth:** Required (Login + Active Subscription).
     *   **Request Body:** `{ "promptText": string, "selectedDatasetIds": string[] }`
-    *   **Success Response (200):** `{ status: 'success', data: { aiResponse: string, promptId: string } }`
-    *   **Error Responses:** `400` (Bad Request - missing fields, no datasets selected), `401` (Unauthorized), `403` (Subscription Inactive), `500` (e.g., Claude API error, DB error).
+    *   **Success Response (200):**
+        ```json
+        {
+          "status": "success",
+          "data": {
+            "executionOutput": "<string>", // Rendered HTML string OR error message string
+            "executionStatus": "completed" | "error_executing" | "error_generating", // Status from backend execution/generation
+            "promptId": "<string>" // MongoDB ObjectId of the PromptHistory record
+          }
+        }
+        ```
+    *   **Error Responses:** `400`, `401`, `403`, `500` (e.g., Claude API error, Context error, Uncaught execution error).
 
 ---
-
-*(Add specifications for endpoints from future phases here)*
 
 ## 5. Key Data Models (Exchanged Objects)
 
-*(User, SubscriptionInfo, Dataset models remain the same as previously defined)*
+*(User, SubscriptionInfo, Dataset models remain the same)*
 
-### Prompt Response Data (POST /prompts - Phase 4)
+### Prompt Execution Response Data (POST /prompts - Phase 5)
 
 ```typescript
-interface PromptResponseData {
-    aiResponse: string; // The textual analysis from Claude
-    promptId: string;   // The MongoDB ObjectId (as string) of the saved PromptHistory record
+interface PromptExecutionResponseData {
+    executionOutput: string; // Can be HTML string on success, or error message string on failure.
+    executionStatus: 'completed' | 'error_executing' | 'error_generating';
+    promptId: string;        // The MongoDB ObjectId (as string) of the saved PromptHistory record
 }
+
+```

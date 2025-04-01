@@ -29,5 +29,6 @@ export default {
   },
   plugins: [
      require('@tailwindcss/forms'), // Add official forms plugin for better default input styles
+     require('@tailwindcss/typography'), // Add official forms plugin for better default input styles
   ],
 }
