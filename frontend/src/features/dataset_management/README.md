@@ -1,9 +1,9 @@
 # frontend/src/features/dataset_management/README.md
-# ** UPDATED FILE **
+# ** UPDATED FILE - Mention usage in Dashboard **
 
 ## Feature: Frontend Dataset Management
 
-This feature slice provides the UI and logic for managing datasets within the NeuroLedger application, starting with uploading and listing in Phase 3. It resides within the "Account" section.
+This feature slice provides the UI and logic for managing datasets within the NeuroLedger application, starting with uploading and listing in Phase 3. It resides within the "Account" section and its data hook (`useDatasets`) is also used by the Dashboard feature.
 
 ### Core Flow (Phase 3 MVP)
 
@@ -22,18 +22,8 @@ This feature slice provides the UI and logic for managing datasets within the Ne
     *   Displays datasets in a table.
     *   Includes a "Refresh List" button.
 5.  **Hooks (`hooks/`):**
-    *   **`useDatasetUpload.js`:**
-        *   Provides `uploadFile` function.
-        *   Handles the multi-step upload:
-            1.  Calls backend `GET /api/v1/datasets/upload-url`, **passing both `filename` and `fileSize` as query parameters.**
-            2.  Performs `PUT` request to the GCS signed URL using `axios`, tracking progress. (`Content-Length` is added automatically by Axios and now matches the signed URL constraints).
-            3.  Calls backend `POST /api/v1/datasets` to create metadata after successful GCS upload.
-        *   Manages `isUploading`, `uploadProgress`, `uploadError` states.
-        *   Accepts `onUploadSuccess` callback.
-    *   **`useDatasets.js`:**
-        *   Fetches dataset list from `GET /api/v1/datasets`.
-        *   Manages `datasets`, `isLoading`, `error` states.
-        *   Provides `refetch` function.
+    *   **`useDatasetUpload.js`:** Handles the 3-step GCS upload and backend metadata creation.
+    *   **`useDatasets.js`:** Fetches dataset list (`GET /api/v1/datasets`), manages state (`datasets`, `isLoading`, `error`), provides `refetch`. **This hook is now also consumed by `features/dashboard/components/PromptInput.jsx` to populate the dataset selection list.**
 
 ### Files
 
@@ -56,4 +46,4 @@ This feature slice provides the UI and logic for managing datasets within the Ne
 
 *   Local state in `DatasetUpload` for `file`.
 *   State managed by `useDatasetUpload` hook.
-*   State managed by `useDatasets` hook.
+*   State managed by `useDatasets` hook (used in this feature and Dashboard).

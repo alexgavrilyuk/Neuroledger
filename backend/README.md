@@ -1,4 +1,5 @@
 # backend/README.md
+# ** UPDATED FILE - Mention Phase 4 **
 
 # NeuroLedger Backend
 
@@ -7,12 +8,12 @@ This directory contains the Node.js/Express backend service for the NeuroLedger 
 ## Project Structure
 
 *   **`src/`**: Contains all the source code for the application.
-    *   **`features/`**: Houses self-contained feature slices (e.g., `auth`, `users`, `datasets`). Each feature should ideally contain its own models, services, controllers, and routes.
+    *   **`features/`**: Houses self-contained feature slices (e.g., `auth`, `users`, `datasets`, `subscriptions`, `prompts`). Each feature should ideally contain its own models, services, controllers, and routes.
     *   **`shared/`**: Contains code shared across multiple features or core application setup.
         *   `config/`: Application configuration loading and validation.
         *   `db/`: Database connection setup (MongoDB/Mongoose).
-        *   `external_apis/`: Clients for interacting with third-party services (Firebase Admin).
-        *   `middleware/`: Reusable Express middleware (authentication, error handling).
+        *   `external_apis/`: Clients for interacting with third-party services (Firebase Admin, GCS, Claude).
+        *   `middleware/`: Reusable Express middleware (authentication, error handling, subscription guard).
         *   `utils/`: General utility functions (logging).
     *   `app.js`: Configures the main Express application instance (middleware, mounting routes).
     *   `routes.js`: The main API router that mounts feature-specific routers under `/api/v1`.
@@ -20,27 +21,28 @@ This directory contains the Node.js/Express backend service for the NeuroLedger 
 *   **`.env`**: (Untracked) Holds environment-specific variables (API keys, DB URIs).
 *   **`.env.example`**: Template for required environment variables.
 *   **`package.json`**: Project dependencies and scripts.
-*   **`firebase-service-account.json`**: (Untracked) Service account key for Firebase Admin SDK. **Ensure this file exists in this directory for Phase 1.**
+*   **`firebase-service-account.json`**: (Untracked) Service account key for Firebase Admin SDK.
+*   **`gcs-service-account.json`**: (Untracked) Service account key for Google Cloud Storage.
 
-## Phase 1 Features Implemented
+## Phases Implemented
 
-*   **Core Server Setup:** Express server initialization, CORS, JSON parsing, basic request logging.
-*   **Configuration:** Loading environment variables (`dotenv`).
-*   **Database:** MongoDB connection using Mongoose.
-*   **Authentication (`features/auth`):** Endpoint (`POST /api/v1/auth/session`) to verify Firebase ID tokens, find or create users in the database, and establish a user session context.
-*   **User Model (`features/users`):** Basic Mongoose schema for users, linking Firebase UID to application user data.
-*   **Shared Middleware:** Authentication middleware (`protect`) to verify tokens on protected routes. Global error handler.
-*   **Firebase Integration:** Initialization of Firebase Admin SDK using a service account key.
+*   **Phase 1:** Core Server Setup, Config, DB, Auth (Token Verification, User Get/Create), Shared Middleware (Protect, Error Handling), Firebase Admin Init.
+*   **Phase 2:** Dummy Subscription Logic (Select Plan, Status Check), Subscription Guard Middleware, User Model Updates, Onboarding Status Flag.
+*   **Phase 3:** Dataset Management MVP (GCS Client, Signed URL Upload, Metadata Creation w/ Header Parsing, List Datasets), Dataset Model, Routes protected by Auth+Subscription guards.
+*   **Phase 4:** Core Prompting & AI Interaction (Textual Analysis): Claude Client, Prompt History Model, Prompt Service (Context Assembly, Basic Claude Text Request), Prompt Controller/Routes (protected).
 
 ## Getting Started
 
 1.  Ensure you have Node.js and npm/yarn installed.
 2.  Ensure you have MongoDB running (locally or use Atlas) and obtain the connection string.
-3.  Create a Firebase project, enable Authentication (Email/Password), and download the service account key JSON file. Rename it to `firebase-service-account.json` and place it in this `backend/` directory.
-4.  Create a `.env` file in this directory, using `.env.example` as a template. Populate `PORT`, `MONGODB_URI`, and `FIREBASE_PROJECT_ID`.
-5.  Install dependencies: `npm install`
-6.  Run the development server: `npm run dev` (uses Nodemon for auto-restarts)
-7.  The server should start, connect to MongoDB, initialize Firebase Admin, and be accessible (default: `http://localhost:5001`).
+3.  Create a Firebase project, enable Authentication (Email/Password), and download the service account key JSON file (`firebase-service-account.json`).
+4.  Create a Google Cloud Project, enable Cloud Storage, create a bucket, create a service account with storage permissions, and download its key JSON file (`gcs-service-account.json`).
+5.  Obtain an API key from Anthropic for Claude API access.
+6.  Place `firebase-service-account.json` and `gcs-service-account.json` in this `backend/` directory.
+7.  Create a `.env` file in this directory, using `.env.example` as a template. Populate `PORT`, `MONGODB_URI`, `FIREBASE_PROJECT_ID`, `GCS_BUCKET_NAME`, and `CLAUDE_API_KEY`.
+8.  Install dependencies: `npm install`
+9.  Run the development server: `npm run dev` (uses Nodemon for auto-restarts)
+10. The server should start, connect to MongoDB, initialize Firebase Admin, GCS, and Claude clients, and be accessible (default: `http://localhost:5001`).
 
 ## API Interaction
 

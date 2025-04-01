@@ -1,37 +1,79 @@
 // frontend/src/features/dashboard/pages/DashboardPage.jsx
-// ** UPDATED FILE - Slightly better structure **
-import React from 'react';
-import { useAuth } from '../../../shared/hooks/useAuth';
-import Card from '../../../shared/ui/Card';
+// ** UPDATED FILE - Pass setMessages to usePromptSubmit **
+import React, { useState, useRef, useEffect } from 'react';
+import ChatInterface from '../components/ChatInterface';
+import PromptInput from '../components/PromptInput';
+import { useChatHistory } from '../hooks/useChatHistory';
+import { usePromptSubmit } from '../hooks/usePromptSubmit';
+import { useDatasets } from '../../dataset_management/hooks/useDatasets';
 
 const DashboardPage = () => {
-    const { user } = useAuth();
+    // --- FIX: Get setMessages from useChatHistory ---
+    const { messages, addMessage, setMessages } = useChatHistory();
+    const { datasets, isLoading: datasetsLoading, error: datasetsError } = useDatasets();
+    // --- FIX: Pass setMessages to usePromptSubmit ---
+    const { submitPrompt, isLoading: promptLoading, error: promptError } = usePromptSubmit(addMessage, setMessages);
+    const [selectedDatasetIds, setSelectedDatasetIds] = useState([]);
+
+    const handlePromptSubmit = (promptText) => {
+        if (!promptText.trim()) return;
+        if (selectedDatasetIds.length === 0) {
+             addMessage({ type: 'system', content: 'Please select at least one dataset before sending your prompt.' });
+             return;
+        }
+        addMessage({ type: 'user', content: promptText });
+        submitPrompt(promptText, selectedDatasetIds);
+    };
+
+    const chatEndRef = useRef(null);
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [messages]);
 
     return (
-        <div className="space-y-6">
-            {/* Page Header */}
-             <div className="flex items-center justify-between">
-                <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">
-                    Dashboard
-                </h1>
-                {/* Add actions here later if needed */}
+        // --- Optional: Slightly adjusted height calculation for better fit ---
+        <div className="flex flex-col h-[calc(100vh-4rem-2rem)] sm:h-[calc(100vh-4rem-3rem)] lg:h-[calc(100vh-4rem-4rem)]"> {/* vh - header - page padding (adjust p values if needed) */}
+            <div className="flex-grow overflow-y-auto mb-4 pr-2 custom-scrollbar"> {/* Add custom scrollbar class if desired */}
+                <ChatInterface messages={messages} isLoading={promptLoading && messages[messages.length - 1]?.isLoading !== true} />
+                 <div ref={chatEndRef} />
             </div>
 
-            {/* Main Content Area */}
-            <Card>
-                <Card.Body>
-                    <h2 className="text-lg font-medium text-gray-800 dark:text-gray-200">Welcome back, {user?.name || user?.email}!</h2>
-                    <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-                        This is the main application area. The chat interface and prompt input will go here in later phases.
-                    </p>
-                    {/* Future components will replace this */}
-                </Card.Body>
-            </Card>
+             {promptError && (
+                 <div className="mb-2 p-3 bg-red-100 dark:bg-red-900/30 border border-red-300 dark:border-red-600/50 rounded-md text-sm text-red-700 dark:text-red-300 flex-shrink-0"> {/* Added flex-shrink-0 */}
+                     Error: {promptError}
+                 </div>
+             )}
 
-            {/* Add more sections/cards as needed */}
-
+            <div className="flex-shrink-0 pb-0"> {/* Removed bottom padding from here */}
+                <PromptInput
+                    onSubmit={handlePromptSubmit}
+                    isLoading={promptLoading}
+                    datasets={datasets}
+                    datasetsLoading={datasetsLoading}
+                    selectedDatasetIds={selectedDatasetIds}
+                    setSelectedDatasetIds={setSelectedDatasetIds}
+                />
+            </div>
         </div>
     );
 };
+
+// Optional: Add custom scrollbar styles in index.css if desired
+/*
+Example in index.css:
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgba(156, 163, 175, 0.5); // gray-400 with opacity
+  border-radius: 3px;
+}
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgba(107, 114, 128, 0.5); // gray-500 with opacity
+}
+*/
 
 export default DashboardPage;
