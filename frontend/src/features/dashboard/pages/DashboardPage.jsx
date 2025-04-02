@@ -1,5 +1,5 @@
 // frontend/src/features/dashboard/pages/DashboardPage.jsx
-// FIXED VERSION - Properly passes datasets to usePromptSubmit
+// UPDATED - Dynamic data handling
 
 import React, { useState, useRef, useEffect } from 'react';
 import ChatInterface from '../components/ChatInterface';

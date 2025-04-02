@@ -1,16 +1,16 @@
 // frontend/src/features/dashboard/components/MessageBubble.jsx
-// ** UPDATED FILE - Render 'View Report' button, handle simple text/errors **
+// UPDATED VERSION - Properly handles report display
+
 import React from 'react';
 import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid';
 import Spinner from '../../../shared/ui/Spinner';
-import Button from '../../../shared/ui/Button'; // Import Button
-// DynamicRenderer is NO LONGER rendered here
+import Button from '../../../shared/ui/Button';
 
-const MessageBubble = ({ message, onViewReport }) => { // Added onViewReport prop
+const MessageBubble = ({ message, onViewReport }) => {
     const isUser = message.type === 'user';
     const isError = message.isError || message.contentType === 'error';
     const isLoading = message.isLoading;
-    const isReportAvailable = message.contentType === 'report_available' && message.reportHtml; // Check for new type and HTML
+    const isReportAvailable = message.contentType === 'report_available' && message.reportHtml;
 
     // --- Styles ---
     const bubbleBaseStyle = `max-w-[80%] lg:max-w-[70%] rounded-xl px-4 py-2.5 text-sm shadow-sm`;
@@ -19,11 +19,11 @@ const MessageBubble = ({ message, onViewReport }) => { // Added onViewReport pro
         ? 'bg-blue-600 text-white'
         : isError
             ? 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-700/50'
-            : isReportAvailable // Style for the message *containing* the report button
+            : isReportAvailable
                 ? 'bg-gray-100 dark:bg-gray-700/80 text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-600/50'
-                : 'bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100'; // Default AI text bubble
+                : 'bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100';
 
-    const iconBaseStyle = `h-6 w-6 rounded-full p-1 flex-shrink-0 self-start`; // Added self-start
+    const iconBaseStyle = `h-6 w-6 rounded-full p-1 flex-shrink-0 self-start`;
     const userIconColor = `bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300`;
     const aiIconColor = isError
         ? `bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300`
@@ -48,7 +48,7 @@ const MessageBubble = ({ message, onViewReport }) => { // Added onViewReport pro
                     <Button
                         variant="secondary"
                         size="sm"
-                        onClick={() => onViewReport(message.reportHtml)} // Call handler with the HTML
+                        onClick={() => onViewReport(message.reportHtml)} // Pass only the HTML
                         leftIcon={DocumentChartBarIcon}
                     >
                         View Report

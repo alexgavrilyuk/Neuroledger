@@ -35,7 +35,7 @@ const assembleContext = async (userId, selectedDatasetIds) => {
     return contextString;
 };
 
-// Generate code function (Improved)
+// Generate code function (Improved with better SVG support)
 const generateCode = async (userId, promptText, selectedDatasetIds) => {
     if (!anthropic) {
         logger.error("generateCode called but Anthropic client is not initialized.");
@@ -66,12 +66,12 @@ const generateCode = async (userId, promptText, selectedDatasetIds) => {
         contextUsed = await assembleContext(userId, selectedDatasetIds);
         logger.debug(`Context assembled successfully for historyId: ${historyId}. Length: ${contextUsed.length}`);
 
-        // IMPROVED: System prompt with PROPERLY ESCAPED backticks
+        // IMPROVED: System prompt with better SVG support and inline chart examples
         const systemPrompt = `You are NeuroLedger AI, an expert React developer and data analyst. Generate a single React functional component named 'ReportComponent' that will analyze and visualize data.
 
 REQUIREMENTS:
 1. COMPONENT NAME: EXACTLY 'ReportComponent'
-2. CODE FORMAT: Use ONLY React.createElement syntax, NO JSX
+2. CODE FORMAT: Use both React.createElement syntax AND inline SVG for charts
 3. LIBRARIES: Access all libraries through 'executionScope' object:
    - React: executionScope.React
    - Hooks: executionScope.useState, executionScope.useEffect, etc.
@@ -97,19 +97,45 @@ REQUIREMENTS:
 
 6. ERROR HANDLING: Use try/catch blocks for all data operations, use executionScope.console.error() for errors
 
-7. EXTENSIVE LOGGING: Add MANY logging statements with executionScope.console.log() throughout your code:
-   - Log "Starting ReportComponent" at the beginning
-   - Log dataset content preview (first 100 chars)
-   - Log parsing results with column names
-   - Log calculated metrics (counts, sums, etc.)
-   - Log chart data before rendering
+7. EXTENSIVE LOGGING: Add MANY logging statements with executionScope.console.log() throughout your code
 
-8. OUTPUT FORMAT: Return a complete React element tree that displays:
-   - Title and summary of findings
-   - At least one chart using Recharts when data permits
-   - Error handling when datasets are empty/invalid
+8. CHART RENDERING: When rendering charts, use INLINE SVG instead of Recharts components where possible.
+   Example of inline SVG for a bar chart:
+   \`\`\`
+   const svgBarChart = (data) => {
+     const width = 600;
+     const height = 300;
+     const barWidth = width / data.length;
 
-9. IMMEDIATE EXECUTION: DO NOT USE USEEFFECT FOR INITIAL DATA PROCESSING. Process data immediately in the component function body, not in a useEffect hook. This is critical for server-side rendering.
+     return React.createElement('svg',
+       {
+         width: width,
+         height: height,
+         xmlns: 'http://www.w3.org/2000/svg',
+         viewBox: \`0 0 \${width} \${height}\`
+       },
+       // Background
+       React.createElement('rect', {
+         width: '100%',
+         height: '100%',
+         fill: '#f8f9fa'
+       }),
+       // Bars
+       ...data.map((d, i) => {
+         return React.createElement('rect', {
+           key: i,
+           x: i * barWidth,
+           y: height - d.value,
+           width: barWidth - 5,
+           height: d.value,
+           fill: '#4e79a7'
+         });
+       })
+     );
+   }
+   \`\`\`
+
+9. IMMEDIATE EXECUTION: Process data immediately in the component function body, not in a useEffect hook.
 
 EXAMPLE CODE STRUCTURE:
 \`\`\`javascript
@@ -174,21 +200,21 @@ function ReportComponent({ datasets }) {
 
   console.log("[ReportComponent] Rendering charts with data:", reportData);
 
-  // 4. Render visualization
+  // 4. Create inline SVG charts
+  const barChartSvg = React.createElement("svg", { width: 600, height: 300, xmlns: "http://www.w3.org/2000/svg" },
+    React.createElement("rect", { width: "100%", height: "100%", fill: "#f8f9fa" }),
+    // Add more SVG elements for actual chart here
+  );
+
+  // 5. Render visualization with inline SVGs
   return React.createElement("div", null,
     React.createElement("h2", null, "Analysis Report"),
-    React.createElement(Recharts.BarChart, { width: 600, height: 300, data: chartData },
-      React.createElement(Recharts.CartesianGrid, { strokeDasharray: "3 3" }),
-      React.createElement(Recharts.XAxis, { dataKey: "name" }),
-      React.createElement(Recharts.YAxis, null),
-      React.createElement(Recharts.Tooltip, null),
-      React.createElement(Recharts.Bar, { dataKey: "value", fill: "#8884d8" })
-    )
+    barChartSvg
   );
 }
 \`\`\`
 
-Ensure your code EXACTLY follows this pattern, especially processing data immediately instead of in useEffect. DO NOT explain the code outside of a code block. Only provide the complete JavaScript code for the ReportComponent function.`;
+Ensure your code EXACTLY follows this pattern, especially using inline SVG for charts where possible. DO NOT explain the code outside of a code block. Only provide the complete JavaScript code for the ReportComponent function.`;
 
         const messages = [{ role: "user", content: `${contextUsed}\n\nUser Prompt: ${promptText}` }];
         const modelToUse = "claude-3-7-sonnet-20250219";

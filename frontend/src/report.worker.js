@@ -1,5 +1,5 @@
-// frontend/src/report.worker.js
-// Executes Claude's generated React component and renders it to HTML
+// src/report.worker.js
+// UPDATED with robust error handling and code correction
 
 // --- Load Dependencies using standard ES Imports ---
 import React from 'react';
@@ -57,6 +57,46 @@ self.onmessage = async (event) => {
         return;
     }
 
+    // --- Fix common errors in the generated code ---
+    let fixedCodeString = codeString;
+
+    // Fix 1: Replace any 'a0' with '30' (common typo in margin values)
+    if (fixedCodeString.includes('a0')) {
+        console.log("[Worker] Fixing potential typo: 'a0' → '30'");
+        fixedCodeString = fixedCodeString.replace(/a0/g, '30');
+    }
+
+    // Fix 2: Ensure svg viewBox is properly formatted (no template literals in some browsers)
+    fixedCodeString = fixedCodeString.replace(
+        /viewBox: `0 0 \$\{width\} \$\{height\}`/g,
+        'viewBox: "0 0 " + width + " " + height'
+    );
+
+    // Fix 3: Check for malformed destructuring of Recharts
+    if (fixedCodeString.includes('const { BarChart, Bar') && !fixedCodeString.includes('Recharts.BarChart')) {
+        console.log("[Worker] Adding Recharts prefix to components");
+        fixedCodeString = fixedCodeString.replace(
+            /const \{ (.*?) \} = Recharts;/,
+            '// Using direct Recharts.Component references instead of destructuring'
+        );
+    }
+
+    // Fix 4: Address missing variable declarations
+    const potentialUndefinedVars = ['maxValue', 'barWidth', 'chartWidth', 'chartHeight', 'radius'];
+    potentialUndefinedVars.forEach(varName => {
+        // Check if the variable is used without being defined
+        if ((new RegExp(`[^a-zA-Z0-9_]${varName}[^a-zA-Z0-9_]`)).test(fixedCodeString) &&
+            !fixedCodeString.includes(`const ${varName} =`) &&
+            !fixedCodeString.includes(`let ${varName} =`)) {
+            console.log(`[Worker] Adding missing variable declaration for ${varName}`);
+            // Insert placeholder declaration at the beginning of the function
+            fixedCodeString = fixedCodeString.replace(
+                /function ReportComponent\(\{ datasets \}\) \{/,
+                `function ReportComponent({ datasets }) {\n  // Added by worker: placeholder variable\n  let ${varName} = 0;`
+            );
+        }
+    });
+
     // --- Execution Block ---
     try {
         console.log("[Worker] Setting up execution environment...");
@@ -92,7 +132,7 @@ self.onmessage = async (event) => {
         console.log("[Worker] Evaluating Claude's generated component code...");
 
         // Modify the code to execute immediately instead of in useEffect
-        const modifiedCode = codeString.replace(
+        const modifiedCode = fixedCodeString.replace(
             /useEffect\(\s*\(\s*\)\s*=>\s*{([\s\S]*?)}\s*,\s*\[\]\s*\)/,
             function(match, effectBody) {
                 return `// Execute immediately instead of in useEffect
@@ -102,8 +142,20 @@ self.onmessage = async (event) => {
 
         // Create a function that takes executionScope and returns the ReportComponent
         const getReportComponent = new Function('executionScope', `
-            ${modifiedCode}
-            return ReportComponent;
+            try {
+                ${modifiedCode}
+                return ReportComponent;
+            } catch (error) {
+                console.error("[Sandbox Error] Error in component function:", error);
+                // Return a fallback component that displays the error
+                return function ErrorComponent() {
+                    return executionScope.React.createElement("div", { style: { color: "red" } },
+                        executionScope.React.createElement("h2", null, "Error in Component Code"),
+                        executionScope.React.createElement("p", null, error.message),
+                        executionScope.React.createElement("pre", null, error.stack)
+                    );
+                };
+            }
         `);
 
         // Get the component function
@@ -118,14 +170,104 @@ self.onmessage = async (event) => {
         // Create the React element with the datasets prop
         const reactElement = React.createElement(ReportComponent, { datasets });
 
-        // Server-side render to HTML
+        // Server-side render to HTML - with error handling
         console.log("[Worker] Rendering component to HTML...");
-        const renderedHTML = ReactDOMServer.renderToString(reactElement);
+        let renderedHTML;
+
+        try {
+            renderedHTML = ReactDOMServer.renderToString(reactElement);
+        } catch (renderError) {
+            console.error("[Worker] Error during renderToString:", renderError);
+
+            // Create fallback HTML for the error
+            renderedHTML = `<div class="error-container">
+                <h2>Error Rendering Report</h2>
+                <p>${renderError.message}</p>
+                <pre>${renderError.stack}</pre>
+            </div>`;
+        }
 
         // Add wrapper div with styling for the final output
         const finalHTML = `
             <div class="claude-generated-report">
                 ${renderedHTML}
+                <style>
+                    /* Basic styles for the report */
+                    .claude-generated-report {
+                        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    }
+                    .summary-section { margin-bottom: 2rem; }
+                    .summary-cards {
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 1rem;
+                        margin-top: 1rem;
+                    }
+                    .summary-card {
+                        background: #f8f9fa;
+                        border: 1px solid #dee2e6;
+                        border-radius: 0.5rem;
+                        padding: 1rem;
+                        flex: 1 1 200px;
+                    }
+                    .summary-card h3 {
+                        margin-top: 0;
+                        font-size: 1rem;
+                        color: #495057;
+                    }
+                    .summary-card .value {
+                        font-size: 1.5rem;
+                        font-weight: bold;
+                        margin: 0.5rem 0 0;
+                    }
+                    .charts-section {
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 2rem;
+                        margin-bottom: 2rem;
+                    }
+                    .chart-container {
+                        flex: 1 1 400px;
+                        min-height: 300px;
+                    }
+                    .chart-container.wide {
+                        flex-basis: 100%;
+                    }
+                    .tables-section {
+                        margin-top: 2rem;
+                    }
+                    .table-container {
+                        margin-bottom: 2rem;
+                    }
+                    table {
+                        width: 100%;
+                        border-collapse: collapse;
+                    }
+                    th, td {
+                        padding: 0.75rem;
+                        text-align: left;
+                        border-bottom: 1px solid #dee2e6;
+                    }
+                    th {
+                        font-weight: bold;
+                        background: #f8f9fa;
+                    }
+                    /* Dark mode support */
+                    @media (prefers-color-scheme: dark) {
+                        .summary-card, th {
+                            background: #212529;
+                        }
+                        th, td {
+                            border-color: #343a40;
+                        }
+                        .summary-card {
+                            border-color: #343a40;
+                        }
+                        .summary-card h3 {
+                            color: #ced4da;
+                        }
+                    }
+                </style>
             </div>
         `;
 
@@ -149,10 +291,32 @@ self.onmessage = async (event) => {
             location: 'Worker execution'
         };
 
+        // Create a more detailed error message with code snippet
+        let errorMessage = `Error executing code: ${error.message}`;
+        if (error.stack && typeof error.stack === 'string') {
+            // Try to extract line numbers from the stack trace
+            const lineMatch = error.stack.match(/eval.+?<anonymous>:(\d+):(\d+)/);
+            if (lineMatch && lineMatch[1]) {
+                const lineNumber = parseInt(lineMatch[1], 10);
+                // Extract the problematic code section
+                const codeLines = fixedCodeString.split('\n');
+                const startLine = Math.max(1, lineNumber - 3);
+                const endLine = Math.min(codeLines.length, lineNumber + 3);
+
+                let codeSnippet = '';
+                for (let i = startLine; i <= endLine; i++) {
+                    const isErrorLine = i === lineNumber;
+                    codeSnippet += `${i}: ${isErrorLine ? '→ ' : '  '}${codeLines[i-1]}\n`;
+                }
+
+                errorMessage += `\n\nProblem at line ${lineNumber}:\n\n${codeSnippet}`;
+            }
+        }
+
         // Send a formatted error message back
         self.postMessage({
             status: 'error',
-            error: `Error executing code: ${error.message}`,
+            error: errorMessage,
             errorDetails: errorInfo,
             output: createErrorHTML('Report Generation Error', error.message)
         });

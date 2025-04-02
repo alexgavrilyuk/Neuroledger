@@ -1,5 +1,5 @@
 // frontend/src/features/dashboard/hooks/usePromptSubmit.js
-// COMPLETE REWRITE - Robust implementation for report generation
+// UPDATED - Dynamic data handling without assumptions
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import apiClient from '../../../shared/services/apiClient';
@@ -191,15 +191,10 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
 
             // 5. Set up worker message handler
             workerRef.current.onmessage = (event) => {
-                const { status, output, error: workerError, warning, errorDetails } = event.data || {};
+                const { status, output, error: workerError, errorDetails } = event.data || {};
                 logger.info(`Received ${status} response from worker`);
 
                 if (status === 'success') {
-                    // Handle success case
-                    if (warning) {
-                        logger.warn(`Worker warning: ${warning}`);
-                    }
-
                     // Update message with the HTML output
                     updateMessageById(loadingMessageId, {
                         content: "Report generated successfully. Click to view.",
