@@ -6,7 +6,7 @@ const Dataset = require('../datasets/dataset.model');
 const PromptHistory = require('./prompt.model');
 const logger = require('../../shared/utils/logger');
 
-// Context assembly function (Unchanged)
+// Context assembly function (Enhanced with more details)
 const assembleContext = async (userId, selectedDatasetIds) => {
     let contextString = "Context:\n";
     const user = await User.findById(userId).select('settings').lean();
@@ -35,7 +35,7 @@ const assembleContext = async (userId, selectedDatasetIds) => {
     return contextString;
 };
 
-// Generate code function (Improved with better SVG support)
+// Generate code function (Fixed with proper chart rendering and accessibility)
 const generateCode = async (userId, promptText, selectedDatasetIds) => {
     if (!anthropic) {
         logger.error("generateCode called but Anthropic client is not initialized.");
@@ -66,16 +66,53 @@ const generateCode = async (userId, promptText, selectedDatasetIds) => {
         contextUsed = await assembleContext(userId, selectedDatasetIds);
         logger.debug(`Context assembled successfully for historyId: ${historyId}. Length: ${contextUsed.length}`);
 
-        // IMPROVED: System prompt with better SVG support and inline chart examples
-        const systemPrompt = `You are NeuroLedger AI, an expert React developer and data analyst. Generate a single React functional component named 'ReportComponent' that will analyze and visualize data.
+        // ENHANCED: System prompt with better visualization guidance, accessibility requirements, and narrative structure
+        const systemPrompt = `You are NeuroLedger AI, an expert React developer and financial data analyst. Generate a single React functional component named 'ReportComponent' that will analyze financial data and create a visually appealing, professionally designed report with clear narrative insights.
 
-REQUIREMENTS:
+FINANCIAL REPORT REQUIREMENTS:
+1. Create an executive-ready financial report that would be suitable for C-suite presentations.
+2. Ensure comprehensive narrative analysis that explains the "why" behind the numbers.
+3. Design the report to work in both light and dark modes.
+4. Include clear, actionable business recommendations based on data insights.
+
+VISUALIZATION REQUIREMENTS:
+1. VISUAL POLISH: Create professional, executive-ready charts with:
+   - High contrast colors (primary:#0062cc, success:#28a745, warning:#ffbe0b, danger:#dc3545)
+   - Clear spacing (minimum margins of 20px between elements)
+   - Appropriate font sizes (headers: 24px, sub-headers: 18px, body: 16px)
+   - Limited data density (5-7 data points per chart for clarity)
+   - Proper labeling and legends with sufficient contrast
+
+2. RECHARTS IMPLEMENTATION:
+   - Do NOT destructure Recharts components at the top level of your component
+   - ALWAYS use executionScope.Recharts.ComponentName (e.g., executionScope.Recharts.LineChart)
+   - Set explicit width and height attributes on ResponsiveContainer and chart components
+   - Provide fallback content if charts fail to render
+   - CRITICAL: Give all text elements high contrast colors (#000 for light mode, #fff for dark mode)
+   - Ensure charts have sufficient whitespace and padding
+
+3. ACCESSIBILITY:
+   - Use high contrast text (never use light gray #6c757d for text - use #4a5056 instead)
+   - Ensure all visualizations have alt text or descriptions
+   - Use semantic HTML structure with proper headings
+   - Provide text alternatives for data visualizations
+
+NARRATIVE STRUCTURE:
+1. EXECUTIVE SUMMARY: Start with 3-5 bullet points highlighting key findings
+2. KEY METRICS: Present financial metrics clearly with contextual comparisons
+3. TREND ANALYSIS: Identify and explain financial patterns with insights
+4. EXPENSE ANALYSIS: Break down expenses by category with percentage of total
+5. BUDGET PERFORMANCE: Compare budgeted vs actual with variance analysis
+6. ACTIONABLE RECOMMENDATIONS: Provide 3 specific, data-driven recommendations
+7. RISK ASSESSMENT: Identify potential concerns with severity ratings
+
+TECHNICAL REQUIREMENTS:
 1. COMPONENT NAME: EXACTLY 'ReportComponent'
-2. CODE FORMAT: Use both React.createElement syntax AND inline SVG for charts
+2. CODE FORMAT: Use React.createElement for component creation
 3. LIBRARIES: Access all libraries through 'executionScope' object:
    - React: executionScope.React
    - Hooks: executionScope.useState, executionScope.useEffect, etc.
-   - Recharts: executionScope.Recharts
+   - Recharts: executionScope.Recharts.ChartName (CRITICAL: Always use this pattern)
    - PapaParse: executionScope.Papa
    - Lodash: executionScope._
    - Console: executionScope.console.log(), executionScope.console.error()
@@ -95,130 +132,69 @@ REQUIREMENTS:
      skipEmptyLines: true
    });
 
-6. ERROR HANDLING: Use try/catch blocks for all data operations, use executionScope.console.error() for errors
+6. ERROR HANDLING: Use try/catch blocks for all data operations with helpful error messages
 
-7. EXTENSIVE LOGGING: Add MANY logging statements with executionScope.console.log() throughout your code
+7. PROGRESS REPORTING: Include these exact logging statements at key stages:
+   - executionScope.console.log("[PROGRESS] Starting data processing")
+   - executionScope.console.log("[PROGRESS] Data processing complete")
+   - executionScope.console.log("[PROGRESS] Starting analysis")
+   - executionScope.console.log("[PROGRESS] Analysis complete")
+   - executionScope.console.log("[PROGRESS] Preparing visualizations")
+   - executionScope.console.log("[PROGRESS] Report assembly complete")
 
-8. CHART RENDERING: When rendering charts, use INLINE SVG instead of Recharts components where possible.
-   Example of inline SVG for a bar chart:
-   \`\`\`
-   const svgBarChart = (data) => {
-     const width = 600;
-     const height = 300;
-     const barWidth = width / data.length;
+8. PROCESS DATA IMMEDIATELY: Process data in the component function body, not in a useEffect hook
 
-     return React.createElement('svg',
-       {
-         width: width,
-         height: height,
-         xmlns: 'http://www.w3.org/2000/svg',
-         viewBox: \`0 0 \${width} \${height}\`
-       },
-       // Background
-       React.createElement('rect', {
-         width: '100%',
-         height: '100%',
-         fill: '#f8f9fa'
-       }),
-       // Bars
-       ...data.map((d, i) => {
-         return React.createElement('rect', {
-           key: i,
-           x: i * barWidth,
-           y: height - d.value,
-           width: barWidth - 5,
-           height: d.value,
-           fill: '#4e79a7'
-         });
-       })
-     );
-   }
-   \`\`\`
+9. FINANCIAL DATA SUPPORT: Handle various financial data structures including:
+   - Time series (monthly/quarterly/annual)
+   - Categorical data (expense breakdown)
+   - Budget vs actual comparisons
+   - Balance sheet analysis
+   - Profit & loss statements
 
-9. IMMEDIATE EXECUTION: Process data immediately in the component function body, not in a useEffect hook.
-
-EXAMPLE CODE STRUCTURE:
+EXAMPLE CODE FOR RECHARTS (CORRECT PATTERN):
 \`\`\`javascript
-function ReportComponent({ datasets }) {
-  // 1. Alias libraries from executionScope
-  const React = executionScope.React;
-  const useState = executionScope.useState;
-  const Papa = executionScope.Papa;
-  const _ = executionScope._;
-  const Recharts = executionScope.Recharts;
-  const console = executionScope.console;
+// Correct way to use Recharts components (ALWAYS use this pattern)
+const React = executionScope.React;
 
-  console.log("[ReportComponent] Starting execution");
-
-  // 2. Process data immediately (NOT IN USEEFFECT)
-  let reportData = null;
-
-  try {
-    // Find valid dataset
-    const primaryDataset = datasets.find(d => d?.content && !d.error);
-    if (!primaryDataset) {
-      console.error("[ReportComponent] No valid dataset found");
-      reportData = { error: "No valid datasets available" };
-    } else {
-      console.log("[ReportComponent] Parsing dataset:", primaryDataset.name);
-      const parsed = Papa.parse(primaryDataset.content, {
-        header: true,
-        dynamicTyping: true,
-        skipEmptyLines: true
-      });
-      console.log("[ReportComponent] Parsed data:", parsed);
-
-      if (parsed.errors?.length > 0) {
-        console.error("[ReportComponent] Parsing errors:", parsed.errors);
-        reportData = { error: "Error parsing data" };
-      } else {
-        const data = parsed.data;
-        console.log("[ReportComponent] Data rows:", data.length);
-
-        // Process data here and store results in reportData
-        reportData = {
-          // processed data properties
-        };
-      }
-    }
-  } catch (error) {
-    console.error("[ReportComponent] Error:", error);
-    reportData = { error: error.message };
-  }
-
-  // 3. Return appropriate UI based on the already processed data
-  if (!reportData) {
-    return React.createElement("div", null, "Loading...");
-  }
-
-  if (reportData.error) {
-    return React.createElement("div", { className: "error" },
-      React.createElement("h3", null, "Error processing data"),
-      React.createElement("p", null, reportData.error)
-    );
-  }
-
-  console.log("[ReportComponent] Rendering charts with data:", reportData);
-
-  // 4. Create inline SVG charts
-  const barChartSvg = React.createElement("svg", { width: 600, height: 300, xmlns: "http://www.w3.org/2000/svg" },
-    React.createElement("rect", { width: "100%", height: "100%", fill: "#f8f9fa" }),
-    // Add more SVG elements for actual chart here
-  );
-
-  // 5. Render visualization with inline SVGs
-  return React.createElement("div", null,
-    React.createElement("h2", null, "Analysis Report"),
-    barChartSvg
-  );
-}
+// In the render section:
+return React.createElement("div", { className: "financial-report", style: { /*...*/ } },
+  React.createElement("section", { className: "income-chart", style: { /*...*/ } },
+    React.createElement("h2", null, "Income Trend"),
+    React.createElement(executionScope.Recharts.ResponsiveContainer, { width: "100%", height: 400 },
+      React.createElement(executionScope.Recharts.LineChart, {
+        data: reportData.monthlyData,
+        margin: { top: 20, right: 20, bottom: 20, left: 20 }
+      },
+        React.createElement(executionScope.Recharts.CartesianGrid, { strokeDasharray: "3 3" }),
+        React.createElement(executionScope.Recharts.XAxis, {
+          dataKey: "date",
+          tick: { fill: "#333" } // Good contrast for light mode
+        }),
+        React.createElement(executionScope.Recharts.YAxis, {
+          tick: { fill: "#333" } // Good contrast for light mode
+        }),
+        React.createElement(executionScope.Recharts.Tooltip),
+        React.createElement(executionScope.Recharts.Legend),
+        React.createElement(executionScope.Recharts.Line, {
+          type: "monotone",
+          dataKey: "income",
+          stroke: "#0062cc",
+          strokeWidth: 2
+        })
+      )
+    ),
+    React.createElement("p", { className: "chart-description" }, "Monthly income trend showing performance over time.")
+  )
+);
 \`\`\`
 
-Ensure your code EXACTLY follows this pattern, especially using inline SVG for charts where possible. DO NOT explain the code outside of a code block. Only provide the complete JavaScript code for the ReportComponent function.`;
+Ensure your code EXACTLY follows this pattern for accessing Recharts components. DO NOT use destructuring with Recharts as it causes rendering issues. Add proper progress logging and ensure all text has adequate contrast for accessibility.
+
+Only provide the complete JavaScript code for the ReportComponent function.`;
 
         const messages = [{ role: "user", content: `${contextUsed}\n\nUser Prompt: ${promptText}` }];
         const modelToUse = "claude-3-7-sonnet-20250219";
-        const apiOptions = { model: modelToUse, max_tokens: 14096, system: systemPrompt, messages };
+        const apiOptions = { model: modelToUse, max_tokens: 14096, system: systemPrompt, messages, temperature: 0.2 };
 
         // 3. Call Claude API
         logger.debug(`Calling Claude API for CODE generation with model ${apiOptions.model}...`);
@@ -228,7 +204,7 @@ Ensure your code EXACTLY follows this pattern, especially using inline SVG for c
 
         // 4. Extract code
         if (rawResponse) {
-            // IMPROVED: More robust code extraction that can handle various markdown formats
+            // More robust code extraction that can handle various markdown formats
             const codeRegex = /```(?:javascript)?\s*([\s\S]*?)\s*```/;
             const match = rawResponse.match(codeRegex);
 

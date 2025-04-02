@@ -1,5 +1,5 @@
 // frontend/src/features/dashboard/components/MessageBubble.jsx
-// UPDATED VERSION - Properly handles report display
+// Fixed to remove quality badge from UI
 
 import React from 'react';
 import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid';
@@ -45,14 +45,16 @@ const MessageBubble = ({ message, onViewReport }) => {
             return (
                 <div className="space-y-2">
                     <p>{message.content || "Report generated."}</p>
-                    <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => onViewReport(message.reportHtml)} // Pass only the HTML
-                        leftIcon={DocumentChartBarIcon}
-                    >
-                        View Report
-                    </Button>
+                    <div className="flex items-center">
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => onViewReport(message.reportHtml, message.quality)}
+                            leftIcon={DocumentChartBarIcon}
+                        >
+                            View Report
+                        </Button>
+                    </div>
                 </div>
             );
         }

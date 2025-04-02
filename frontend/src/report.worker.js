@@ -1,5 +1,5 @@
 // src/report.worker.js
-// Fixed version to prevent the infinite re-render loop
+// FIXED version with improved visualization rendering and contrast
 
 // --- Load Dependencies using standard ES Imports ---
 import React from 'react';
@@ -11,22 +11,58 @@ import _ from 'lodash';
 
 console.log("Report Worker Script Initializing (Claude Code Execution)...");
 
+// --- Progress Tracking Constants ---
+const PROGRESS_STAGES = {
+  INITIALIZING: 'initializing',
+  PROCESSING_DATA: 'processing_data',
+  ANALYZING_DATA: 'analyzing_data',
+  CREATING_VISUALS: 'creating_visuals',
+  FINALIZING_REPORT: 'finalizing_report',
+  COMPLETE: 'complete',
+  ERROR: 'error'
+};
+
+// --- Quality Assessment Function ---
+const assessReportQuality = (html) => {
+  // Basic quality checks
+  const hasCharts = html.includes('recharts-wrapper') ||
+                    html.includes('<svg') ||
+                    html.includes('chart-container');
+
+  const hasExecutiveSummary = html.toLowerCase().includes('executive summary');
+  const hasRecommendations = html.toLowerCase().includes('recommendation') ||
+                             html.toLowerCase().includes('suggested action');
+
+  return {
+    hasVisualizations: hasCharts,
+    hasExecutiveSummary: hasExecutiveSummary,
+    hasRecommendations: hasRecommendations,
+    qualityScore: [hasCharts, hasExecutiveSummary, hasRecommendations].filter(Boolean).length
+  };
+};
+
+// --- Progress Tracking Function ---
+const trackProgress = (stage, detail = null) => {
+  self.postMessage({
+    type: 'progress',
+    stage: stage,
+    detail: detail
+  });
+
+  console.log(`[Worker Progress] ${stage}${detail ? ': ' + detail : ''}`);
+};
+
 // --- Worker Logic ---
 self.onmessage = async (event) => {
+    trackProgress(PROGRESS_STAGES.INITIALIZING);
     console.log("[Worker] Received message from main thread");
-
-    // Log basic info about received message
-    if (event.data && typeof event.data === 'object') {
-        console.log(`[Worker] Received code length: ${event.data.code?.length || 0}`);
-        console.log(`[Worker] Received datasets count: ${Array.isArray(event.data.datasets) ? event.data.datasets.length : 0}`);
-    }
 
     // Destructure message data with defaults
     const { code: codeString = '', datasets = [] } = event.data || {};
 
     // --- Input Validation ---
     if (!codeString || typeof codeString !== 'string' || codeString.trim() === '') {
-        console.error("[Worker] Error: No valid code string provided.");
+        trackProgress(PROGRESS_STAGES.ERROR, 'No valid code string provided');
         self.postMessage({
             status: 'error',
             error: 'No valid code string provided to worker.',
@@ -36,7 +72,7 @@ self.onmessage = async (event) => {
     }
 
     if (!Array.isArray(datasets) || datasets.length === 0) {
-        console.error("[Worker] Error: No valid datasets array provided.");
+        trackProgress(PROGRESS_STAGES.ERROR, 'No valid datasets array provided');
         self.postMessage({
             status: 'error',
             error: 'No valid datasets array provided to worker.',
@@ -48,7 +84,7 @@ self.onmessage = async (event) => {
     // Check if at least one dataset has content
     const hasValidDataset = datasets.some(ds => ds && ds.content && typeof ds.content === 'string' && ds.content.trim() !== '');
     if (!hasValidDataset) {
-        console.error("[Worker] Error: None of the datasets have valid content.");
+        trackProgress(PROGRESS_STAGES.ERROR, 'No valid dataset content found');
         self.postMessage({
             status: 'error',
             error: 'No valid dataset content found in any of the provided datasets.',
@@ -57,68 +93,28 @@ self.onmessage = async (event) => {
         return;
     }
 
-    // --- Fix common errors in the generated code ---
+    // --- Attempt to fix common issues with the code ---
     let fixedCodeString = codeString;
 
-    // Fix 1: Replace any 'a0' with '30' (common typo in margin values)
-    if (fixedCodeString.includes('a0')) {
-        console.log("[Worker] Fixing potential typo: 'a0' → '30'");
-        fixedCodeString = fixedCodeString.replace(/a0/g, '30');
-    }
-
-    // Fix 2: Ensure svg viewBox is properly formatted (no template literals in some browsers)
+    // Fix viewBox issues in SVG
     fixedCodeString = fixedCodeString.replace(
         /viewBox: `0 0 \$\{width\} \$\{height\}`/g,
         'viewBox: "0 0 " + width + " " + height'
     );
 
-    // Fix 3: Check for malformed destructuring of Recharts
-    if (fixedCodeString.includes('const { BarChart, Bar') && !fixedCodeString.includes('Recharts.BarChart')) {
-        console.log("[Worker] Adding Recharts prefix to components");
+    // Fix rendering issues with Recharts components
+    const rechartsComponentRegex = /const \{([^}]+)\}\s*=\s*Recharts;/g;
+    if (rechartsComponentRegex.test(fixedCodeString)) {
+        // If destructuring is used, ensure we're accessing Recharts properly
         fixedCodeString = fixedCodeString.replace(
-            /const \{ (.*?) \} = Recharts;/,
-            '// Using direct Recharts.Component references instead of destructuring'
+            /const \{([^}]+)\}\s*=\s*Recharts;/g,
+            'const {$1} = executionScope.Recharts;'
         );
     }
 
-    // Fix 4: Address missing variable declarations
-    const potentialUndefinedVars = ['maxValue', 'barWidth', 'chartWidth', 'chartHeight', 'radius'];
-    potentialUndefinedVars.forEach(varName => {
-        // Check if the variable is used without being defined
-        if ((new RegExp(`[^a-zA-Z0-9_]${varName}[^a-zA-Z0-9_]`)).test(fixedCodeString) &&
-            !fixedCodeString.includes(`const ${varName} =`) &&
-            !fixedCodeString.includes(`let ${varName} =`)) {
-            console.log(`[Worker] Adding missing variable declaration for ${varName}`);
-            // Insert placeholder declaration at the beginning of the function
-            fixedCodeString = fixedCodeString.replace(
-                /function ReportComponent\(\{ datasets \}\) \{/,
-                `function ReportComponent({ datasets }) {\n  // Added by worker: placeholder variable\n  let ${varName} = 0;`
-            );
-        }
-    });
-
-    // Fix 5: Fix infinite loop - Remove useState calls that trigger re-renders
-    fixedCodeString = fixedCodeString.replace(
-        /const \[processingStatus, setProcessingStatus\] = useState\({.*?\}\);/s,
-        '// Removed useState that was causing re-renders\nconst processingStatus = { isLoading: false, error: null, parsedData: null, insights: null };'
-    );
-
-    // Fix 6: Replace any setState calls in the main function body
-    fixedCodeString = fixedCodeString.replace(
-        /setProcessingStatus\({.*?\}\);/g,
-        '// Removed setState call to prevent re-renders\n// processingStatus was updated directly instead'
-    );
-
-    // Fix 7: Wrap immediate processing code in a try-catch to prevent crashes
-    if (fixedCodeString.includes('// Process data immediately (not in useEffect)')) {
-        fixedCodeString = fixedCodeString.replace(
-            /\/\/ Process data immediately \(not in useEffect\)([\s\S]*?)try {/m,
-            '// Process data immediately (not in useEffect)\ntry {'
-        );
-    }
-
-    // --- Execution Block ---
+    // Progress-aware execution
     try {
+        trackProgress(PROGRESS_STAGES.PROCESSING_DATA);
         console.log("[Worker] Setting up execution environment...");
 
         // Define the scope object that will be PASSED to Claude's code
@@ -140,9 +136,28 @@ self.onmessage = async (event) => {
             _,
             XLSX,
 
-            // Console (sandboxed)
+            // Console with progress tracking
             console: {
-                log: (...args) => console.log('[Sandbox Log]', ...args),
+                log: (...args) => {
+                    // Check for progress markers in logs
+                    const message = args[0];
+                    if (typeof message === 'string' && message.includes('[PROGRESS]')) {
+                        if (message.includes('Starting data processing')) {
+                            trackProgress(PROGRESS_STAGES.PROCESSING_DATA);
+                        } else if (message.includes('Data processing complete')) {
+                            trackProgress(PROGRESS_STAGES.ANALYZING_DATA);
+                        } else if (message.includes('Starting analysis')) {
+                            trackProgress(PROGRESS_STAGES.ANALYZING_DATA);
+                        } else if (message.includes('Analysis complete')) {
+                            trackProgress(PROGRESS_STAGES.CREATING_VISUALS);
+                        } else if (message.includes('Preparing visualizations')) {
+                            trackProgress(PROGRESS_STAGES.CREATING_VISUALS);
+                        } else if (message.includes('Report assembly complete')) {
+                            trackProgress(PROGRESS_STAGES.FINALIZING_REPORT);
+                        }
+                    }
+                    console.log('[Sandbox Log]', ...args);
+                },
                 warn: (...args) => console.warn('[Sandbox Warn]', ...args),
                 error: (...args) => console.error('[Sandbox Error]', ...args),
                 info: (...args) => console.info('[Sandbox Info]', ...args),
@@ -159,7 +174,7 @@ self.onmessage = async (event) => {
             } catch (error) {
                 console.error("[Sandbox Error] Error in component function:", error);
                 // Return a fallback component that displays the error
-                return function ErrorComponent() {
+                return function ErrorComponent({ datasets }) {
                     return executionScope.React.createElement("div", { style: { color: "red" } },
                         executionScope.React.createElement("h2", null, "Error in Component Code"),
                         executionScope.React.createElement("p", null, error.message),
@@ -177,6 +192,7 @@ self.onmessage = async (event) => {
         }
 
         console.log("[Worker] Successfully extracted ReportComponent function");
+        trackProgress(PROGRESS_STAGES.CREATING_VISUALS);
 
         // Create the React element with the datasets prop
         const reactElement = React.createElement(ReportComponent, { datasets });
@@ -198,38 +214,115 @@ self.onmessage = async (event) => {
             </div>`;
         }
 
-        // Add wrapper div with styling for the final output
+        // Post-process the rendered HTML to fix color contrast issues
+        renderedHTML = renderedHTML
+            // Ensure text has good contrast against backgrounds
+            .replace(/color:\s*#6c757d/g, 'color: #4a5056') // Darker gray for text
+            .replace(/color:\s*#adb5bd/g, 'color: #495057') // Darker gray for light text
+            // Add class to recharts text elements for visibility
+            .replace(/<text class="recharts-text/g, '<text class="recharts-text high-contrast-text');
+
+        // Add wrapper div with styling for the final output - FIXED STYLES for better chart rendering
         const finalHTML = `
             <div class="claude-generated-report">
                 ${renderedHTML}
                 <style>
-                    /* Basic styles for the report */
+                    /* High-contrast accessibility fixes */
+                    .high-contrast-text { fill: #000 !important; }
+                    .recharts-cartesian-axis-tick-value { fill: #333 !important; }
+                    .recharts-text { fill: #333 !important; }
+                    .recharts-legend-item-text { color: #333 !important; }
+                    @media (prefers-color-scheme: dark) {
+                        .high-contrast-text { fill: #fff !important; }
+                        .recharts-cartesian-axis-tick-value { fill: #eee !important; }
+                        .recharts-text { fill: #eee !important; }
+                        .recharts-legend-item-text { color: #eee !important; }
+                    }
+
+                    /* Base styles */
                     .claude-generated-report {
                         font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                        color: #333;
+                        line-height: 1.5;
                     }
-                    .summary-section { margin-bottom: 2rem; }
+
+                    /* Fix recharts rendering issues */
+                    .recharts-wrapper {
+                        width: 100% !important;
+                        height: 400px !important;
+                        min-height: 400px !important;
+                        display: block !important;
+                    }
+                    .recharts-surface {
+                        overflow: visible !important;
+                    }
+
+                    /* Make sure charts take the full container width */
+                    .recharts-responsive-container {
+                        width: 100% !important;
+                        min-height: 400px !important;
+                        height: 400px !important;
+                    }
+
+                    /* Other report styles */
+                    .claude-generated-report h1 {
+                        font-size: 1.8rem;
+                        margin-bottom: 1rem;
+                        color: #0062cc;
+                    }
+                    .claude-generated-report h2 {
+                        font-size: 1.5rem;
+                        margin-top: 2rem;
+                        margin-bottom: 1rem;
+                        color: #0062cc;
+                        border-bottom: 1px solid #eee;
+                        padding-bottom: 0.5rem;
+                    }
+                    .claude-generated-report h3 {
+                        font-size: 1.2rem;
+                        margin-top: 1.5rem;
+                        margin-bottom: 0.75rem;
+                        color: #333;
+                    }
+                    .summary-section {
+                        margin-bottom: 2rem;
+                        background-color: #f8f9fa;
+                        padding: 1.5rem;
+                        border-radius: 8px;
+                    }
+                    .executive-summary {
+                        background-color: #f0f7ff;
+                        padding: 1.5rem;
+                        border-radius: 8px;
+                        margin-bottom: 2rem;
+                    }
                     .summary-cards {
                         display: flex;
                         flex-wrap: wrap;
                         gap: 1rem;
                         margin-top: 1rem;
                     }
-                    .summary-card {
-                        background: #f8f9fa;
-                        border: 1px solid #dee2e6;
-                        border-radius: 0.5rem;
-                        padding: 1rem;
+                    .summary-card, .metric-card {
+                        background: #fff;
+                        border: 1px solid #e0e0e0;
+                        border-radius: 8px;
+                        padding: 1.25rem;
                         flex: 1 1 200px;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
                     }
-                    .summary-card h3 {
+                    .summary-card h3, .metric-card h3 {
                         margin-top: 0;
                         font-size: 1rem;
-                        color: #495057;
+                        color: #555;
                     }
-                    .summary-card .value {
+                    .summary-card .value, .metric-card .value {
                         font-size: 1.5rem;
                         font-weight: bold;
                         margin: 0.5rem 0 0;
+                        color: #0062cc;
+                    }
+                    .key-metrics {
+                        margin-bottom: 2.5rem;
                     }
                     .charts-section {
                         display: flex;
@@ -240,57 +333,117 @@ self.onmessage = async (event) => {
                     .chart-container {
                         flex: 1 1 400px;
                         min-height: 300px;
+                        background: #fff;
+                        border-radius: 8px;
+                        padding: 1rem;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
                     }
                     .chart-container.wide {
                         flex-basis: 100%;
                     }
-                    .tables-section {
+                    .data-tables-section {
                         margin-top: 2rem;
                     }
                     .table-container {
                         margin-bottom: 2rem;
+                        overflow-x: auto;
                     }
                     table {
                         width: 100%;
                         border-collapse: collapse;
+                        font-size: 0.9rem;
                     }
                     th, td {
                         padding: 0.75rem;
                         text-align: left;
-                        border-bottom: 1px solid #dee2e6;
+                        border-bottom: 1px solid #e0e0e0;
                     }
                     th {
-                        font-weight: bold;
+                        font-weight: 600;
                         background: #f8f9fa;
+                        position: sticky;
+                        top: 0;
+                    }
+                    .recommendations {
+                        background-color: #f0f9ff;
+                        padding: 1.5rem;
+                        border-radius: 8px;
+                        margin: 2rem 0;
+                    }
+                    .risk-assessment {
+                        background-color: #fff8f0;
+                        padding: 1.5rem;
+                        border-radius: 8px;
+                        margin: 2rem 0;
+                    }
+                    /* Fix list element styles */
+                    .claude-generated-report ul {
+                      list-style-type: disc;
+                      padding-left: 1.5rem;
+                      margin-bottom: 1rem;
+                    }
+                    .claude-generated-report li {
+                      margin-bottom: 0.5rem;
                     }
                     /* Dark mode support */
                     @media (prefers-color-scheme: dark) {
-                        .summary-card, th {
-                            background: #212529;
+                        .claude-generated-report {
+                            color: #e0e0e0;
+                        }
+                        .summary-section, .summary-card, .metric-card, .chart-container {
+                            background: #2a2a2a;
+                            border-color: #444;
+                        }
+                        .executive-summary {
+                            background-color: #1a2a3a;
+                        }
+                        .recommendations {
+                            background-color: #1a2a3a;
+                        }
+                        .risk-assessment {
+                            background-color: #2a2520;
                         }
                         th, td {
-                            border-color: #343a40;
+                            border-color: #444;
                         }
-                        .summary-card {
-                            border-color: #343a40;
+                        th {
+                            background: #333;
                         }
-                        .summary-card h3 {
-                            color: #ced4da;
+                        .claude-generated-report h1, .claude-generated-report h2 {
+                            color: #4d9fff;
+                        }
+                        .claude-generated-report h3 {
+                            color: #e0e0e0;
+                        }
+                        .summary-card h3, .metric-card h3 {
+                            color: #ccc;
+                        }
+                        .summary-card .value, .metric-card .value {
+                            color: #4d9fff;
                         }
                     }
                 </style>
             </div>
         `;
 
+        trackProgress(PROGRESS_STAGES.FINALIZING_REPORT);
+
+        // Assess the quality of the report
+        const qualityAssessment = assessReportQuality(finalHTML);
+        console.log(`[Worker] Report quality assessment:`, qualityAssessment);
+
         console.log(`[Worker] Successfully rendered HTML (length: ${finalHTML.length})`);
+        trackProgress(PROGRESS_STAGES.COMPLETE);
 
         // Send the result back to the main thread
         self.postMessage({
             status: 'success',
-            output: finalHTML
+            output: finalHTML,
+            quality: qualityAssessment
         });
 
     } catch (error) {
+        trackProgress(PROGRESS_STAGES.ERROR, error.message);
         console.error("[Worker] Error during execution:", error);
         console.error("[Worker] Error stack:", error.stack);
 

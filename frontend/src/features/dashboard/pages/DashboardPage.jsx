@@ -1,21 +1,28 @@
 // frontend/src/features/dashboard/pages/DashboardPage.jsx
-// UPDATED - Dynamic data handling
+// Fixed to hide quality indicator and improve report rendering
 
 import React, { useState, useRef, useEffect } from 'react';
 import ChatInterface from '../components/ChatInterface';
 import PromptInput from '../components/PromptInput';
 import { useChatHistory } from '../hooks/useChatHistory';
-import { usePromptSubmit } from '../hooks/usePromptSubmit';
+import { usePromptSubmit, PROCESSING_STAGES } from '../hooks/usePromptSubmit';
 import { useDatasets } from '../../dataset_management/hooks/useDatasets';
 import Modal from '../../../shared/ui/Modal';
 import ReportViewer from '../../report_display/components/ReportViewer';
 import logger from '../../../shared/utils/logger';
+import ProgressIndicator from '../components/ProgressIndicator'; // New component
 
 const DashboardPage = () => {
     // State management hooks
     const { messages, addMessage, updateMessageById, clearAllLoadingFlags } = useChatHistory();
     const { datasets, isLoading: datasetsLoading, error: datasetsError } = useDatasets();
-    const { submitPrompt, isLoading: promptLoading, error: promptError } = usePromptSubmit(
+    const {
+        submitPrompt,
+        isLoading: promptLoading,
+        error: promptError,
+        processingStage,
+        processingDetail
+    } = usePromptSubmit(
         addMessage,
         updateMessageById,
         clearAllLoadingFlags
@@ -25,6 +32,7 @@ const DashboardPage = () => {
     const [selectedDatasetIds, setSelectedDatasetIds] = useState([]);
     const [isReportViewerOpen, setIsReportViewerOpen] = useState(false);
     const [currentReportHtml, setCurrentReportHtml] = useState('');
+    const [currentReportQuality, setCurrentReportQuality] = useState(null);
 
     // Reference for chat scrolling
     const chatEndRef = useRef(null);
@@ -35,13 +43,17 @@ const DashboardPage = () => {
     }, [messages]);
 
     // Handler to open the report viewer modal
-    const handleViewReport = (htmlContent) => {
+    const handleViewReport = (htmlContent, quality = null) => {
         if (!htmlContent) {
             logger.warn("handleViewReport called with empty HTML content");
             setCurrentReportHtml('<p class="text-red-500">No report content available.</p>');
         } else {
             logger.debug(`Opening report viewer with HTML content (${htmlContent.length} chars)`);
             setCurrentReportHtml(htmlContent);
+        }
+
+        if (quality) {
+            setCurrentReportQuality(quality);
         }
 
         setIsReportViewerOpen(true);
@@ -77,7 +89,7 @@ const DashboardPage = () => {
 
         // Add user message to chat
         logger.debug(`Submitting prompt: "${promptText}" with ${selectedDatasetIds.length} selected datasets`);
-        const userMessageId = addMessage({ type: 'user', content: promptText });
+        addMessage({ type: 'user', content: promptText });
 
         // Submit prompt for processing
         submitPrompt(promptText, selectedDatasetIds, datasets);
@@ -95,6 +107,9 @@ const DashboardPage = () => {
         return null;
     };
 
+    // Determine if progress indicator should be visible
+    const isProgressVisible = promptLoading && processingStage !== PROCESSING_STAGES.WAITING;
+
     return (
         <>
             <div className="flex flex-col h-[calc(100vh-4rem-2rem)] sm:h-[calc(100vh-4rem-3rem)] lg:h-[calc(100vh-4rem-4rem)]">
@@ -107,6 +122,14 @@ const DashboardPage = () => {
                     />
                     <div ref={chatEndRef} />
                 </div>
+
+                {/* Progress Indicator - New component for visual feedback */}
+                {isProgressVisible && (
+                    <ProgressIndicator
+                        stage={processingStage}
+                        detail={processingDetail}
+                    />
+                )}
 
                 {/* Error messages */}
                 {renderDatasetError()}
@@ -129,15 +152,19 @@ const DashboardPage = () => {
                 </div>
             </div>
 
-            {/* Report viewer modal */}
+            {/* Report viewer modal - Fixed with full width for report */}
             <Modal
                 isOpen={isReportViewerOpen}
                 onClose={() => setIsReportViewerOpen(false)}
-                title="Generated Report"
+                title="Financial Report"
                 size="xl"
             >
                 <Modal.Body padding="none">
-                    <ReportViewer htmlContent={currentReportHtml} />
+                    <ReportViewer
+                        htmlContent={currentReportHtml}
+                        quality={currentReportQuality}
+                        showQualityIndicator={false} // Hide the quality indicator
+                    />
                 </Modal.Body>
             </Modal>
         </>

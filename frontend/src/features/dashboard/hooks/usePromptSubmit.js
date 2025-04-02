@@ -1,5 +1,5 @@
 // frontend/src/features/dashboard/hooks/usePromptSubmit.js
-// UPDATED - Dynamic data handling without assumptions
+// Enhanced with progress tracking and quality assessment
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import apiClient from '../../../shared/services/apiClient';
@@ -9,9 +9,24 @@ import axios from 'axios';
 // Import the worker using Vite's special syntax
 import ReportWorker from '../../../report.worker.js?worker';
 
+// Progress tracking constants
+export const PROCESSING_STAGES = {
+  WAITING: 'waiting',
+  GENERATING_CODE: 'generating_code',
+  FETCHING_DATA: 'fetching_data',
+  PROCESSING_DATA: 'processing_data',
+  ANALYZING_DATA: 'analyzing_data',
+  CREATING_VISUALS: 'creating_visuals',
+  FINALIZING_REPORT: 'finalizing_report',
+  COMPLETE: 'complete',
+  ERROR: 'error'
+};
+
 export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllLoadingFlags) => {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [processingStage, setProcessingStage] = useState(PROCESSING_STAGES.WAITING);
+    const [processingDetail, setProcessingDetail] = useState('');
     const workerRef = useRef(null);
 
     // Cleanup worker on unmount
@@ -32,13 +47,16 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
             return [];
         }
 
+        setProcessingStage(PROCESSING_STAGES.FETCHING_DATA);
+        setProcessingDetail(`Preparing to fetch ${datasetsToFetch.length} datasets`);
         logger.debug(`Fetching content for ${datasetsToFetch.length} datasets...`);
 
         const results = [];
 
         // Process datasets sequentially
-        for (const ds of datasetsToFetch) {
+        for (const [index, ds] of datasetsToFetch.entries()) {
             try {
+                setProcessingDetail(`Fetching dataset ${index + 1} of ${datasetsToFetch.length}: ${ds.name}`);
                 // 1. Get signed URL from backend
                 logger.debug(`Getting read URL for dataset: ${ds.name} (ID: ${ds._id})`);
                 const urlResponse = await apiClient.get(`/datasets/${ds._id}/read-url`);
@@ -51,6 +69,7 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
                 logger.debug(`Got read URL for ${ds.name}`);
 
                 // 2. Fetch content using the URL
+                setProcessingDetail(`Downloading content for ${ds.name}`);
                 logger.debug(`Fetching content from storage for ${ds.name}...`);
 
                 const contentResponse = await axios.get(readUrl, {
@@ -74,6 +93,7 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
 
             } catch (fetchErr) {
                 logger.error(`Failed to fetch content for ${ds.name}:`, fetchErr);
+                setProcessingDetail(`Error fetching ${ds.name}: ${fetchErr.message}`);
 
                 // Add error entry to results
                 results.push({
@@ -88,8 +108,46 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
         // Log summary
         const successCount = results.filter(r => !r.error).length;
         logger.info(`Finished fetching dataset content: ${successCount}/${results.length} successful`);
+        setProcessingDetail(`Data fetch complete: ${successCount}/${results.length} datasets loaded`);
 
         return results;
+    }, []);
+
+    // Update message with current processing stage
+    const updateProcessingStage = useCallback((stage, detail = '') => {
+        setProcessingStage(stage);
+        setProcessingDetail(detail);
+
+        // Find a friendly message to display to the user
+        let userMessage = 'Processing...';
+        switch(stage) {
+            case PROCESSING_STAGES.GENERATING_CODE:
+                userMessage = "Generating analysis code...";
+                break;
+            case PROCESSING_STAGES.FETCHING_DATA:
+                userMessage = "Fetching dataset content...";
+                break;
+            case PROCESSING_STAGES.PROCESSING_DATA:
+                userMessage = "Processing raw data...";
+                break;
+            case PROCESSING_STAGES.ANALYZING_DATA:
+                userMessage = "Analyzing financial patterns...";
+                break;
+            case PROCESSING_STAGES.CREATING_VISUALS:
+                userMessage = "Creating visualizations...";
+                break;
+            case PROCESSING_STAGES.FINALIZING_REPORT:
+                userMessage = "Finalizing report...";
+                break;
+            case PROCESSING_STAGES.COMPLETE:
+                userMessage = "Report complete!";
+                break;
+            case PROCESSING_STAGES.ERROR:
+                userMessage = `Error: ${detail}`;
+                break;
+        }
+
+        return userMessage;
     }, []);
 
     // Main submit function
@@ -118,11 +176,12 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
         logger.debug("Starting prompt submission process");
         setIsLoading(true);
         setError(null);
+        const initialStageMessage = updateProcessingStage(PROCESSING_STAGES.GENERATING_CODE);
 
         // Add placeholder AI message in the chat
         const loadingMessageId = addMessageCallback({
             type: 'ai',
-            content: "Generating report code...",
+            content: initialStageMessage,
             isLoading: true
         });
 
@@ -141,7 +200,8 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
             }
 
             // 2. Call API to get AI-generated code
-            updateMessageById(loadingMessageId, { content: "Generating analysis code..." });
+            const stageMessage = updateProcessingStage(PROCESSING_STAGES.GENERATING_CODE, "Requesting AI analysis");
+            updateMessageById(loadingMessageId, { content: stageMessage });
             logger.debug("Calling backend API to generate code");
 
             const codeResponse = await apiClient.post('/prompts', {
@@ -161,7 +221,9 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
             logger.info(`Received code (${aiGeneratedCode.length} chars) for promptId: ${promptId}`);
 
             // 3. Fetch dataset content
-            updateMessageById(loadingMessageId, { content: "Fetching dataset content..." });
+            updateMessageById(loadingMessageId, {
+                content: updateProcessingStage(PROCESSING_STAGES.FETCHING_DATA)
+            });
 
             // Find the dataset objects that match the selected IDs
             const datasetsToFetch = allAvailableDatasets.filter(ds =>
@@ -184,17 +246,39 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
             }
 
             // 4. Set up Web Worker for execution
-            updateMessageById(loadingMessageId, { content: "Executing report code..." });
+            updateMessageById(loadingMessageId, {
+                content: updateProcessingStage(PROCESSING_STAGES.PROCESSING_DATA, "Initializing analysis")
+            });
             logger.debug("Initializing Web Worker for code execution");
 
             workerRef.current = new ReportWorker();
 
             // 5. Set up worker message handler
             workerRef.current.onmessage = (event) => {
-                const { status, output, error: workerError, errorDetails } = event.data || {};
+                const { status, output, error: workerError, errorDetails, type, stage, detail, quality } = event.data || {};
+
+                // Handle progress updates
+                if (type === 'progress') {
+                    const userFriendlyMessage = updateProcessingStage(stage, detail);
+                    updateMessageById(loadingMessageId, {
+                        content: userFriendlyMessage,
+                        isLoading: true
+                    });
+                    return; // Don't process further for progress updates
+                }
+
+                // Handle final result
                 logger.info(`Received ${status} response from worker`);
 
                 if (status === 'success') {
+                    // Quality assessment log
+                    if (quality) {
+                        logger.info(`Report quality assessment: Score=${quality.qualityScore}/3, ` +
+                            `Has visualizations=${quality.hasVisualizations}, ` +
+                            `Has executive summary=${quality.hasExecutiveSummary}, ` +
+                            `Has recommendations=${quality.hasRecommendations}`);
+                    }
+
                     // Update message with the HTML output
                     updateMessageById(loadingMessageId, {
                         content: "Report generated successfully. Click to view.",
@@ -202,10 +286,14 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
                         reportHtml: output,
                         promptId,
                         isError: false,
-                        isLoading: false
+                        isLoading: false,
+                        quality: quality || null
                     });
 
                     setError(null);
+
+                    // Update final processing stage
+                    updateProcessingStage(PROCESSING_STAGES.COMPLETE);
                 } else {
                     // Handle error case
                     const errorMsg = workerError || 'Unknown error during report generation';
@@ -223,6 +311,7 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
                     });
 
                     setError(errorMsg);
+                    updateProcessingStage(PROCESSING_STAGES.ERROR, errorMsg);
                 }
 
                 // Clean up worker after processing response
@@ -249,6 +338,7 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
                 });
 
                 setError(errorMsg);
+                updateProcessingStage(PROCESSING_STAGES.ERROR, errorMsg);
 
                 // Clean up worker
                 if (workerRef.current) {
@@ -295,6 +385,7 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
             });
 
             setError(errorMsg);
+            updateProcessingStage(PROCESSING_STAGES.ERROR, errorMsg);
 
             // Clean up worker if it exists
             if (workerRef.current) {
@@ -304,7 +395,13 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
 
             setIsLoading(false);
         }
-    }, [addMessageCallback, updateMessageById, fetchAllDatasetContent, isLoading]);
+    }, [addMessageCallback, updateMessageById, fetchAllDatasetContent, isLoading, updateProcessingStage]);
 
-    return { submitPrompt, isLoading, error };
+    return {
+        submitPrompt,
+        isLoading,
+        error,
+        processingStage,
+        processingDetail
+    };
 };
