@@ -151,6 +151,10 @@ TECHNICAL REQUIREMENTS:
    - Balance sheet analysis
    - Profit & loss statements
 
+10. ENVIRONMENT RESTRICTION: CRITICAL - DO NOT use the 'window' or 'document' objects, or any browser-specific APIs like 'window.innerWidth' or CSS media queries within the component's JavaScript logic. The generated code runs in a restricted environment without access to these browser globals.
+11. RESPONSIVE LAYOUT: Design layouts to be reasonably responsive by default. Use techniques like flexbox with wrapping ('flexWrap: 'wrap') or vertical stacking for components that might need to adapt, instead of trying to detect viewport size.
+
+
 EXAMPLE CODE FOR RECHARTS (CORRECT PATTERN):
 \`\`\`javascript
 // Correct way to use Recharts components (ALWAYS use this pattern)
