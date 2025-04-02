@@ -1,32 +1,32 @@
 # backend/src/features/prompts/README.md
-# ** UPDATED FILE - Reflect change to React.createElement prompting **
+# ** UPDATED FILE - Reflect explicit scope injection + logging **
 
 ## Feature: Prompts & AI Interaction
 
-This feature slice handles receiving user prompts, interacting with the AI model (Anthropic Claude), generating **React code using `React.createElement`**, executing that code via the execution service, and storing the interaction history.
+This feature slice handles receiving user prompts, interacting with the AI model (Anthropic Claude) to generate **React code**, and returning that code to the frontend for client-side execution via Web Workers.
 
-### Core Flow (Phase 5 - Revised)
+### Core Flow (Phase 5 - Client-Side Execution with Debug Logging)
 
 1.  **API Request (`POST /api/v1/prompts`):** Frontend sends `promptText` and `selectedDatasetIds`. Middleware validates auth/subscription.
-2.  **Controller (`prompt.controller.js`):** Validates request, calls `prompt.service.generateCodeAndExecute`.
-3.  **Service (`prompt.service.js`):**
+2.  **Controller (`prompt.controller.js::generateAndExecuteReport`):** Validates request, calls `prompt.service.generateCode`.
+3.  **Service (`prompt.service.js::generateCode`):**
     *   Creates an initial `PromptHistory` record.
-    *   **Assembles Context:** Gathers schema/metadata about selected datasets to inform the AI.
-    *   **Pre-fetches Data:** Loads the actual content of the selected datasets from GCS.
-    *   **Generates System Prompt:** Creates detailed instructions for Claude, **explicitly requiring it to generate a React component named `ReportComponent` using ONLY `React.createElement` syntax (NO JSX)**. It specifies the expected `datasets` prop structure (including the pre-fetched `content` string) and the available libraries (React, Recharts, PapaParse, Lodash).
-    *   **Calls Claude API:** Sends the context, user prompt, and system prompt to Claude to generate the JavaScript code string. Logs the generated code.
-    *   **Prepares Execution Context:** Bundles the pre-fetched dataset content (`{ name, content }`) for the execution service.
-    *   **Calls Execution Service:** Invokes `executionService.executeGeneratedCode`, passing the generated JS code string and the data context.
-    *   **Processes Result:** Receives the execution status and output (rendered HTML string or error message) from the execution service.
-    *   **Updates History:** Updates the `PromptHistory` record with the generated code, execution status, result/error, and duration.
-    *   Returns the execution result to the controller.
-4.  **Execution Service (`code_execution/execution.service.js`):** (Placeholder) Takes the JS code string and data context. Uses `new Function()` (INSECURE!) to execute the code, providing the specified libraries (React, ReactDOMServer, etc.) and the `datasets` prop. Renders the component to an HTML string using `ReactDOMServer.renderToString()`. Returns success/output or error.
-5.  **Model (`prompt.model.js`):** Defines the schema for storing interaction history, including fields for `aiGeneratedCode` and `executionResult`.
+    *   **Assembles Context:** Gathers schema/metadata.
+    *   **Generates System Prompt:** Creates detailed instructions for Claude:
+        *   Requires `ReportComponent` using `React.createElement`.
+        *   Requires accessing libraries via `executionScope` object.
+        *   Expects data via `datasets` prop, parsing MUST use `executionScope.Papa`.
+        *   **Explicitly instructs the AI to add extensive internal logging** using `executionScope.console.log` and `executionScope.console.error` to track data parsing and calculations within the generated component. This is critical for debugging.
+    *   **Calls Claude API.**
+    *   **Extracts Code.** Logs the extracted code to the backend console for inspection.
+    *   **Updates History.**
+    *   Returns the `aiGeneratedCode` (or error) to the controller.
+4.  **API Response:** Backend sends the `aiGeneratedCode` string (or error details) back to the frontend.
 
 ### Files
 
 *   `prompt.model.js`
-*   `prompt.service.js` (Major changes in system prompt and data handling)
+*   `prompt.service.js` (Updated system prompt for scope + logging, logs generated code)
 *   `prompt.controller.js`
 *   `prompt.routes.js`
 *   `README.md` (This file)
@@ -35,15 +35,14 @@ This feature slice handles receiving user prompts, interacting with the AI model
 
 *   Anthropic Claude Client
 *   User, Dataset, PromptHistory models
-*   `code_execution.service.js`
 *   `logger`
 *   Middleware
 
-### API Endpoints (Phase 5)
+### API Endpoints (Phase 5 - Client-Side Exec)
 
 *   **`POST /api/v1/prompts`**
-    *   **Description:** Triggers AI code generation (using `React.createElement`), executes code, returns rendered HTML or error.
+    *   **Description:** Triggers AI code generation and returns the generated code string.
     *   **Auth:** Required (Login + Sub).
     *   **Request:** `{ promptText: string, selectedDatasetIds: string[] }`
-    *   **Success (200):** `{ status: 'success', data: { executionOutput: string, executionStatus: 'completed' | 'error_...', promptId: string } }`
+    *   **Success (200):** `{ status: 'success', data: { aiGeneratedCode: string, promptId: string } }`
     *   **Errors:** `400`, `401`, `403`, `500`.

@@ -1,11 +1,11 @@
 # FE_BE_INTERACTION_README.md
-# ** UPDATED FILE - Update Prompts Endpoint Response **
+# ** UPDATED FILE - Prompt response + Dataset Read URL **
 
 # NeuroLedger: Frontend / Backend API Interaction
 
 This document defines the contract for communication between the NeuroLedger frontend (React) and backend (Node.js/Express) services.
 
-**Last Updated:** [Date - After Phase 5 Implementation]
+**Last Updated:** [Date - After Phase 5 Shift to Client-Side Execution]
 
 ## 1. Base API URL
 
@@ -61,14 +61,19 @@ This document defines the contract for communication between the NeuroLedger fro
 *   **`GET /api/v1/datasets`**
     *   Lists user's datasets.
     *   **Auth:** Required (Login + Sub).
-    *   **Success (200):** `{ data: Dataset[] }`
+    *   **Success (200):** `{ data: Dataset[] }` (Note: Should include `_id` and `gcsPath`)
+*   **`GET /api/v1/datasets/{id}/read-url`**
+    *   **Description:** Generates a signed URL for reading the dataset content (used by frontend before sending to worker).
+    *   **Auth:** Required (Login + Sub).
+    *   **Success (200):** `{ status: 'success', data: { signedUrl: string } }`
+    *   **Errors:** `400` (Invalid ID), `404` (Dataset not found/accessible), `500`.
 
 ---
 
-### Feature: Prompts (Phase 5 - Code Gen & Execution)
+### Feature: Prompts (Phase 5 - Client-Side Execution)
 
 *   **`POST /api/v1/prompts`**
-    *   **Description:** Takes prompt/datasets, triggers AI code gen, executes code securely on backend, returns rendered output or error.
+    *   **Description:** Takes prompt/datasets context, triggers AI code generation, returns the generated code string. **Execution now happens client-side.**
     *   **Auth:** Required (Login + Active Subscription).
     *   **Request Body:** `{ "promptText": string, "selectedDatasetIds": string[] }`
     *   **Success Response (200):**
@@ -76,27 +81,34 @@ This document defines the contract for communication between the NeuroLedger fro
         {
           "status": "success",
           "data": {
-            "executionOutput": "<string>", // Rendered HTML string OR error message string
-            "executionStatus": "completed" | "error_executing" | "error_generating", // Status from backend execution/generation
+            "aiGeneratedCode": "<string>", // The raw JS code string from Claude
             "promptId": "<string>" // MongoDB ObjectId of the PromptHistory record
           }
         }
         ```
-    *   **Error Responses:** `400`, `401`, `403`, `500` (e.g., Claude API error, Context error, Uncaught execution error).
+     * **Error Response (e.g., 500, 400):**
+         ```json
+         {
+             "status": "error",
+             "message": "Error generating AI code: <Claude/Service Error Details>",
+             "data": {
+                "promptId": "<string>" // ID if history record was created
+             }
+         }
+         ```
+    *   **Other Errors:** `401`, `403`.
 
 ---
 
 ## 5. Key Data Models (Exchanged Objects)
 
-*(User, SubscriptionInfo, Dataset models remain the same)*
+*(User, SubscriptionInfo, Dataset models remain mostly the same, ensure Dataset list includes `gcsPath`)*
 
-### Prompt Execution Response Data (POST /prompts - Phase 5)
+### Prompt Generation Response Data (POST /prompts - Phase 5 Client-Side Exec)
 
 ```typescript
-interface PromptExecutionResponseData {
-    executionOutput: string; // Can be HTML string on success, or error message string on failure.
-    executionStatus: 'completed' | 'error_executing' | 'error_generating';
-    promptId: string;        // The MongoDB ObjectId (as string) of the saved PromptHistory record
+interface PromptGenResponseData {
+    aiGeneratedCode: string | null; // Null if generation failed
+    promptId: string;
 }
-
 ```
