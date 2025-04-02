@@ -1,11 +1,12 @@
 // frontend/src/report.worker.js
-// COMPLETE SOLUTION - Two-Phase Rendering Approach
+// Updated to handle both CSV and Excel files
 
 // --- Load Dependencies using standard ES Imports ---
 import React from 'react';
 import ReactDOMServer from 'react-dom/server';
 import * as Recharts from 'recharts'; // Import all Recharts exports
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx'; // Import SheetJS for Excel parsing
 import _ from 'lodash';
 
 console.log("Report Worker Script Initializing (Two-Phase Rendering)...");
@@ -72,6 +73,7 @@ self.onmessage = async (event) => {
             Recharts,
             Papa,
             _: _,
+            XLSX: XLSX, // Add XLSX to execution scope
             console: {
                 log: (...args) => console.log('[Sandbox Log]', ...args),
                 warn: (...args) => console.warn('[Sandbox Warn]', ...args),
@@ -99,24 +101,65 @@ self.onmessage = async (event) => {
 
                 console.log(`[Worker] Processing dataset: ${dataset.name}`);
 
-                // Parse CSV data
-                const parsedResult = Papa.parse(dataset.content, {
-                    header: true,
-                    dynamicTyping: true,
-                    skipEmptyLines: true
-                });
+                let data = [];
+                let fields = [];
 
-                if (parsedResult.errors && parsedResult.errors.length > 0) {
-                    console.error("[Worker] Parse errors:", parsedResult.errors);
-                    throw new Error("Error parsing CSV: " + parsedResult.errors[0].message);
+                // Check file extension to decide parsing method
+                const isExcel = dataset.name.toLowerCase().endsWith('.xlsx') ||
+                               dataset.name.toLowerCase().endsWith('.xls');
+
+                if (isExcel) {
+                    // Handle Excel files
+                    try {
+                        console.log("[Worker] Detected Excel file, using XLSX parser");
+
+                        // For binary Excel data, we need to convert it
+                        const workbook = XLSX.read(dataset.content, {type: 'binary'});
+
+                        // Get first sheet
+                        const sheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[sheetName];
+
+                        // Convert to JSON
+                        data = XLSX.utils.sheet_to_json(worksheet);
+
+                        if (data.length > 0) {
+                            fields = Object.keys(data[0]);
+                        }
+
+                        console.log(`[Worker] Excel parsed successfully: ${data.length} rows`);
+                    } catch (excelError) {
+                        console.error("[Worker] Excel parsing failed:", excelError);
+                        throw new Error("Failed to parse Excel file: " + excelError.message);
+                    }
+                } else {
+                    // Handle CSV files
+                    try {
+                        console.log("[Worker] Using Papa Parse for CSV data");
+                        const parsedResult = Papa.parse(dataset.content, {
+                            header: true,
+                            dynamicTyping: true,
+                            skipEmptyLines: true
+                        });
+
+                        if (parsedResult.errors && parsedResult.errors.length > 0) {
+                            console.error("[Worker] Parse errors:", parsedResult.errors);
+                            throw new Error("Error parsing CSV: " + parsedResult.errors[0].message);
+                        }
+
+                        data = parsedResult.data;
+                        fields = parsedResult.meta.fields;
+                    } catch (csvError) {
+                        console.error("[Worker] CSV parsing failed:", csvError);
+                        throw csvError;
+                    }
                 }
-
-                const data = parsedResult.data;
-                console.log(`[Worker] Parsed ${data.length} rows with columns:`, parsedResult.meta.fields);
 
                 if (!data || data.length === 0) {
                     throw new Error("No data rows found in dataset");
                 }
+
+                console.log(`[Worker] Successfully parsed data with ${data.length} rows and fields:`, fields);
 
                 // ===== Extract Key Metrics =====
                 // 1. Basic metrics
@@ -225,95 +268,95 @@ self.onmessage = async (event) => {
 
         // Create the initial HTML with embedded data for client-side rendering
         const createReportHtml = (data) => {
-    // Create the HTML with pre-rendered charts (no script tags)
-    return `
-        <div class="report-container">
-            <h1 class="text-2xl font-bold mb-6">Project Data Analysis Report</h1>
+            // Create the HTML with pre-rendered charts (no script tags)
+            return `
+                <div class="report-container">
+                    <h1 class="text-2xl font-bold mb-6">Project Data Analysis Report</h1>
 
-            <!-- Summary Section -->
-            <div class="bg-white p-4 rounded-lg shadow mb-6">
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div class="border rounded p-3 text-center">
-                        <div class="text-2xl font-semibold">${data.totalProjects.toLocaleString()}</div>
-                        <div class="text-gray-600">Total Projects</div>
-                    </div>
-                    <div class="border rounded p-3 text-center">
-                        <div class="text-2xl font-semibold">${data.uniqueClients.toLocaleString()}</div>
-                        <div class="text-gray-600">Unique Clients</div>
-                    </div>
-                    <div class="border rounded p-3 text-center">
-                        <div class="text-2xl font-semibold">$${data.totalAmount.toLocaleString(undefined, {maximumFractionDigits: 2})}</div>
-                        <div class="text-gray-600">Total Revenue</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Therapy Area Chart -->
-            <div class="bg-white p-4 rounded-lg shadow mb-6">
-                <h2 class="text-lg font-bold mb-3">Top Therapy Areas by Revenue</h2>
-                <div class="simple-chart space-y-2">
-                    ${data.therapyAreaData.map(item => {
-                        // Find max value for scaling
-                        const maxAmount = Math.max(...data.therapyAreaData.map(d => d.amount));
-                        const widthPercent = Math.max(1, Math.round((item.amount / maxAmount) * 100));
-                        return `
-                        <div class="flex items-center">
-                            <div class="w-64 truncate pr-2 text-sm">${item.name}</div>
-                            <div class="relative h-8 bg-gray-100 flex-grow rounded overflow-hidden">
-                                <div class="absolute top-0 left-0 h-full bg-blue-500 rounded-l" style="width: ${widthPercent}%"></div>
+                    <!-- Summary Section -->
+                    <div class="bg-white p-4 rounded-lg shadow mb-6">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div class="border rounded p-3 text-center">
+                                <div class="text-2xl font-semibold">${data.totalProjects.toLocaleString()}</div>
+                                <div class="text-gray-600">Total Projects</div>
                             </div>
-                            <div class="w-32 pl-2 text-right font-medium">$${item.amount.toLocaleString()}</div>
+                            <div class="border rounded p-3 text-center">
+                                <div class="text-2xl font-semibold">${data.uniqueClients.toLocaleString()}</div>
+                                <div class="text-gray-600">Unique Clients</div>
+                            </div>
+                            <div class="border rounded p-3 text-center">
+                                <div class="text-2xl font-semibold">$${data.totalAmount.toLocaleString(undefined, {maximumFractionDigits: 2})}</div>
+                                <div class="text-gray-600">Total Revenue</div>
+                            </div>
                         </div>
-                        `;
-                    }).join('')}
-                </div>
-            </div>
+                    </div>
 
-            <!-- Client Chart -->
-            <div class="bg-white p-4 rounded-lg shadow mb-6">
-                <h2 class="text-lg font-bold mb-3">Top Clients by Revenue</h2>
-                <div class="simple-chart space-y-2">
-                    ${data.clientData.map(item => {
-                        // Find max value for scaling
-                        const maxAmount = Math.max(...data.clientData.map(d => d.amount));
-                        const widthPercent = Math.max(1, Math.round((item.amount / maxAmount) * 100));
-                        return `
-                        <div class="flex items-center">
-                            <div class="w-64 truncate pr-2 text-sm">${item.name}</div>
-                            <div class="relative h-8 bg-gray-100 flex-grow rounded overflow-hidden">
-                                <div class="absolute top-0 left-0 h-full bg-green-500 rounded-l" style="width: ${widthPercent}%"></div>
-                            </div>
-                            <div class="w-32 pl-2 text-right font-medium">$${item.amount.toLocaleString()}</div>
+                    <!-- Therapy Area Chart -->
+                    <div class="bg-white p-4 rounded-lg shadow mb-6">
+                        <h2 class="text-lg font-bold mb-3">Top Therapy Areas by Revenue</h2>
+                        <div class="simple-chart space-y-2">
+                            ${data.therapyAreaData.map(item => {
+                                // Find max value for scaling
+                                const maxAmount = Math.max(...data.therapyAreaData.map(d => d.amount));
+                                const widthPercent = Math.max(1, Math.round((item.amount / maxAmount) * 100));
+                                return `
+                                <div class="flex items-center">
+                                    <div class="w-64 truncate pr-2 text-sm">${item.name}</div>
+                                    <div class="relative h-8 bg-gray-100 flex-grow rounded overflow-hidden">
+                                        <div class="absolute top-0 left-0 h-full bg-blue-500 rounded-l" style="width: ${widthPercent}%"></div>
+                                    </div>
+                                    <div class="w-32 pl-2 text-right font-medium">$${item.amount.toLocaleString()}</div>
+                                </div>
+                                `;
+                            }).join('')}
                         </div>
-                        `;
-                    }).join('')}
-                </div>
-            </div>
+                    </div>
 
-            <!-- Monthly Chart -->
-            <div class="bg-white p-4 rounded-lg shadow mb-6">
-                <h2 class="text-lg font-bold mb-3">Monthly Revenue Trend</h2>
-                ${data.monthlyData.length > 0 ? `
-                <div class="simple-chart">
-                    <div class="flex h-64 mt-4 items-end space-x-1">
-                        ${data.monthlyData.map(item => {
-                            // Find max value for scaling
-                            const maxAmount = Math.max(...data.monthlyData.map(d => d.amount));
-                            const heightPercent = Math.max(5, Math.round((item.amount / maxAmount) * 100));
-                            return `
-                            <div class="flex flex-col items-center flex-grow">
-                                <div class="w-full bg-purple-500 rounded-t" style="height: ${heightPercent}%"></div>
-                                <div class="text-xs mt-1 truncate w-full text-center">${item.month}</div>
+                    <!-- Client Chart -->
+                    <div class="bg-white p-4 rounded-lg shadow mb-6">
+                        <h2 class="text-lg font-bold mb-3">Top Clients by Revenue</h2>
+                        <div class="simple-chart space-y-2">
+                            ${data.clientData.map(item => {
+                                // Find max value for scaling
+                                const maxAmount = Math.max(...data.clientData.map(d => d.amount));
+                                const widthPercent = Math.max(1, Math.round((item.amount / maxAmount) * 100));
+                                return `
+                                <div class="flex items-center">
+                                    <div class="w-64 truncate pr-2 text-sm">${item.name}</div>
+                                    <div class="relative h-8 bg-gray-100 flex-grow rounded overflow-hidden">
+                                        <div class="absolute top-0 left-0 h-full bg-green-500 rounded-l" style="width: ${widthPercent}%"></div>
+                                    </div>
+                                    <div class="w-32 pl-2 text-right font-medium">$${item.amount.toLocaleString()}</div>
+                                </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+
+                    <!-- Monthly Chart -->
+                    <div class="bg-white p-4 rounded-lg shadow mb-6">
+                        <h2 class="text-lg font-bold mb-3">Monthly Revenue Trend</h2>
+                        ${data.monthlyData.length > 0 ? `
+                        <div class="simple-chart">
+                            <div class="flex h-64 mt-4 items-end space-x-1">
+                                ${data.monthlyData.map(item => {
+                                    // Find max value for scaling
+                                    const maxAmount = Math.max(...data.monthlyData.map(d => d.amount));
+                                    const heightPercent = Math.max(5, Math.round((item.amount / maxAmount) * 100));
+                                    return `
+                                    <div class="flex flex-col items-center flex-grow">
+                                        <div class="w-full bg-purple-500 rounded-t" style="height: ${heightPercent}%"></div>
+                                        <div class="text-xs mt-1 truncate w-full text-center">${item.month}</div>
+                                    </div>
+                                    `;
+                                }).join('')}
                             </div>
-                            `;
-                        }).join('')}
+                        </div>
+                        ` : '<div class="p-4 text-gray-500">No monthly data available</div>'}
                     </div>
                 </div>
-                ` : '<div class="p-4 text-gray-500">No monthly data available</div>'}
-            </div>
-        </div>
-    `;
-};
+            `;
+        };
 
         // Create the HTML
         const outputHtml = createReportHtml(reportData);
