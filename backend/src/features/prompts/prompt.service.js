@@ -1,5 +1,4 @@
 // backend/src/features/prompts/prompt.service.js
-// FIXED VERSION - With properly escaped backticks in the prompt
 
 const anthropic = require('../../shared/external_apis/claude.client');
 const User = require('../users/user.model');
@@ -110,6 +109,8 @@ REQUIREMENTS:
    - At least one chart using Recharts when data permits
    - Error handling when datasets are empty/invalid
 
+9. IMMEDIATE EXECUTION: DO NOT USE USEEFFECT FOR INITIAL DATA PROCESSING. Process data immediately in the component function body, not in a useEffect hook. This is critical for server-side rendering.
+
 EXAMPLE CODE STRUCTURE:
 \`\`\`javascript
 function ReportComponent({ datasets }) {
@@ -123,65 +124,75 @@ function ReportComponent({ datasets }) {
 
   console.log("[ReportComponent] Starting execution");
 
+  // 2. Process data immediately (NOT IN USEEFFECT)
+  let reportData = null;
+
   try {
-    // 2. Find valid dataset
+    // Find valid dataset
     const primaryDataset = datasets.find(d => d?.content && !d.error);
     if (!primaryDataset) {
       console.error("[ReportComponent] No valid dataset found");
-      return React.createElement("div", { className: "error" },
-        React.createElement("h3", null, "Error: No valid datasets available")
-      );
+      reportData = { error: "No valid datasets available" };
+    } else {
+      console.log("[ReportComponent] Parsing dataset:", primaryDataset.name);
+      const parsed = Papa.parse(primaryDataset.content, {
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true
+      });
+      console.log("[ReportComponent] Parsed data:", parsed);
+
+      if (parsed.errors?.length > 0) {
+        console.error("[ReportComponent] Parsing errors:", parsed.errors);
+        reportData = { error: "Error parsing data" };
+      } else {
+        const data = parsed.data;
+        console.log("[ReportComponent] Data rows:", data.length);
+
+        // Process data here and store results in reportData
+        reportData = {
+          // processed data properties
+        };
+      }
     }
-
-    // 3. Parse data
-    console.log("[ReportComponent] Parsing dataset:", primaryDataset.name);
-    const parsed = Papa.parse(primaryDataset.content, {
-      header: true,
-      dynamicTyping: true,
-      skipEmptyLines: true
-    });
-    console.log("[ReportComponent] Parsed data:", parsed);
-
-    // 4. Handle parsing errors
-    if (parsed.errors?.length > 0) {
-      console.error("[ReportComponent] Parsing errors:", parsed.errors);
-      return React.createElement("div", { className: "error" },
-        React.createElement("h3", null, "Error parsing data")
-      );
-    }
-
-    const data = parsed.data;
-    console.log("[ReportComponent] Data rows:", data.length);
-
-    // 5. Process data
-    // ... calculation code here ...
-
-    // 6. Return visualization
-    return React.createElement("div", null,
-      React.createElement("h2", null, "Analysis Report"),
-      React.createElement(Recharts.BarChart, { width: 600, height: 300, data: chartData },
-        React.createElement(Recharts.CartesianGrid, { strokeDasharray: "3 3" }),
-        React.createElement(Recharts.XAxis, { dataKey: "name" }),
-        React.createElement(Recharts.YAxis, null),
-        React.createElement(Recharts.Tooltip, null),
-        React.createElement(Recharts.Bar, { dataKey: "value", fill: "#8884d8" })
-      )
-    );
   } catch (error) {
     console.error("[ReportComponent] Error:", error);
+    reportData = { error: error.message };
+  }
+
+  // 3. Return appropriate UI based on the already processed data
+  if (!reportData) {
+    return React.createElement("div", null, "Loading...");
+  }
+
+  if (reportData.error) {
     return React.createElement("div", { className: "error" },
       React.createElement("h3", null, "Error processing data"),
-      React.createElement("p", null, error.message)
+      React.createElement("p", null, reportData.error)
     );
   }
+
+  console.log("[ReportComponent] Rendering charts with data:", reportData);
+
+  // 4. Render visualization
+  return React.createElement("div", null,
+    React.createElement("h2", null, "Analysis Report"),
+    React.createElement(Recharts.BarChart, { width: 600, height: 300, data: chartData },
+      React.createElement(Recharts.CartesianGrid, { strokeDasharray: "3 3" }),
+      React.createElement(Recharts.XAxis, { dataKey: "name" }),
+      React.createElement(Recharts.YAxis, null),
+      React.createElement(Recharts.Tooltip, null),
+      React.createElement(Recharts.Bar, { dataKey: "value", fill: "#8884d8" })
+    )
+  );
 }
 \`\`\`
 
-Ensure your code EXACTLY follows this pattern. DO NOT explain the code outside of a code block. Only provide the complete JavaScript code for the ReportComponent function.`;
+Ensure your code EXACTLY follows this pattern, especially processing data immediately instead of in useEffect. DO NOT explain the code outside of a code block. Only provide the complete JavaScript code for the ReportComponent function.`;
 
         const messages = [{ role: "user", content: `${contextUsed}\n\nUser Prompt: ${promptText}` }];
-        const modelToUse = "claude-3-5-sonnet-20240620";
-        const apiOptions = { model: modelToUse, max_tokens: 4096, system: systemPrompt, messages };
+        const modelToUse = "claude-3-7-sonnet-20250219";
+        const apiOptions = { model: modelToUse, max_tokens: 14096, system: systemPrompt, messages };
 
         // 3. Call Claude API
         logger.debug(`Calling Claude API for CODE generation with model ${apiOptions.model}...`);

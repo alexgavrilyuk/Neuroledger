@@ -91,9 +91,18 @@ self.onmessage = async (event) => {
 
         console.log("[Worker] Evaluating Claude's generated component code...");
 
+        // Modify the code to execute immediately instead of in useEffect
+        const modifiedCode = codeString.replace(
+            /useEffect\(\s*\(\s*\)\s*=>\s*{([\s\S]*?)}\s*,\s*\[\]\s*\)/,
+            function(match, effectBody) {
+                return `// Execute immediately instead of in useEffect
+                try {${effectBody}} catch(error) { console.error("[ReportComponent] Error during immediate execution:", error); }`;
+            }
+        );
+
         // Create a function that takes executionScope and returns the ReportComponent
         const getReportComponent = new Function('executionScope', `
-            ${codeString}
+            ${modifiedCode}
             return ReportComponent;
         `);
 
