@@ -1,52 +1,47 @@
 // frontend/src/report.worker.js
-// Updated to handle both CSV and Excel files
+// Executes Claude's generated React component and renders it to HTML
 
 // --- Load Dependencies using standard ES Imports ---
 import React from 'react';
 import ReactDOMServer from 'react-dom/server';
-import * as Recharts from 'recharts'; // Import all Recharts exports
+import * as Recharts from 'recharts';
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx'; // Import SheetJS for Excel parsing
+import * as XLSX from 'xlsx';
 import _ from 'lodash';
 
-console.log("Report Worker Script Initializing (Two-Phase Rendering)...");
+console.log("Report Worker Script Initializing (Claude Code Execution)...");
 
 // --- Worker Logic ---
 self.onmessage = async (event) => {
-    // --- Detailed Logging of Received Data ---
     console.log("[Worker] Received message from main thread");
 
+    // Log basic info about received message
     if (event.data && typeof event.data === 'object') {
-        console.log(`[Worker] Has code property? ${event.data.hasOwnProperty('code')}, Length: ${event.data.code?.length}`);
-        console.log(`[Worker] Has datasets property? ${event.data.hasOwnProperty('datasets')}, IsArray: ${Array.isArray(event.data.datasets)}`);
-
-        if (Array.isArray(event.data.datasets)) {
-            console.log(`[Worker] Number of datasets received: ${event.data.datasets.length}`);
-            event.data.datasets.forEach((ds, index) => {
-                console.log(`[Worker] Dataset ${index}: Name='${ds?.name}', HasContent: ${Boolean(ds?.content)}, ContentLength: ${ds?.content?.length || 0}, Error: ${ds?.error || 'none'}`);
-                // Log first 100 chars of content for verification
-                if (ds?.content) {
-                    console.log(`[Worker] Dataset ${index} Content Preview: ${ds.content.substring(0, 100)}...`);
-                }
-            });
-        }
-    } else {
-        console.warn("[Worker] Received message data is not an object:", event.data);
+        console.log(`[Worker] Received code length: ${event.data.code?.length || 0}`);
+        console.log(`[Worker] Received datasets count: ${Array.isArray(event.data.datasets) ? event.data.datasets.length : 0}`);
     }
 
-    // Destructure message data safely with defaults
+    // Destructure message data with defaults
     const { code: codeString = '', datasets = [] } = event.data || {};
 
     // --- Input Validation ---
     if (!codeString || typeof codeString !== 'string' || codeString.trim() === '') {
         console.error("[Worker] Error: No valid code string provided.");
-        self.postMessage({ status: 'error', error: 'No valid code string provided to worker.' });
+        self.postMessage({
+            status: 'error',
+            error: 'No valid code string provided to worker.',
+            output: createErrorHTML('Missing Code', 'No valid code was provided to the worker.')
+        });
         return;
     }
 
     if (!Array.isArray(datasets) || datasets.length === 0) {
         console.error("[Worker] Error: No valid datasets array provided.");
-        self.postMessage({ status: 'error', error: 'No valid datasets array provided to worker.' });
+        self.postMessage({
+            status: 'error',
+            error: 'No valid datasets array provided to worker.',
+            output: createErrorHTML('Missing Datasets', 'No datasets were provided for analysis.')
+        });
         return;
     }
 
@@ -54,323 +49,87 @@ self.onmessage = async (event) => {
     const hasValidDataset = datasets.some(ds => ds && ds.content && typeof ds.content === 'string' && ds.content.trim() !== '');
     if (!hasValidDataset) {
         console.error("[Worker] Error: None of the datasets have valid content.");
-        self.postMessage({ status: 'error', error: 'No valid dataset content found in any of the provided datasets.' });
+        self.postMessage({
+            status: 'error',
+            error: 'No valid dataset content found in any of the provided datasets.',
+            output: createErrorHTML('Empty Datasets', 'All provided datasets are empty or invalid.')
+        });
         return;
     }
 
     // --- Execution Block ---
     try {
-        console.log("[Worker] Preparing execution scope object...");
+        console.log("[Worker] Setting up execution environment...");
 
-        // Define the scope object that will be PASSED INTO the function
+        // Define the scope object that will be PASSED to Claude's code
         const executionScope = {
+            // React and related
             React,
             useState: React.useState,
             useEffect: React.useEffect,
             useCallback: React.useCallback,
             useMemo: React.useMemo,
             useRef: React.useRef,
+            useLayoutEffect: React.useLayoutEffect,
+            useContext: React.useContext,
+            useReducer: React.useReducer,
+
+            // Libraries
             Recharts,
             Papa,
-            _: _,
-            XLSX: XLSX, // Add XLSX to execution scope
+            _,
+            XLSX,
+
+            // Console (sandboxed)
             console: {
                 log: (...args) => console.log('[Sandbox Log]', ...args),
                 warn: (...args) => console.warn('[Sandbox Warn]', ...args),
                 error: (...args) => console.error('[Sandbox Error]', ...args),
                 info: (...args) => console.info('[Sandbox Info]', ...args),
-            },
-            // Block dangerous globals
-            process: undefined, require: undefined, global: undefined, self: undefined,
-            window: undefined, document: undefined, fetch: undefined, XMLHttpRequest: undefined,
-            localStorage: undefined, sessionStorage: undefined,
-        };
-
-        console.log("[Worker] Execution scope object prepared.");
-
-        // --- Server-Side Phase ---
-        // Process the data and prepare HTML with embedded data for client-side rendering
-        const processDataForReport = (datasets) => {
-            console.log("[Worker] Processing data for report...");
-            try {
-                // Find valid dataset
-                const dataset = datasets.find(d => d && d.content && !d.error);
-                if (!dataset) {
-                    throw new Error("No valid dataset found");
-                }
-
-                console.log(`[Worker] Processing dataset: ${dataset.name}`);
-
-                let data = [];
-                let fields = [];
-
-                // Check file extension to decide parsing method
-                const isExcel = dataset.name.toLowerCase().endsWith('.xlsx') ||
-                               dataset.name.toLowerCase().endsWith('.xls');
-
-                if (isExcel) {
-                    // Handle Excel files
-                    try {
-                        console.log("[Worker] Detected Excel file, using XLSX parser");
-
-                        // For binary Excel data, we need to convert it
-                        const workbook = XLSX.read(dataset.content, {type: 'binary'});
-
-                        // Get first sheet
-                        const sheetName = workbook.SheetNames[0];
-                        const worksheet = workbook.Sheets[sheetName];
-
-                        // Convert to JSON
-                        data = XLSX.utils.sheet_to_json(worksheet);
-
-                        if (data.length > 0) {
-                            fields = Object.keys(data[0]);
-                        }
-
-                        console.log(`[Worker] Excel parsed successfully: ${data.length} rows`);
-                    } catch (excelError) {
-                        console.error("[Worker] Excel parsing failed:", excelError);
-                        throw new Error("Failed to parse Excel file: " + excelError.message);
-                    }
-                } else {
-                    // Handle CSV files
-                    try {
-                        console.log("[Worker] Using Papa Parse for CSV data");
-                        const parsedResult = Papa.parse(dataset.content, {
-                            header: true,
-                            dynamicTyping: true,
-                            skipEmptyLines: true
-                        });
-
-                        if (parsedResult.errors && parsedResult.errors.length > 0) {
-                            console.error("[Worker] Parse errors:", parsedResult.errors);
-                            throw new Error("Error parsing CSV: " + parsedResult.errors[0].message);
-                        }
-
-                        data = parsedResult.data;
-                        fields = parsedResult.meta.fields;
-                    } catch (csvError) {
-                        console.error("[Worker] CSV parsing failed:", csvError);
-                        throw csvError;
-                    }
-                }
-
-                if (!data || data.length === 0) {
-                    throw new Error("No data rows found in dataset");
-                }
-
-                console.log(`[Worker] Successfully parsed data with ${data.length} rows and fields:`, fields);
-
-                // ===== Extract Key Metrics =====
-                // 1. Basic metrics
-                const totalProjects = data.length;
-
-                // 2. Unique clients
-                const uniqueClients = _.uniqBy(data, 'Client').length;
-
-                // 3. Total amount/revenue
-                const totalAmount = _.sumBy(data, row => {
-                    const amount = typeof row.Amount === 'number' ? row.Amount :
-                                parseFloat(row.Amount || '0');
-                    return isNaN(amount) ? 0 : amount;
-                });
-
-                // 4. Top therapy areas
-                const therapyAreaData = _.chain(data)
-                    .groupBy('TherapyArea')
-                    .map((items, name) => ({
-                        name: name || "Unknown",
-                        count: items.length,
-                        amount: _.sumBy(items, item => {
-                            const val = typeof item.Amount === 'number' ? item.Amount : parseFloat(item.Amount || '0');
-                            return isNaN(val) ? 0 : val;
-                        })
-                    }))
-                    .orderBy(['amount'], ['desc'])
-                    .slice(0, 10)
-                    .value();
-
-                // 5. Top clients
-                const clientData = _.chain(data)
-                    .groupBy('Client')
-                    .map((items, name) => ({
-                        name: name || "Unknown",
-                        count: items.length,
-                        amount: _.sumBy(items, item => {
-                            const val = typeof item.Amount === 'number' ? item.Amount : parseFloat(item.Amount || '0');
-                            return isNaN(val) ? 0 : val;
-                        })
-                    }))
-                    .orderBy(['amount'], ['desc'])
-                    .slice(0, 10)
-                    .value();
-
-                // 6. Monthly revenue (if date is available)
-                let monthlyData = [];
-                if (data[0].Date) {
-                    monthlyData = _.chain(data)
-                        .groupBy(item => {
-                            // Handle different date formats
-                            let date;
-                            if (typeof item.Date === 'string') {
-                                // Try YYYY-MM-DD format
-                                if (item.Date.includes('-')) {
-                                    const parts = item.Date.split('-');
-                                    if (parts.length >= 2) {
-                                        return `${parts[0]}-${parts[1]}`; // YYYY-MM
-                                    }
-                                }
-                                // Try MM/DD/YYYY format
-                                if (item.Date.includes('/')) {
-                                    const parts = item.Date.split('/');
-                                    if (parts.length >= 3) {
-                                        return `${parts[2]}-${parts[0].padStart(2, '0')}`; // YYYY-MM
-                                    }
-                                }
-                            }
-                            return 'Unknown';
-                        })
-                        .map((items, month) => ({
-                            month,
-                            amount: _.sumBy(items, item => {
-                                const val = typeof item.Amount === 'number' ? item.Amount : parseFloat(item.Amount || '0');
-                                return isNaN(val) ? 0 : val;
-                            })
-                        }))
-                        .orderBy(['month'], ['asc'])
-                        .value();
-                }
-
-                console.log("[Worker] Processed data for charts:", {
-                    therapyAreaCount: therapyAreaData.length,
-                    clientCount: clientData.length,
-                    monthlyDataCount: monthlyData.length
-                });
-
-                return {
-                    totalProjects,
-                    uniqueClients,
-                    totalAmount,
-                    therapyAreaData,
-                    clientData,
-                    monthlyData
-                };
-
-            } catch (error) {
-                console.error("[Worker] Data processing error:", error);
-                throw error;
             }
         };
 
-        // Process the data
-        const reportData = processDataForReport(datasets);
-        console.log("[Worker] Report data processed successfully");
+        console.log("[Worker] Evaluating Claude's generated component code...");
 
-        // Create the initial HTML with embedded data for client-side rendering
-        const createReportHtml = (data) => {
-            // Create the HTML with pre-rendered charts (no script tags)
-            return `
-                <div class="report-container">
-                    <h1 class="text-2xl font-bold mb-6">Project Data Analysis Report</h1>
+        // Create a function that takes executionScope and returns the ReportComponent
+        const getReportComponent = new Function('executionScope', `
+            ${codeString}
+            return ReportComponent;
+        `);
 
-                    <!-- Summary Section -->
-                    <div class="bg-white p-4 rounded-lg shadow mb-6">
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div class="border rounded p-3 text-center">
-                                <div class="text-2xl font-semibold">${data.totalProjects.toLocaleString()}</div>
-                                <div class="text-gray-600">Total Projects</div>
-                            </div>
-                            <div class="border rounded p-3 text-center">
-                                <div class="text-2xl font-semibold">${data.uniqueClients.toLocaleString()}</div>
-                                <div class="text-gray-600">Unique Clients</div>
-                            </div>
-                            <div class="border rounded p-3 text-center">
-                                <div class="text-2xl font-semibold">$${data.totalAmount.toLocaleString(undefined, {maximumFractionDigits: 2})}</div>
-                                <div class="text-gray-600">Total Revenue</div>
-                            </div>
-                        </div>
-                    </div>
+        // Get the component function
+        const ReportComponent = getReportComponent(executionScope);
 
-                    <!-- Therapy Area Chart -->
-                    <div class="bg-white p-4 rounded-lg shadow mb-6">
-                        <h2 class="text-lg font-bold mb-3">Top Therapy Areas by Revenue</h2>
-                        <div class="simple-chart space-y-2">
-                            ${data.therapyAreaData.map(item => {
-                                // Find max value for scaling
-                                const maxAmount = Math.max(...data.therapyAreaData.map(d => d.amount));
-                                const widthPercent = Math.max(1, Math.round((item.amount / maxAmount) * 100));
-                                return `
-                                <div class="flex items-center">
-                                    <div class="w-64 truncate pr-2 text-sm">${item.name}</div>
-                                    <div class="relative h-8 bg-gray-100 flex-grow rounded overflow-hidden">
-                                        <div class="absolute top-0 left-0 h-full bg-blue-500 rounded-l" style="width: ${widthPercent}%"></div>
-                                    </div>
-                                    <div class="w-32 pl-2 text-right font-medium">$${item.amount.toLocaleString()}</div>
-                                </div>
-                                `;
-                            }).join('')}
-                        </div>
-                    </div>
+        if (typeof ReportComponent !== 'function') {
+            throw new Error("Claude's code did not produce a valid React component function");
+        }
 
-                    <!-- Client Chart -->
-                    <div class="bg-white p-4 rounded-lg shadow mb-6">
-                        <h2 class="text-lg font-bold mb-3">Top Clients by Revenue</h2>
-                        <div class="simple-chart space-y-2">
-                            ${data.clientData.map(item => {
-                                // Find max value for scaling
-                                const maxAmount = Math.max(...data.clientData.map(d => d.amount));
-                                const widthPercent = Math.max(1, Math.round((item.amount / maxAmount) * 100));
-                                return `
-                                <div class="flex items-center">
-                                    <div class="w-64 truncate pr-2 text-sm">${item.name}</div>
-                                    <div class="relative h-8 bg-gray-100 flex-grow rounded overflow-hidden">
-                                        <div class="absolute top-0 left-0 h-full bg-green-500 rounded-l" style="width: ${widthPercent}%"></div>
-                                    </div>
-                                    <div class="w-32 pl-2 text-right font-medium">$${item.amount.toLocaleString()}</div>
-                                </div>
-                                `;
-                            }).join('')}
-                        </div>
-                    </div>
+        console.log("[Worker] Successfully extracted ReportComponent function");
 
-                    <!-- Monthly Chart -->
-                    <div class="bg-white p-4 rounded-lg shadow mb-6">
-                        <h2 class="text-lg font-bold mb-3">Monthly Revenue Trend</h2>
-                        ${data.monthlyData.length > 0 ? `
-                        <div class="simple-chart">
-                            <div class="flex h-64 mt-4 items-end space-x-1">
-                                ${data.monthlyData.map(item => {
-                                    // Find max value for scaling
-                                    const maxAmount = Math.max(...data.monthlyData.map(d => d.amount));
-                                    const heightPercent = Math.max(5, Math.round((item.amount / maxAmount) * 100));
-                                    return `
-                                    <div class="flex flex-col items-center flex-grow">
-                                        <div class="w-full bg-purple-500 rounded-t" style="height: ${heightPercent}%"></div>
-                                        <div class="text-xs mt-1 truncate w-full text-center">${item.month}</div>
-                                    </div>
-                                    `;
-                                }).join('')}
-                            </div>
-                        </div>
-                        ` : '<div class="p-4 text-gray-500">No monthly data available</div>'}
-                    </div>
-                </div>
-            `;
-        };
+        // Create the React element with the datasets prop
+        const reactElement = React.createElement(ReportComponent, { datasets });
 
-        // Create the HTML
-        const outputHtml = createReportHtml(reportData);
+        // Server-side render to HTML
+        console.log("[Worker] Rendering component to HTML...");
+        const renderedHTML = ReactDOMServer.renderToString(reactElement);
 
-        console.log(`[Worker] Generated HTML report (length: ${outputHtml.length})`);
+        // Add wrapper div with styling for the final output
+        const finalHTML = `
+            <div class="claude-generated-report">
+                ${renderedHTML}
+            </div>
+        `;
+
+        console.log(`[Worker] Successfully rendered HTML (length: ${finalHTML.length})`);
 
         // Send the result back to the main thread
         self.postMessage({
             status: 'success',
-            output: outputHtml
+            output: finalHTML
         });
 
     } catch (error) {
-        console.error("[Worker] CRITICAL ERROR during execution:", error);
+        console.error("[Worker] Error during execution:", error);
         console.error("[Worker] Error stack:", error.stack);
 
         // Create a detailed error object
@@ -386,15 +145,23 @@ self.onmessage = async (event) => {
             status: 'error',
             error: `Error executing code: ${error.message}`,
             errorDetails: errorInfo,
-            // Include a fallback error message HTML
-            output: `<div class="error-message p-4 bg-red-100 border border-red-400 rounded-lg">
-                <h3 class="text-lg font-bold text-red-800 mb-2">Error Executing Report Code</h3>
-                <p class="text-red-700">${error.message}</p>
-                <p class="mt-2 text-sm text-red-600">Check browser console for more details.</p>
-            </div>`
+            output: createErrorHTML('Report Generation Error', error.message)
         });
     }
 };
+
+/**
+ * Creates a styled HTML error message
+ */
+function createErrorHTML(title, message) {
+    return `
+        <div class="error-message p-4 bg-red-100 border border-red-400 rounded-lg">
+            <h3 class="text-lg font-bold text-red-800 mb-2">${title}</h3>
+            <p class="text-red-700">${message}</p>
+            <p class="mt-2 text-sm text-red-600">Check browser console for more details.</p>
+        </div>
+    `;
+}
 
 // Global error handler
 self.onerror = (event) => {
@@ -404,15 +171,11 @@ self.onerror = (event) => {
         self.postMessage({
             status: 'error',
             error: `Worker script error: ${event.message || 'Unknown error'}`,
-            output: `<div class="error-message p-4 bg-red-100 border border-red-400 rounded-lg">
-                <h3 class="text-lg font-bold text-red-800 mb-2">Worker Error</h3>
-                <p class="text-red-700">An unexpected error occurred in the report worker.</p>
-                <p class="mt-2 text-sm text-red-600">Check browser console for details.</p>
-            </div>`
+            output: createErrorHTML('Worker Error', 'An unexpected error occurred in the report worker.')
         });
     } catch (e) {
         console.error("[Worker] Could not post error back to main thread:", e);
     }
 };
 
-console.log("Report Worker Script Initialized (Two-Phase Rendering)");
+console.log("Report Worker Script Initialized (Claude Code Execution)");
