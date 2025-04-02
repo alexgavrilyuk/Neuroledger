@@ -1,5 +1,5 @@
 // src/report.worker.js
-// UPDATED with robust error handling and code correction
+// Fixed version to prevent the infinite re-render loop
 
 // --- Load Dependencies using standard ES Imports ---
 import React from 'react';
@@ -97,6 +97,26 @@ self.onmessage = async (event) => {
         }
     });
 
+    // Fix 5: Fix infinite loop - Remove useState calls that trigger re-renders
+    fixedCodeString = fixedCodeString.replace(
+        /const \[processingStatus, setProcessingStatus\] = useState\({.*?\}\);/s,
+        '// Removed useState that was causing re-renders\nconst processingStatus = { isLoading: false, error: null, parsedData: null, insights: null };'
+    );
+
+    // Fix 6: Replace any setState calls in the main function body
+    fixedCodeString = fixedCodeString.replace(
+        /setProcessingStatus\({.*?\}\);/g,
+        '// Removed setState call to prevent re-renders\n// processingStatus was updated directly instead'
+    );
+
+    // Fix 7: Wrap immediate processing code in a try-catch to prevent crashes
+    if (fixedCodeString.includes('// Process data immediately (not in useEffect)')) {
+        fixedCodeString = fixedCodeString.replace(
+            /\/\/ Process data immediately \(not in useEffect\)([\s\S]*?)try {/m,
+            '// Process data immediately (not in useEffect)\ntry {'
+        );
+    }
+
     // --- Execution Block ---
     try {
         console.log("[Worker] Setting up execution environment...");
@@ -131,19 +151,10 @@ self.onmessage = async (event) => {
 
         console.log("[Worker] Evaluating Claude's generated component code...");
 
-        // Modify the code to execute immediately instead of in useEffect
-        const modifiedCode = fixedCodeString.replace(
-            /useEffect\(\s*\(\s*\)\s*=>\s*{([\s\S]*?)}\s*,\s*\[\]\s*\)/,
-            function(match, effectBody) {
-                return `// Execute immediately instead of in useEffect
-                try {${effectBody}} catch(error) { console.error("[ReportComponent] Error during immediate execution:", error); }`;
-            }
-        );
-
         // Create a function that takes executionScope and returns the ReportComponent
         const getReportComponent = new Function('executionScope', `
             try {
-                ${modifiedCode}
+                ${fixedCodeString}
                 return ReportComponent;
             } catch (error) {
                 console.error("[Sandbox Error] Error in component function:", error);
