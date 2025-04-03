@@ -271,6 +271,7 @@ export const usePromptSubmit = (addMessageCallback, updateMessageById, clearAllL
                 logger.info(`Received ${status} response from worker`);
 
                 if (status === 'success') {
+                    console.log("RAW WORKER HTML:", output);
                     // Quality assessment log
                     if (quality) {
                         logger.info(`Report quality assessment: Score=${quality.qualityScore}/3, ` +
