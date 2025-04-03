@@ -1,5 +1,8 @@
+// ================================================================================
+// FILE: NeuroLedger/frontend/src/features/dashboard/components/MessageBubble.jsx
+// ================================================================================
 // frontend/src/features/dashboard/components/MessageBubble.jsx
-// Fixed to remove quality badge from UI
+// ** UPDATED FILE - Pass reportInfo object to onViewReport **
 
 import React from 'react';
 import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid';
@@ -10,12 +13,14 @@ const MessageBubble = ({ message, onViewReport }) => {
     const isUser = message.type === 'user';
     const isError = message.isError || message.contentType === 'error';
     const isLoading = message.isLoading;
-    const isReportAvailable = message.contentType === 'report_available' && message.reportHtml;
+    // --- UPDATED Check ---
+    const isReportAvailable = message.contentType === 'report_iframe_ready' && message.reportInfo?.code && message.reportInfo?.datasets;
+    // --- END UPDATE ---
 
-    // --- Styles ---
-    const bubbleBaseStyle = `max-w-[80%] lg:max-w-[70%] rounded-xl px-4 py-2.5 text-sm shadow-sm`;
+    // --- Styles (Remain the same) ---
+    const bubbleBaseStyle = `max-w-[80%] lg:max-w-[70%] rounded-xl px-4 py-2.5 text-sm shadow-sm break-words`; // Added break-words
     const bubbleAlignment = isUser ? 'ml-auto' : 'mr-auto';
-    const bubbleColor = isUser
+    const bubbleColor = /* ... same style logic ... */ isUser
         ? 'bg-blue-600 text-white'
         : isError
             ? 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-700/50'
@@ -23,20 +28,21 @@ const MessageBubble = ({ message, onViewReport }) => {
                 ? 'bg-gray-100 dark:bg-gray-700/80 text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-600/50'
                 : 'bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100';
 
-    const iconBaseStyle = `h-6 w-6 rounded-full p-1 flex-shrink-0 self-start`;
+    const iconBaseStyle = `h-6 w-6 rounded-full p-1 flex-shrink-0 self-start mt-1`; // Added mt-1 for alignment
     const userIconColor = `bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300`;
-    const aiIconColor = isError
+    const aiIconColor = /* ... same style logic ... */ isError
         ? `bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300`
         : `bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300`;
+
 
     // --- Content Rendering Logic ---
     const renderContent = () => {
         if (isLoading) {
             return (
-                <div className="flex items-center gap-x-2 py-1">
-                   <Spinner size="sm" color={isUser ? "text-white" : "text-gray-500"} />
-                   <span className="italic text-gray-500 dark:text-gray-400">{message.content || "Processing..."}</span>
-                </div>
+                 <div className="flex items-center gap-x-2 py-1">
+                    <Spinner size="sm" color={isUser ? "text-white" : "text-gray-500 dark:text-gray-400"} />
+                    <span className="italic text-current opacity-80">{message.content || "Processing..."}</span>
+                 </div>
             );
         }
 
@@ -44,24 +50,26 @@ const MessageBubble = ({ message, onViewReport }) => {
         if (isReportAvailable) {
             return (
                 <div className="space-y-2">
+                    {/* Display the trigger text */}
                     <p>{message.content || "Report generated."}</p>
                     <div className="flex items-center">
+                        {/* --- UPDATED: Pass reportInfo object --- */}
                         <Button
                             variant="secondary"
                             size="sm"
-                            onClick={() => onViewReport(message.reportHtml, message.quality)}
+                            onClick={() => onViewReport(message.reportInfo, message.quality)} // Pass the object
                             leftIcon={DocumentChartBarIcon}
                         >
                             View Report
                         </Button>
+                        {/* --- END UPDATE --- */}
                     </div>
                 </div>
             );
         }
 
-        // --- Handle Plain Text (User, Simple AI, Error) ---
+        // Handle Plain Text (User, Simple AI, Error)
         if (typeof message.content === 'string') {
-             // Replace newline characters with <br /> for display
              return message.content.split('\n').map((line, index, arr) => (
                 <React.Fragment key={index}>
                     {line || (index > 0 && index < arr.length -1 ? '\u00A0' : '')}
@@ -76,7 +84,7 @@ const MessageBubble = ({ message, onViewReport }) => {
 
     return (
         <div className={`flex items-start gap-x-3 ${isUser ? 'justify-end' : ''}`}>
-            {/* AI/Error Icon */}
+             {/* AI/Error Icon */}
             {!isUser && (
                  <div className={`${iconBaseStyle} ${aiIconColor}`}>
                      {isError ? <ExclamationCircleIcon className="h-full w-full" /> : <CpuChipIcon className="h-full w-full" />}

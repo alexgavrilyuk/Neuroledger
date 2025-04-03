@@ -1,0 +1,334 @@
+<!-- ================================================================================ -->
+<!-- FILE: NeuroLedger/frontend/public/iframe-bootstrapper.html                   -->
+<!-- PURPOSE: Loads Libraries via CDN, receives data/code, executes code          -->
+<!-- VERSION: Corrected postMessage targetOrigin and message listener origin check-->
+<!-- ================================================================================ -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Report Sandbox</title>
+    <style>
+        /* Basic styles for loading/error messages inside iframe */
+        body { margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; transition: background-color 0.3s, color 0.3s; background-color: var(--bg-color, #ffffff); color: var(--text-color, #374151); }
+        body.dark { --bg-color: #111827; --text-color: #d1d5db; }
+        body.light { --bg-color: #ffffff; --text-color: #374151; }
+        #report-root { width: 100%; height: 100%; overflow: auto; padding: 1rem; box-sizing: border-box;}
+        .sandbox-loading-message, .sandbox-error-message { padding: 20px; text-align: center; color: var(--text-color); }
+        .sandbox-error-message h2 { color: #dc2626; }
+        .sandbox-error-message pre { font-size: small; text-align: left; white-space: pre-wrap; word-break: break-all; background-color: rgba(0,0,0,0.05); padding: 8px; border-radius: 4px; margin-top: 8px; color: var(--text-color);}
+        body.dark .sandbox-error-message pre { background-color: rgba(255,255,255,0.1); }
+
+    </style>
+    <!-- --- Define Error Handler and sendMessageToParent FIRST --- -->
+    <script>
+        let scriptLoadErrors = [];
+        // Target origin for sending messages back - '*' is often necessary for sandboxed iframes
+        const parentTargetOrigin = '*';
+
+        function sendMessageToParent(type, status, detail) {
+            if (window.parent && window.parent !== window) {
+                 console.log(`%c[Iframe SEND]%c Sending message to parent: { type: ${type}, status: ${status}, detail: ${detail ? String(detail).substring(0, 100) + '...' : 'N/A'} } (Target: ${parentTargetOrigin})`, "color: blue; font-weight: bold;", "color: blue;");
+                let serializableDetail = detail;
+                // Basic error serialization
+                if (detail instanceof Error) {
+                    serializableDetail = `Error: ${detail.message}${detail.stack ? `\nStack: ${detail.stack}` : ''}`;
+                } else if (typeof detail === 'object' && detail !== null) {
+                    // Basic attempt to serialize, might fail on complex objects
+                    try {
+                        serializableDetail = JSON.stringify(detail, null, 2); // Simple stringify for objects
+                    } catch (e) {
+                        serializableDetail = "[Unserializable detail object]";
+                    }
+                }
+                window.parent.postMessage({ type: type, status: status, detail: serializableDetail }, parentTargetOrigin);
+            } else {
+                console.warn("[Iframe SEND] Cannot send message: window.parent is not accessible or is the same window.");
+            }
+        }
+
+         function handleScriptError(scriptName, event) {
+             const errorMsg = `Failed to load library from CDN: ${scriptName}. Check network tab and console. Error: ${event?.type || 'Unknown load error'}`;
+             console.error(`%c[Iframe ERROR]%c ${errorMsg}`, "color: red; font-weight: bold;", "color: red;", event);
+             scriptLoadErrors.push(scriptName);
+             const reportRoot = document.getElementById('report-root');
+             // Display error only if no other error is already shown
+             if (reportRoot && !reportRoot.querySelector('.sandbox-error-message')) {
+                  reportRoot.innerHTML = `<div class="sandbox-error-message"><h2>Sandbox Library Load Error</h2><p>${errorMsg}</p></div>`;
+             }
+             // Send error status back to parent
+             sendMessageToParent('iframeReportStatus', 'error', `Library load error from CDN: ${scriptName}`);
+         }
+    </script>
+
+    <!-- Load Libraries via jsDelivr CDN -->
+    <!-- Use development versions for easier debugging -->
+    <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.development.js" crossorigin onerror="handleScriptError('React', event)"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.development.js" crossorigin onerror="handleScriptError('React DOM', event)"></script>
+    <!-- PropTypes might not be strictly needed by generated code, optional -->
+    <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js" crossorigin onerror="handleScriptError('PropTypes', event)"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js" crossorigin onerror="handleScriptError('Lodash', event)"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js" crossorigin onerror="handleScriptError('PapaParse', event)"></script>
+    <!-- Note: XLSX CDN might require different handling or a specific build -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" crossorigin onerror="handleScriptError('XLSX', event)"></script>
+    <script src="https://cdn.jsdelivr.net/npm/recharts@2.15.1/umd/Recharts.min.js" crossorigin onerror="handleScriptError('Recharts', event)"></script>
+    <!-- END CDN -->
+
+</head>
+<body>
+    <!-- Target div for React rendering -->
+    <div id="report-root"><p class="sandbox-loading-message">Loading report sandbox and libraries...</p></div>
+
+    <script>
+        // --- Main Bootstrapper Logic ---
+        console.log('%c[Iframe INIT]%c Bootstrapper script executing.', "color: green; font-weight: bold;", "color: green;");
+
+        // Global state within the iframe
+        let receivedCode = null;
+        let receivedDatasets = null;
+        let themeName = 'light'; // Default theme
+        let librariesLoaded = false;
+        let dataAndCodeReceived = false;
+        let renderAttempted = false;
+        // scriptLoadErrors and sendMessageToParent are defined above
+
+        // Wrap main logic in IIFE
+        (function() {
+            console.log('%c[Iframe INIT]%c Starting IIFE wrapper.', "color: green; font-weight: bold;", "color: green;");
+
+            // Function to check if all required libraries are loaded
+            function checkLibrariesLoaded(attemptSource = 'timer') {
+                 console.log(`%c[Iframe LIBS]%c Checking libraries (Source: ${attemptSource})...`, "color: orange; font-weight: bold;", "color: orange;");
+                 if (librariesLoaded || scriptLoadErrors.length > 0) {
+                     console.log(`%c[Iframe LIBS]%c Library check skipped. Loaded: ${librariesLoaded}, Errors: ${scriptLoadErrors.length}`, "color: orange; font-weight: bold;", "color: orange;");
+                     return librariesLoaded;
+                 }
+                 // Check for key library globals
+                 const loaded = !!(window.React && window.ReactDOM && window._ && window.Papa && window.Recharts && window.XLSX);
+                 console.log(`%c[Iframe LIBS]%c Check result: ${loaded}`, "color: orange; font-weight: bold;", "color: orange;");
+                 if (loaded) {
+                    librariesLoaded = true;
+                    window.PropTypes = window.PropTypes || undefined; // Ensure PropTypes exists even if load failed softly
+                    console.log('%c[Iframe LIBS]%c Core libraries confirmed loaded via CDN.', "color: orange; font-weight: bold;", "color: orange;");
+                    console.log("[Iframe] Sending 'iframeReady' message to parent.");
+                    sendMessageToParent('iframeReady', 'success', 'Iframe libraries loaded, ready for data and code.');
+                 } else if (attemptSource === 'final' && !loaded) {
+                     console.error('%c[Iframe LIBS]%c ERROR: Libraries did not load from CDN after timeout.', "color: red; font-weight: bold;", "color: red;");
+                     const missing = ['React', 'ReactDOM', 'PropTypes', 'Recharts', '_', 'Papa', 'XLSX']
+                        .filter(lib => !window[lib]);
+                     const errorMsg = `Failed to load required libraries from CDN: ${missing.join(', ')}. Report cannot be rendered.`;
+                     scriptLoadErrors.push('CDN Libraries');
+                     const reportRoot = document.getElementById('report-root');
+                     if(reportRoot) reportRoot.innerHTML = `<div class="sandbox-error-message"><h2>Library Load Error</h2><p>${errorMsg}</p></div>`;
+                     sendMessageToParent('iframeReportStatus', 'error', errorMsg);
+                 }
+                 return loaded;
+            }
+
+            // Function to execute the received code and render the component
+            function attemptRender(triggerSource = 'unknown') {
+                 console.log(`%c[Iframe RENDER]%c attemptRender triggered by: ${triggerSource}`, "color: purple; font-weight: bold;", "color: purple;");
+                 if (renderAttempted) { console.log('%c[Iframe RENDER]%c Render already attempted.', "color: purple; font-weight: bold;", "color: purple;"); return; }
+                 const reportRoot = document.getElementById('report-root');
+                 if (!reportRoot) { console.error('%c[Iframe RENDER]%c ERROR: report-root element not found!', "color: red; font-weight: bold;", "color: red;"); return; }
+                 if (scriptLoadErrors.length > 0) { console.error('%c[Iframe RENDER]%c Cannot render due to library load errors.', "color: red; font-weight: bold;", "color: red;"); return; }
+                 if (!librariesLoaded) { console.log('%c[Iframe RENDER]%c Libraries not ready for render.', "color: purple; font-weight: bold;", "color: purple;"); return; }
+                 if (!dataAndCodeReceived || !receivedCode || !receivedDatasets) { console.log('%c[Iframe RENDER]%c Code or data not received/ready for render.', "color: purple; font-weight: bold;", "color: purple;"); return; }
+
+                 renderAttempted = true;
+                 console.log('%c[Iframe RENDER]%c Prerequisites met. Attempting to execute AI component code...', "color: purple; font-weight: bold;", "color: purple;");
+                 reportRoot.innerHTML = '<p class="sandbox-loading-message">Executing report code...</p>';
+
+                 requestAnimationFrame(() => {
+                     try {
+                         console.log('%c[Iframe RENDER]%c Running new Function() to define component...', "color: purple; font-weight: bold;", "color: purple;");
+                         // Ensure all expected globals are in the scope passed to the function
+                         const executionScope = {
+                             React: window.React,
+                             ReactDOM: window.ReactDOM,
+                             Recharts: window.Recharts,
+                             _: window._, // Lodash
+                             Papa: window.Papa, // PapaParse
+                             XLSX: window.XLSX, // SheetJS
+                             console: window.console, // Allow console logging from generated code
+                             // Add other globals if your system prompt relies on them
+                         };
+                         // Create the component function from the code string
+                         const getReportComponent = new Function('executionScope', `
+                             // Make libraries available within the function scope
+                             const { React, ReactDOM, Recharts, _, Papa, XLSX, console } = executionScope;
+                             try {
+                                 ${receivedCode}
+                                 // Ensure the expected component name exists
+                                 if (typeof ReportComponent !== 'function') {
+                                     throw new Error('The generated code did not define a function named "ReportComponent".');
+                                 }
+                                 return ReportComponent;
+                             } catch (innerError) {
+                                 console.error("[Sandbox Error] Error occurred inside the generated component code:", innerError);
+                                 // Return a fallback component that displays the error
+                                 return function ErrorDisplayComponent() {
+                                     return React.createElement('div', { style: { color: 'red', border: '1px solid red', padding: '10px', whiteSpace: 'pre-wrap' } },
+                                         React.createElement('h4', null, 'Report Generation Error'),
+                                         React.createElement('p', null, innerError.message),
+                                         React.createElement('pre', { style: { fontSize: 'small' } }, innerError.stack)
+                                     );
+                                 };
+                             }
+                         `);
+
+                         console.log('%c[Iframe RENDER]%c Calling the generated function to get the component...', "color: purple; font-weight: bold;", "color: purple;");
+                         const ReportComponent = getReportComponent(executionScope);
+
+                         if (typeof ReportComponent !== 'function') {
+                             // This case should be handled by the inner try/catch, but double-check
+                             throw new Error("The generated code did not return a valid function.");
+                         }
+                         console.log('%c[Iframe RENDER]%c ReportComponent function obtained successfully.', "color: purple; font-weight: bold;", "color: purple;");
+
+                         console.log('%c[Iframe RENDER]%c Preparing to render with ReactDOM.createRoot().render()...', "color: purple; font-weight: bold;", "color: purple;");
+                         const root = window.ReactDOM.createRoot(reportRoot); // Use createRoot for React 18+
+                         // Pass the received datasets as a prop named 'datasets'
+                         root.render(window.React.createElement(ReportComponent, { datasets: receivedDatasets }));
+                         console.log('%c[Iframe RENDER]%c React component render initiated successfully.', "color: purple; font-weight: bold;", "color: purple;");
+
+                         // Send success message back to parent
+                         sendMessageToParent('iframeReportStatus', 'success', 'Report render initiated.');
+
+                     } catch (error) {
+                          console.error('%c[Iframe RENDER]%c CRITICAL ERROR executing or rendering AI code:', "color: red; font-weight: bold;", "color: red;", error);
+                          const errorMsg = `Execution Error: ${error.message}`;
+                          // Display error inside the iframe
+                          const reportRootElement = document.getElementById('report-root');
+                           if (reportRootElement) {
+                               reportRootElement.innerHTML = `<div class="sandbox-error-message"><h2>Report Execution Error</h2><p>${errorMsg}</p><pre>${error.stack || ''}</pre></div>`;
+                           }
+                          // Send error details back to parent
+                          sendMessageToParent('iframeReportStatus', 'error', errorMsg + (error.stack ? `\nStack: ${error.stack}`: ''));
+                      }
+                 });
+            }
+
+            // Function to apply theme class to iframe body
+            function applyTheme(name) {
+                 console.log(`%c[Iframe THEME]%c Applying theme: ${name}`, "color: teal; font-weight: bold;", "color: teal;");
+                 document.body.classList.remove('light', 'dark');
+                 document.body.classList.add(name || 'light');
+                 // Also update CSS variables for non-Tailwind styles if necessary
+                 document.documentElement.style.setProperty('--text-color', name === 'dark' ? '#e5e7eb' : '#1f2937'); // Example colors
+                 document.documentElement.style.setProperty('--bg-color', name === 'dark' ? '#111827' : '#ffffff');
+            }
+
+            // --- Message Listener Setup (SIMPLIFIED ORIGIN CHECK) ---
+            console.log('%c[Iframe INIT]%c Setting up message listener...', "color: green; font-weight: bold;", "color: green;");
+            window.addEventListener('message', (event) => {
+                // SECURITY CHECK: Only accept messages from the direct parent window.
+                if (event.source !== window.parent) {
+                    console.warn('[Iframe MSG] Message received from non-parent source. Ignoring.');
+                    return;
+                }
+
+                // Log received message type
+                console.log(`%c[Iframe MSG]%c Message received from parent: { type: ${event.data?.type} }`, "color: blue; font-weight: bold;", "color: blue;");
+                const { type, payload } = event.data || {};
+
+                if (type === 'loadDataAndCode') {
+                    console.log('%c[Iframe MSG]%c Received loadDataAndCode payload.', "color: blue; font-weight: bold;", "color: blue;"); // Don't log full payload here for brevity/security
+                    receivedCode = payload?.code;
+                    receivedDatasets = payload?.datasets;
+                    // Basic validation
+                    if (receivedCode && typeof receivedCode === 'string' && Array.isArray(receivedDatasets)) {
+                        dataAndCodeReceived = true;
+                        console.log('%c[Iframe MSG]%c Data and code stored successfully.', "color: blue; font-weight: bold;", "color: blue;");
+                        // Attempt render only if libraries are also ready
+                        if(librariesLoaded) {
+                            attemptRender('loadDataAndCode message received');
+                        } else {
+                            console.warn('%c[Iframe MSG]%c Received data/code, but libraries not ready yet. Render will wait.', "color: blue; font-weight: bold;", "color: blue;");
+                        }
+                    } else {
+                        console.error("%c[Iframe MSG]%c ERROR: Invalid data/code payload received:", "color: red; font-weight: bold;", "color: red;", payload);
+                        sendMessageToParent('iframeReportStatus', 'error', 'Invalid data/code structure received from parent.');
+                    }
+                } else if (type === 'setTheme') {
+                    themeName = payload?.name || 'light';
+                    applyTheme(themeName); // Apply theme immediately when message received
+                } else {
+                    console.warn(`%c[Iframe MSG]%c Received unknown message type: ${type}`, "color: blue; font-weight: bold;", "color: blue;");
+                }
+            });
+            console.log('%c[Iframe INIT]%c Message listener added.', "color: green; font-weight: bold;", "color: green;");
+
+
+            // --- Global Error Handlers ---
+            console.log('%c[Iframe INIT]%c Setting up global error handlers...', "color: green; font-weight: bold;", "color: green;");
+            window.onerror = function(message, source, lineno, colno, error) {
+                 console.error("%c[Iframe ERROR]%c Global Error:", "color: red; font-weight: bold;", "color: red;", message, source, lineno, colno, error);
+                 const errorMsg = `Iframe Script Error: ${message} at ${source}:${lineno}:${colno}`;
+                 sendMessageToParent('iframeReportStatus', 'error', errorMsg);
+                 const reportRoot = document.getElementById('report-root');
+                 if(reportRoot) reportRoot.innerHTML = `<div class="sandbox-error-message"><h2>Iframe Error</h2><p>${errorMsg}</p></div>`;
+                 return true; // Prevent default browser error handling
+              };
+             window.onunhandledrejection = function(event) {
+                 console.error("%c[Iframe ERROR]%c Unhandled Promise Rejection:", "color: red; font-weight: bold;", "color: red;", event.reason);
+                 const errorMsg = `Iframe Async Error: ${event.reason?.message || event.reason}`;
+                 sendMessageToParent('iframeReportStatus', 'error', errorMsg);
+                 const reportRoot = document.getElementById('report-root');
+                  if(reportRoot) reportRoot.innerHTML = `<div class="sandbox-error-message"><h2>Async Error</h2><p>${event.reason?.message || event.reason}</p><pre>${event.reason?.stack || ''}</pre></div>`;
+                 return true; // Prevent default handling
+              };
+            console.log('%c[Iframe INIT]%c Global error handlers added.', "color: green; font-weight: bold;", "color: green;");
+
+            // Apply initial theme based on default
+            console.log('%c[Iframe INIT]%c Applying initial theme...', "color: green; font-weight: bold;", "color: green;");
+            try {
+                applyTheme(themeName);
+                console.log('%c[Iframe INIT]%c Initial theme applied.', "color: green; font-weight: bold;", "color: green;");
+            } catch (themeError) {
+                 console.error('%c[Iframe ERROR]%c Error applying initial theme:', "color: red; font-weight: bold;", "color: red;", themeError);
+                 sendMessageToParent('iframeReportStatus', 'error', 'Failed to apply initial theme.');
+            }
+
+            // --- Library Loading Check ---
+            console.log('%c[Iframe INIT]%c Setting up library check interval...', "color: green; font-weight: bold;", "color: green;");
+            let libraryCheckInterval;
+             try {
+                 libraryCheckInterval = setInterval(() => {
+                     if (checkLibrariesLoaded('interval')) {
+                         console.log('%c[Iframe LIBS]%c Interval detected loaded libraries, clearing interval.', "color: orange; font-weight: bold;", "color: orange;");
+                         clearInterval(libraryCheckInterval);
+                         // If data/code was already received while waiting for libs, attempt render now
+                         if (dataAndCodeReceived) {
+                             attemptRender('libraries loaded after data');
+                         }
+                     }
+                 }, 200); // Check every 200ms
+                 console.log('%c[Iframe INIT]%c Library check interval set.', "color: green; font-weight: bold;", "color: green;");
+             } catch (intervalError) {
+                  console.error('%c[Iframe ERROR]%c Error setting up library check interval:', "color: red; font-weight: bold;", "color: red;", intervalError);
+                  sendMessageToParent('iframeReportStatus', 'error', 'Failed to set up library checker.');
+             }
+
+            // Timeout to stop checking and report error if libs failed
+            console.log('%c[Iframe INIT]%c Setting up library check timeout...', "color: green; font-weight: bold;", "color: green;");
+             try {
+                 setTimeout(() => {
+                      console.log('%c[Iframe LIBS]%c Library load timeout reached. Clearing interval and performing final check.', "color: orange; font-weight: bold;", "color: orange;");
+                      if (libraryCheckInterval) { clearInterval(libraryCheckInterval); }
+                      // Perform one last check and report error if still not loaded
+                      if (!librariesLoaded) {
+                          checkLibrariesLoaded('final');
+                      }
+                 }, 7000); // Increased timeout to 7 seconds for slower networks/CDNs
+                 console.log('%c[Iframe INIT]%c Library check timeout set.', "color: green; font-weight: bold;", "color: green;");
+             } catch (timeoutError) {
+                  console.error('%c[Iframe ERROR]%c Error setting up library check timeout:', "color: red; font-weight: bold;", "color: red;", timeoutError);
+             }
+
+            console.log('%c[Iframe INIT]%c End of IIFE wrapper synchronous execution.', "color: green; font-weight: bold;", "color: green;");
+        })(); // End IIFE wrapper
+    </script>
+</body>
+</html>

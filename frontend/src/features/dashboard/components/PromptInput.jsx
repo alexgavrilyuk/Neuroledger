@@ -1,9 +1,13 @@
+// ================================================================================
+// FILE: NeuroLedger/frontend/src/features/dashboard/components/PromptInput.jsx
+// ================================================================================
 // frontend/src/features/dashboard/components/PromptInput.jsx
-// ** NEW FILE **
+// ** CORRECTED FILE - Fixed JSX syntax error (>) **
+
 import React, { useState } from 'react';
 import Button from '../../../shared/ui/Button';
-import { PaperAirplaneIcon } from '@heroicons/react/24/solid'; // Solid icon for send
-import Spinner from '../../../shared/ui/Spinner'; // Import Spinner for dataset loading
+import { PaperAirplaneIcon } from '@heroicons/react/24/solid';
+import Spinner from '../../../shared/ui/Spinner';
 
 const PromptInput = ({
     onSubmit,
@@ -38,7 +42,9 @@ const PromptInput = ({
                  {datasetsLoading ? (
                      <div className="flex justify-center items-center h-10"> <Spinner size="sm" /> </div>
                  ) : datasets.length === 0 ? (
+                     // --- FIXED HERE: Use > ---
                      <p className="text-xs text-gray-400 dark:text-gray-500">No datasets uploaded yet. Upload in Account > Datasets.</p>
+                     // --- END FIX ---
                  ) : (
                      <div className="space-y-1.5">
                          {datasets.map((ds) => (
@@ -60,19 +66,17 @@ const PromptInput = ({
                  )}
             </div>
 
-
              {/* Prompt Text Area */}
             <div className="flex items-center space-x-3 p-3 border border-gray-200 dark:border-gray-700 rounded-md focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500 dark:bg-gray-800">
                 <textarea
-                    rows={1} // Start with 1 row, auto-expand
+                    rows={1}
                     value={promptText}
                     onChange={(e) => setPromptText(e.target.value)}
                     placeholder="Ask about your selected data..."
                     disabled={isLoading}
                     className="block w-full resize-none border-0 bg-transparent py-1.5 text-gray-900 dark:text-white placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:ring-0 sm:text-sm sm:leading-6 flex-grow outline-none"
-                    style={{ maxHeight: '100px', overflowY: 'auto' }} // Limit height and allow scroll
+                    style={{ maxHeight: '100px', overflowY: 'auto' }}
                      onKeyDown={(e) => {
-                        // Submit on Enter unless Shift is pressed
                          if (e.key === 'Enter' && !e.shiftKey) {
                              e.preventDefault();
                              handleSubmit(e);
@@ -83,10 +87,10 @@ const PromptInput = ({
                     <Button
                         type="submit"
                         variant="primary"
-                        size="sm" // Smaller button
+                        size="sm"
                         disabled={isLoading || !promptText.trim() || selectedDatasetIds.length === 0}
                         isLoading={isLoading}
-                        className="p-2 rounded-full" // Make it round
+                        className="p-2 rounded-full"
                         aria-label="Send prompt"
                     >
                          <PaperAirplaneIcon className="h-5 w-5" />
