@@ -4,7 +4,15 @@ import Button from '../../../shared/ui/Button';
 import Input from '../../../shared/ui/Input';
 import Card from '../../../shared/ui/Card';
 import Spinner from '../../../shared/ui/Spinner';
-import { PencilIcon, CheckIcon, XMarkIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
+import {
+  PencilIcon,
+  CheckIcon,
+  XMarkIcon,
+  InformationCircleIcon,
+  TableCellsIcon,
+  ExclamationCircleIcon,
+  ArrowPathIcon
+} from '@heroicons/react/24/outline';
 import apiClient from '../../../shared/services/apiClient';
 import logger from '../../../shared/utils/logger';
 
@@ -19,6 +27,7 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
   const [datasetContext, setDatasetContext] = useState('');
   const [isContextEditing, setIsContextEditing] = useState(false);
   const [tempContext, setTempContext] = useState('');
+  const [allSaved, setAllSaved] = useState(true); // Track if there are unsaved changes
 
   // Fetch dataset schema and existing descriptions
   useEffect(() => {
@@ -53,11 +62,16 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
   const handleEditDescription = (columnName) => {
     setEditingDescription(columnName);
     setTempDescription(descriptions[columnName] || '');
+    setAllSaved(false);
   };
 
   const handleCancelEdit = () => {
     setEditingDescription(null);
     setTempDescription('');
+    // Check if all other edits are saved
+    if (!isContextEditing) {
+      setAllSaved(true);
+    }
   };
 
   const handleSaveDescription = (columnName) => {
@@ -67,22 +81,31 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
     }));
     setEditingDescription(null);
     setTempDescription('');
+    // Still not fully saved until we save to server
+    setAllSaved(false);
   };
 
   const handleEditContext = () => {
     setIsContextEditing(true);
     setTempContext(datasetContext);
+    setAllSaved(false);
   };
 
   const handleCancelContextEdit = () => {
     setIsContextEditing(false);
     setTempContext('');
+    // Check if all other edits are saved
+    if (!editingDescription) {
+      setAllSaved(true);
+    }
   };
 
   const handleSaveContext = () => {
     setDatasetContext(tempContext);
     setIsContextEditing(false);
     setTempContext('');
+    // Still not fully saved until we save to server
+    setAllSaved(false);
   };
 
   const handleSaveAll = async () => {
@@ -97,6 +120,7 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
 
       if (response.data.status === 'success') {
         logger.info('Successfully saved dataset context and column descriptions');
+        setAllSaved(true);
         if (onSaveSuccess) {
           onSaveSuccess(response.data.data);
         }
@@ -113,109 +137,207 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center my-8">
-        <Spinner />
-      </div>
+      <Card elevation="default">
+        <Card.Body>
+          <div className="flex flex-col justify-center items-center p-12">
+            <Spinner size="lg" />
+            <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">Loading dataset schema...</p>
+          </div>
+        </Card.Body>
+      </Card>
     );
   }
 
-  if (error) {
+  if (error && !columns.length) {
     return (
-      <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-700 p-4 rounded-md text-red-600 dark:text-red-300 my-4">
-        <p className="font-medium">Error loading schema:</p>
-        <p>{error}</p>
-      </div>
+      <Card elevation="default">
+        <Card.Body>
+          <div className="flex items-start p-6 bg-red-50 dark:bg-red-900/20 rounded-lg">
+            <ExclamationCircleIcon className="h-6 w-6 text-red-500 mr-3 flex-shrink-0" />
+            <div>
+              <h3 className="text-base font-medium text-red-800 dark:text-red-300">Error Loading Schema</h3>
+              <p className="mt-1 text-sm text-red-600 dark:text-red-400">{error}</p>
+              <Button
+                className="mt-4"
+                variant="outline"
+                size="sm"
+                leftIcon={ArrowPathIcon}
+                onClick={() => window.location.reload()}
+              >
+                Retry
+              </Button>
+            </div>
+          </div>
+        </Card.Body>
+      </Card>
     );
   }
 
   return (
-    <Card>
-      <Card.Header>Dataset Context and Column Descriptions</Card.Header>
-      <Card.Body>
-        {/* Dataset Context Section */}
-        <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-800 rounded-md">
-          <div className="flex justify-between items-start mb-2">
-            <h3 className="text-md font-semibold text-gray-700 dark:text-gray-300 flex items-center">
-              <InformationCircleIcon className="h-5 w-5 mr-1 text-blue-500" />
-              Dataset Context
-            </h3>
-            {!isContextEditing ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={handleEditContext}
-                leftIcon={PencilIcon}
-              >
-                Edit
-              </Button>
-            ) : (
-              <div className="flex space-x-2">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={handleCancelContextEdit}
-                  leftIcon={XMarkIcon}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={handleSaveContext}
-                  leftIcon={CheckIcon}
-                >
-                  Save
-                </Button>
-              </div>
-            )}
+    <Card elevation="default" className="transition-all duration-300">
+      <Card.Header>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center">
+            <TableCellsIcon className="h-5 w-5 mr-2 text-blue-500" />
+            <span className="font-medium">Dataset Context and Column Descriptions</span>
           </div>
 
-          <div className="text-sm">
+          {/* Save button in header for quick access */}
+          {!allSaved && (
+            <Button
+              onClick={handleSaveAll}
+              disabled={saving}
+              isLoading={saving}
+              size="sm"
+              leftIcon={CheckIcon}
+              className="shadow-soft-md hover:shadow-soft-lg"
+            >
+              Save Changes
+            </Button>
+          )}
+        </div>
+      </Card.Header>
+
+      <Card.Body>
+        {/* Error message if present */}
+        {error && (
+          <div className="mb-6 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700/50 rounded-lg">
+            <div className="flex items-center">
+              <ExclamationCircleIcon className="h-5 w-5 text-red-500 mr-2 flex-shrink-0" />
+              <span className="text-sm font-medium text-red-800 dark:text-red-300">{error}</span>
+            </div>
+          </div>
+        )}
+
+        {/* Dataset Context Section - Enhanced with better styling */}
+        <div className="mb-8 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden shadow-soft-md dark:shadow-soft-dark-md transition-all duration-300">
+          <div className="bg-gradient-subtle-light dark:bg-gradient-subtle-dark p-4 border-b border-gray-200 dark:border-gray-700/50">
+            <div className="flex justify-between items-start">
+              <div className="flex items-center">
+                <div className="p-1.5 rounded-full bg-blue-100 dark:bg-blue-900/30 mr-2">
+                  <InformationCircleIcon className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                </div>
+                <h3 className="text-base font-medium text-gray-800 dark:text-gray-200">Dataset Context</h3>
+              </div>
+
+              {!isContextEditing ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={handleEditContext}
+                  leftIcon={PencilIcon}
+                >
+                  Edit
+                </Button>
+              ) : (
+                <div className="flex space-x-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleCancelContextEdit}
+                    leftIcon={XMarkIcon}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={handleSaveContext}
+                    leftIcon={CheckIcon}
+                  >
+                    Save
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+              Provide details about what this dataset represents, its timeframe, and any important information for analysis.
+            </p>
+          </div>
+
+          <div className="p-4 bg-white dark:bg-gray-800">
             {!isContextEditing ? (
               datasetContext ? (
-                <p className="text-gray-600 dark:text-gray-400 whitespace-pre-line">{datasetContext}</p>
+                <div className="text-gray-700 dark:text-gray-300 whitespace-pre-line p-3 bg-gray-50 dark:bg-gray-750 rounded-lg">
+                  {datasetContext}
+                </div>
               ) : (
-                <p className="text-gray-400 dark:text-gray-500 italic">
+                <div className="text-gray-400 dark:text-gray-500 italic p-3 bg-gray-50 dark:bg-gray-750 rounded-lg">
                   No context provided. Click Edit to add a description of this dataset.
-                </p>
+                </div>
               )
             ) : (
               <textarea
                 value={tempContext}
                 onChange={(e) => setTempContext(e.target.value)}
                 placeholder="Describe what this dataset contains, its purpose, timeframe, and any relevant details..."
-                className="w-full min-h-24 p-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                className="w-full min-h-24 p-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 shadow-soft-sm focus:border-blue-500 focus:ring-blue-500/30 transition-all duration-200"
               />
             )}
           </div>
         </div>
 
-        {/* Column Descriptions Section */}
-        <div className="mb-4">
-          <h3 className="text-md font-semibold text-gray-700 dark:text-gray-300 mb-2">Column Descriptions</h3>
+        {/* Column Descriptions Section - Enhanced with better cards and interactions */}
+        <div className="mb-6">
+          <div className="flex items-center mb-4">
+            <TableCellsIcon className="h-5 w-5 mr-2 text-blue-500" />
+            <h3 className="text-base font-medium text-gray-800 dark:text-gray-200">Column Descriptions</h3>
+          </div>
 
           {columns.length === 0 ? (
-            <p className="text-gray-500 dark:text-gray-400 italic">No columns found in dataset schema.</p>
+            <div className="p-6 text-center bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-200 dark:border-gray-700">
+              <TableCellsIcon className="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" />
+              <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">No columns found</h3>
+              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                This dataset doesn't have any detected columns or the schema couldn't be processed.
+              </p>
+            </div>
           ) : (
             <div className="space-y-4 mb-4">
               {columns.map((column) => {
                 const columnName = typeof column === 'object' ? column.name : column;
                 const columnType = typeof column === 'object' && column.type ? column.type : 'unknown';
+                const hasDescription = !!descriptions[columnName];
 
                 return (
-                  <div key={columnName} className="p-3 bg-gray-50 dark:bg-gray-800 rounded-md">
-                    <div className="flex justify-between items-center mb-1">
+                  <div
+                    key={columnName}
+                    className={`
+                      rounded-xl border transition-all duration-200 overflow-hidden shadow-soft-md dark:shadow-soft-dark-md
+                      ${editingDescription === columnName
+                        ? 'border-blue-300 dark:border-blue-700 shadow-soft-lg dark:shadow-soft-dark-lg'
+                        : 'border-gray-200 dark:border-gray-700'}
+                      ${hasDescription
+                        ? 'bg-gradient-subtle-light dark:bg-gradient-subtle-dark'
+                        : 'bg-white dark:bg-gray-800'}
+                    `}
+                  >
+                    <div className="flex justify-between items-center p-3 border-b border-gray-200 dark:border-gray-700/50">
                       <div className="flex items-center">
-                        <span className="font-medium text-gray-800 dark:text-gray-200">{columnName}</span>
-                        <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">({columnType})</span>
+                        <div className={`
+                          p-1.5 rounded-md mr-2
+                          ${hasDescription
+                            ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400'
+                            : 'bg-gray-100 dark:bg-gray-750 text-gray-500 dark:text-gray-400'}
+                        `}>
+                          <TableCellsIcon className="h-4 w-4" />
+                        </div>
+                        <div>
+                          <span className="font-medium text-gray-800 dark:text-gray-200">{columnName}</span>
+                          <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
+                            {columnType}
+                          </span>
+                        </div>
                       </div>
 
                       {editingDescription !== columnName ? (
                         <Button
                           size="sm"
-                          variant="ghost"
+                          variant={hasDescription ? "ghost" : "outline"}
                           onClick={() => handleEditDescription(columnName)}
                           leftIcon={PencilIcon}
+                          className={!hasDescription ? "animate-pulse-subtle" : ""}
                         >
                           {descriptions[columnName] ? 'Edit' : 'Add Description'}
                         </Button>
@@ -231,7 +353,7 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
                           </Button>
                           <Button
                             size="sm"
-                            variant="ghost"
+                            variant="primary"
                             onClick={() => handleSaveDescription(columnName)}
                             leftIcon={CheckIcon}
                           >
@@ -241,19 +363,26 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
                       )}
                     </div>
 
-                    {editingDescription === columnName ? (
-                      <Input
-                        value={tempDescription}
-                        onChange={(e) => setTempDescription(e.target.value)}
-                        placeholder="Describe what this column represents..."
-                      />
-                    ) : (
-                      descriptions[columnName] ? (
-                        <p className="text-sm text-gray-600 dark:text-gray-400">{descriptions[columnName]}</p>
+                    <div className="p-3">
+                      {editingDescription === columnName ? (
+                        <Input
+                          value={tempDescription}
+                          onChange={(e) => setTempDescription(e.target.value)}
+                          placeholder="Describe what this column represents, its data format, and its significance..."
+                          className="w-full transition-all duration-300"
+                        />
                       ) : (
-                        <p className="text-sm text-gray-400 dark:text-gray-500 italic">No description provided</p>
-                      )
-                    )}
+                        descriptions[columnName] ? (
+                          <p className="text-sm text-gray-700 dark:text-gray-300 p-2 bg-white/80 dark:bg-gray-800/80 rounded-md">
+                            {descriptions[columnName]}
+                          </p>
+                        ) : (
+                          <p className="text-sm text-gray-400 dark:text-gray-500 italic">
+                            No description provided. Adding context improves AI analysis accuracy.
+                          </p>
+                        )
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -261,14 +390,17 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
           )}
         </div>
 
-        {/* Save button */}
+        {/* Save button - Enhanced with better feedback */}
         <div className="flex justify-end mt-6">
           <Button
             onClick={handleSaveAll}
-            disabled={saving}
+            disabled={saving || allSaved}
             isLoading={saving}
+            leftIcon={CheckIcon}
+            variant="primary"
+            className="shadow-soft-md hover:shadow-soft-lg transition-all duration-200"
           >
-            Save All Changes
+            {saving ? 'Saving Changes...' : allSaved ? 'All Changes Saved' : 'Save All Changes'}
           </Button>
         </div>
       </Card.Body>

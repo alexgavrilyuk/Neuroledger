@@ -1,26 +1,70 @@
 // frontend/src/features/onboarding/components/TutorialModal.jsx
-// ** CORRECTED - Removed inline definitions **
-import React, { useState } from 'react';
-import Modal from '../../../shared/ui/Modal'; // Correct import
+import React, { useState, useEffect } from 'react';
+import Modal from '../../../shared/ui/Modal';
 import Button from '../../../shared/ui/Button';
 import TutorialStep from './TutorialStep';
-import { Checkbox } from '../../../shared/ui/Checkbox'; // Correct import
+import { Checkbox } from '../../../shared/ui/Checkbox';
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  CheckIcon,
+  SparklesIcon,
+  LightBulbIcon,
+  ChatBubbleBottomCenterTextIcon,
+  RocketLaunchIcon
+} from '@heroicons/react/24/outline';
 
-// Define your tutorial steps here
+// Enhanced tutorial steps with better icons and content structure
 const steps = [
-    // Make sure placeholder image exists in public folder or adjust path
-  { title: "Welcome to NeuroLedger!", image: "/placeholder-image.svg", content: "Let's quickly walk through how to get started." },
-  { title: "1. Upload Your Data", image: "/placeholder-image.svg", content: "Go to 'Datasets' in the account section to upload your Excel or CSV files." },
-  { title: "2. Ask Questions", image: "/placeholder-image.svg", content: "Use the chat interface on the dashboard. Type your financial questions in plain English." },
-  { title: "3. Get Insights", image: "/placeholder-image.svg", content: "NeuroLedger will generate interactive reports and insights based on your data and prompts." },
+  {
+    title: "Welcome to NeuroLedger!",
+    icon: SparklesIcon,
+    iconColor: "text-blue-500 dark:text-blue-400",
+    iconBg: "bg-blue-100 dark:bg-blue-900/30",
+    image: "/placeholder-image.svg",
+    content: "Let's quickly walk through how to get started with your financial data analysis journey."
+  },
+  {
+    title: "Upload Your Data",
+    icon: RocketLaunchIcon,
+    iconColor: "text-purple-500 dark:text-purple-400",
+    iconBg: "bg-purple-100 dark:bg-purple-900/30",
+    image: "/placeholder-image.svg",
+    content: "Go to 'Datasets' in the account section to upload your Excel or CSV files. Adding context to your data improves analysis quality."
+  },
+  {
+    title: "Ask Questions",
+    icon: ChatBubbleBottomCenterTextIcon,
+    iconColor: "text-green-500 dark:text-green-400",
+    iconBg: "bg-green-100 dark:bg-green-900/30",
+    image: "/placeholder-image.svg",
+    content: "Use the chat interface on the dashboard. Type your financial questions in plain English and select relevant datasets for context."
+  },
+  {
+    title: "Get Insights",
+    icon: LightBulbIcon,
+    iconColor: "text-amber-500 dark:text-amber-400",
+    iconBg: "bg-amber-100 dark:bg-amber-900/30",
+    image: "/placeholder-image.svg",
+    content: "NeuroLedger will generate interactive reports and insights based on your data and prompts. Explore visualizations, trends, and actionable recommendations."
+  },
 ];
 
 const TutorialModal = ({ show, onClose }) => {
   const [currentStep, setCurrentStep] = useState(0);
   const [dontShowAgain, setDontShowAgain] = useState(false);
+  const [animationDirection, setAnimationDirection] = useState('right'); // 'left' or 'right'
+
+  // Reset animation direction when modal opens
+  useEffect(() => {
+    if (show) {
+      setAnimationDirection('right');
+    }
+  }, [show]);
 
   const handleNext = () => {
     if (currentStep < steps.length - 1) {
+      setAnimationDirection('right');
       setCurrentStep(currentStep + 1);
     } else {
       handleClose(true); // Close and potentially persist on last step
@@ -29,63 +73,127 @@ const TutorialModal = ({ show, onClose }) => {
 
   const handlePrev = () => {
     if (currentStep > 0) {
+      setAnimationDirection('left');
       setCurrentStep(currentStep - 1);
     }
   };
 
-   const handleClose = (isCompleting = false) => {
-       onClose(isCompleting || dontShowAgain);
-   };
+  const handleClose = (isCompleting = false) => {
+    onClose(isCompleting || dontShowAgain);
+  };
+
+  const handleStepClick = (stepIndex) => {
+    setAnimationDirection(stepIndex > currentStep ? 'right' : 'left');
+    setCurrentStep(stepIndex);
+  };
 
   if (!show) return null;
 
   const step = steps[currentStep];
+  const isFirstStep = currentStep === 0;
+  const isLastStep = currentStep === steps.length - 1;
 
   return (
-    // Use the imported Modal component
-    <Modal isOpen={show} onClose={() => handleClose(false)} title="Getting Started Guide" size="lg">
-      <Modal.Body>
-        <TutorialStep title={step.title} image={step.image}>
-          {step.content}
-        </TutorialStep>
+    <Modal
+      isOpen={show}
+      onClose={() => handleClose(false)}
+      title="" // Remove title, we'll handle it inside
+      size="lg"
+      slideFrom="bottom"
+    >
+      <Modal.Body padding="default" className="pt-8">
+        <div className="absolute top-0 inset-x-0 h-2 bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 rounded-t-lg"></div>
 
-         <div className="flex justify-center space-x-2 mt-6">
-             {steps.map((_, index) => (
-                 <button
-                    key={index}
-                    onClick={() => setCurrentStep(index)}
-                    className={`h-2 w-2 rounded-full ${
-                         index === currentStep ? 'bg-blue-600 dark:bg-blue-400' : 'bg-gray-300 dark:bg-gray-600 hover:bg-gray-400 dark:hover:bg-gray-500'
-                    }`}
-                    aria-label={`Go to step ${index + 1}`}
-                 />
-             ))}
-         </div>
+        {/* Progress indicator - Enhanced with animation */}
+        <div className="flex justify-center space-x-3 mb-8">
+          {steps.map((_, index) => (
+            <button
+              key={index}
+              onClick={() => handleStepClick(index)}
+              className={`
+                group flex flex-col items-center
+              `}
+              aria-label={`Go to step ${index + 1}`}
+            >
+              <span className={`
+                relative h-2.5 w-2.5 rounded-full transition-all duration-300
+                ${index === currentStep
+                  ? 'bg-blue-600 dark:bg-blue-400 scale-125'
+                  : 'bg-gray-300 dark:bg-gray-600 group-hover:bg-gray-400 dark:group-hover:bg-gray-500'}
+              `}>
+                {index < currentStep && (
+                  <span className="absolute inset-0 rounded-full bg-blue-500/30 dark:bg-blue-400/30 animate-ping" />
+                )}
+              </span>
 
+              {/* Connecting lines between dots */}
+              {index < steps.length - 1 && (
+                <span className={`
+                  absolute top-1.5 left-3 w-7 h-0.5 -ml-1
+                  ${index < currentStep
+                    ? 'bg-blue-500 dark:bg-blue-400'
+                    : 'bg-gray-300 dark:bg-gray-600'}
+                `}></span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* Tutorial content with animation */}
+        <div className="relative overflow-hidden">
+          <div
+            className={`
+              transition-all duration-500 ease-in-out transform
+              ${animationDirection === 'right' ? 'translate-x-0 opacity-100' : '-translate-x-8 opacity-0'}
+            `}
+          >
+            <TutorialStep
+              title={step.title}
+              image={step.image}
+              icon={step.icon}
+              iconColor={step.iconColor}
+              iconBg={step.iconBg}
+            >
+              {step.content}
+            </TutorialStep>
+          </div>
+        </div>
       </Modal.Body>
-      <Modal.Footer className="flex flex-col gap-4 sm:flex-row items-center justify-between"> {/* Added gap for spacing */}
-         <div className="w-full sm:w-auto"> {/* Allow checkbox to take full width on small screens */}
-            <Checkbox
-                id="dont-show-again"
-                label="Don't show this again"
-                checked={dontShowAgain}
-                onChange={(e) => setDontShowAgain(e.target.checked)}
-             />
-         </div>
-         <div className="flex space-x-3 w-full sm:w-auto justify-end"> {/* Ensure buttons are at the end on small screens */}
-          {currentStep > 0 && (
-            <Button variant="secondary" onClick={handlePrev}>
+
+      <Modal.Footer className="flex flex-col sm:flex-row gap-4 items-center justify-between bg-gray-50 dark:bg-gray-800/50">
+        <div className="w-full sm:w-auto">
+          <Checkbox
+            id="dont-show-again"
+            label="Don't show this again"
+            checked={dontShowAgain}
+            onChange={(e) => setDontShowAgain(e.target.checked)}
+          />
+        </div>
+
+        <div className="flex space-x-3 w-full sm:w-auto justify-end">
+          {!isFirstStep && (
+            <Button
+              variant="ghost"
+              onClick={handlePrev}
+              leftIcon={ArrowLeftIcon}
+              className="px-3"
+            >
               Previous
             </Button>
           )}
-          <Button variant="primary" onClick={handleNext}>
-            {currentStep === steps.length - 1 ? 'Finish' : 'Next'}
+
+          <Button
+            variant="primary"
+            onClick={handleNext}
+            rightIcon={isLastStep ? CheckIcon : ArrowRightIcon}
+            className={`shadow-soft-md hover:shadow-soft-lg ${isLastStep ? 'bg-gradient-to-r from-blue-500 to-indigo-500' : ''}`}
+          >
+            {isLastStep ? 'Get Started' : 'Next'}
           </Button>
-         </div>
+        </div>
       </Modal.Footer>
     </Modal>
   );
 };
-
 
 export default TutorialModal;

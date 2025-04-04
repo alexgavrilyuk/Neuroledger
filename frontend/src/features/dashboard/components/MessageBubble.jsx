@@ -1,9 +1,4 @@
-// ================================================================================
-// FILE: NeuroLedger/frontend/src/features/dashboard/components/MessageBubble.jsx
-// ================================================================================
 // frontend/src/features/dashboard/components/MessageBubble.jsx
-// ** UPDATED FILE - Pass reportInfo object to onViewReport **
-
 import React from 'react';
 import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid';
 import Spinner from '../../../shared/ui/Spinner';
@@ -13,95 +8,104 @@ const MessageBubble = ({ message, onViewReport }) => {
     const isUser = message.type === 'user';
     const isError = message.isError || message.contentType === 'error';
     const isLoading = message.isLoading;
-    // --- UPDATED Check ---
     const isReportAvailable = message.contentType === 'report_iframe_ready' && message.reportInfo?.code && message.reportInfo?.datasets;
-    // --- END UPDATE ---
 
-    // --- Styles (Remain the same) ---
-    const bubbleBaseStyle = `max-w-[80%] lg:max-w-[70%] rounded-xl px-4 py-2.5 text-sm shadow-sm break-words`; // Added break-words
+    // Enhanced bubble styles with better visual separation
+    const bubbleBaseStyle = `max-w-[80%] lg:max-w-[70%] rounded-xl px-4 py-3 text-sm shadow-soft-md dark:shadow-soft-dark-md break-words transition-all duration-200 animate-fadeIn`;
     const bubbleAlignment = isUser ? 'ml-auto' : 'mr-auto';
-    const bubbleColor = /* ... same style logic ... */ isUser
-        ? 'bg-blue-600 text-white'
+
+    // Enhanced color system with gradients and refined colors
+    const bubbleColor = isUser
+        ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white'
         : isError
-            ? 'bg-red-100 dark:bg-red-900/40 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-700/50'
+            ? 'bg-red-50 dark:bg-red-900/30 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-700/50'
             : isReportAvailable
-                ? 'bg-gray-100 dark:bg-gray-700/80 text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-600/50'
-                : 'bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100';
+                ? 'bg-gradient-subtle-light dark:bg-gradient-subtle-dark text-gray-800 dark:text-gray-100 border border-gray-200 dark:border-gray-600/50'
+                : 'bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 border border-gray-200/80 dark:border-gray-700/50';
 
-    const iconBaseStyle = `h-6 w-6 rounded-full p-1 flex-shrink-0 self-start mt-1`; // Added mt-1 for alignment
-    const userIconColor = `bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300`;
-    const aiIconColor = /* ... same style logic ... */ isError
-        ? `bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300`
-        : `bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300`;
+    // Enhanced icon styles with better shadows and colors
+    const iconBaseStyle = `h-8 w-8 rounded-full p-1.5 flex-shrink-0 self-start mt-1 shadow-soft-sm`;
+    const userIconColor = `bg-gradient-to-br from-blue-400 to-blue-500 text-white`;
+    const aiIconColor = isError
+        ? `bg-gradient-to-br from-red-400 to-red-500 text-white`
+        : `bg-gradient-to-br from-gray-200 to-gray-300 text-gray-700 dark:from-gray-600 dark:to-gray-700 dark:text-gray-200`;
 
-
-    // --- Content Rendering Logic ---
+    // Content Rendering with improved spacing and typography
     const renderContent = () => {
         if (isLoading) {
             return (
-                 <div className="flex items-center gap-x-2 py-1">
-                    <Spinner size="sm" color={isUser ? "text-white" : "text-gray-500 dark:text-gray-400"} />
-                    <span className="italic text-current opacity-80">{message.content || "Processing..."}</span>
-                 </div>
+                <div className="flex items-center gap-x-2 py-1">
+                    <Spinner
+                        size="sm"
+                        color={isUser ? "text-white" : "text-gray-500 dark:text-gray-400"}
+                        variant="circle"
+                    />
+                    <span className="italic text-current opacity-80 font-medium">{message.content || "Processing..."}</span>
+                </div>
             );
         }
 
-        // --- Handle Report Available state ---
+        // Enhanced report available state with better buttons
         if (isReportAvailable) {
             return (
-                <div className="space-y-2">
-                    {/* Display the trigger text */}
-                    <p>{message.content || "Report generated."}</p>
-                    <div className="flex items-center">
-                        {/* --- UPDATED: Pass reportInfo object --- */}
+                <div className="space-y-3">
+                    <p className="leading-relaxed">{message.content || "Report generated."}</p>
+                    <div className="flex items-center mt-2">
                         <Button
-                            variant="secondary"
+                            variant="primary"
                             size="sm"
-                            onClick={() => onViewReport(message.reportInfo, message.quality)} // Pass the object
+                            onClick={() => onViewReport(message.reportInfo, message.quality)}
                             leftIcon={DocumentChartBarIcon}
+                            className="shadow-soft-md dark:shadow-soft-dark-md transform hover:scale-102 active:scale-98"
                         >
                             View Report
                         </Button>
-                        {/* --- END UPDATE --- */}
                     </div>
                 </div>
             );
         }
 
-        // Handle Plain Text (User, Simple AI, Error)
+        // Enhanced text display with better line height and spacing
         if (typeof message.content === 'string') {
-             return message.content.split('\n').map((line, index, arr) => (
-                <React.Fragment key={index}>
-                    {line || (index > 0 && index < arr.length -1 ? '\u00A0' : '')}
-                    {index < arr.length - 1 && <br />}
-                </React.Fragment>
-            ));
+            return (
+                <div className="leading-relaxed">
+                    {message.content.split('\n').map((line, index, arr) => (
+                        <React.Fragment key={index}>
+                            {line || (index > 0 && index < arr.length - 1 ? '\u00A0' : '')}
+                            {index < arr.length - 1 && <br />}
+                        </React.Fragment>
+                    ))}
+                </div>
+            );
         }
 
-        // Fallback for unexpected content
-        return <span className="italic text-gray-400">Unsupported message format</span>;
+        // Fallback for unexpected content with better styling
+        return <span className="italic text-gray-400 dark:text-gray-500 font-medium">Unsupported message format</span>;
     };
 
     return (
-        <div className={`flex items-start gap-x-3 ${isUser ? 'justify-end' : ''}`}>
-             {/* AI/Error Icon */}
+        <div className={`flex items-start gap-x-3 ${isUser ? 'justify-end' : ''} my-4 animate-slideInBottom`}>
+            {/* AI/Error Icon */}
             {!isUser && (
-                 <div className={`${iconBaseStyle} ${aiIconColor}`}>
-                     {isError ? <ExclamationCircleIcon className="h-full w-full" /> : <CpuChipIcon className="h-full w-full" />}
-                 </div>
+                <div className={`${iconBaseStyle} ${aiIconColor}`}>
+                    {isError
+                        ? <ExclamationCircleIcon className="h-full w-full animate-pulse-subtle" />
+                        : <CpuChipIcon className="h-full w-full" />
+                    }
+                </div>
             )}
 
-            {/* Bubble Content */}
+            {/* Bubble Content with enhanced shadows and animations */}
             <div className={`${bubbleBaseStyle} ${bubbleAlignment} ${bubbleColor}`}>
                 {renderContent()}
             </div>
 
-             {/* User Icon */}
-             {isUser && (
-                  <div className={`${iconBaseStyle} ${userIconColor}`}>
-                      <UserIcon className="h-full w-full" />
-                  </div>
-             )}
+            {/* User Icon */}
+            {isUser && (
+                <div className={`${iconBaseStyle} ${userIconColor}`}>
+                    <UserIcon className="h-full w-full" />
+                </div>
+            )}
         </div>
     );
 };
