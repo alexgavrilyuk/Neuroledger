@@ -1,14 +1,11 @@
 // backend/src/routes.js
-// ** UPDATED FILE - Add prompt routes **
+// ** UPDATED FILE - Added user routes **
 const express = require('express');
 const authRoutes = require('./features/auth/auth.routes');
 const subscriptionRoutes = require('./features/subscriptions/subscription.routes');
 const datasetRoutes = require('./features/datasets/dataset.routes');
-const promptRoutes = require('./features/prompts/prompt.routes'); // <-- ADDED
-
-// Import other feature routes here as they are created
-// const userRoutes = require('./features/users/user.routes');
-
+const promptRoutes = require('./features/prompts/prompt.routes');
+const userRoutes = require('./features/users/user.routes'); // NEW: Added user routes
 
 const router = express.Router();
 
@@ -21,8 +18,7 @@ router.get('/', (req, res) => {
 router.use('/auth', authRoutes);
 router.use('/subscriptions', subscriptionRoutes);
 router.use('/datasets', datasetRoutes);
-router.use('/prompts', promptRoutes); // <-- ADDED
-// router.use('/users', userRoutes);
-
+router.use('/prompts', promptRoutes);
+router.use('/users', userRoutes); // NEW: Mount user routes at /api/v1/users
 
 module.exports = router;

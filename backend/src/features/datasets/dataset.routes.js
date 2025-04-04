@@ -1,5 +1,5 @@
 // backend/src/features/datasets/dataset.routes.js
-// ** UPDATED FILE - Add read URL route **
+// ** UPDATED FILE - Added routes for schema, details, and update **
 const express = require('express');
 const datasetController = require('./dataset.controller');
 const { protect } = require('../../shared/middleware/auth.middleware');
@@ -19,12 +19,18 @@ router.post('/', datasetController.createDataset);
 // GET /api/v1/datasets (List user's datasets)
 router.get('/', datasetController.listDatasets);
 
-// --- NEW ROUTE for reading dataset content via signed URL ---
 // GET /api/v1/datasets/:id/read-url
 router.get('/:id/read-url', datasetController.getReadUrl);
-// --- End NEW ROUTE ---
 
+// --- NEW ROUTES ---
 
-// Add routes for GET /{id}, PUT /{id}, DELETE /{id} later
+// GET /api/v1/datasets/:id (Get single dataset details)
+router.get('/:id', datasetController.getDataset);
+
+// GET /api/v1/datasets/:id/schema (Get dataset schema information)
+router.get('/:id/schema', datasetController.getSchema);
+
+// PUT /api/v1/datasets/:id (Update dataset context and column descriptions)
+router.put('/:id', datasetController.updateDataset);
 
 module.exports = router;

@@ -1,5 +1,5 @@
 // frontend/src/routes.jsx
-// ** UPDATED FILE - Removed duplicate ProtectedRoute declaration **
+// ** UPDATED FILE - Added dataset detail route **
 import React, { lazy, Suspense } from 'react';
 import { createBrowserRouter, RouterProvider, Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from './shared/hooks/useAuth';
@@ -20,6 +20,7 @@ const DashboardPage = lazy(() => import('./features/dashboard/pages/DashboardPag
 // Lazy load Account pages
 const AccountProfilePage = lazy(() => import('./features/account_management/pages/AccountProfilePage'));
 const AccountDatasetsPage = lazy(() => import('./features/account_management/pages/AccountDatasetsPage'));
+const DatasetDetailPage = lazy(() => import('./features/dataset_management/pages/DatasetDetailPage')); // NEW: Lazy load dataset detail page
 const AccountTeamsPage = lazy(() => import('./features/account_management/pages/AccountTeamsPage'));
 const AccountSettingsPage = lazy(() => import('./features/account_management/pages/AccountSettingsPage'));
 
@@ -90,6 +91,7 @@ const router = createBrowserRouter([
                  { index: true, element: <Navigate to="/account/profile" replace /> },
                  { path: 'profile', element: <AccountProfilePage /> },
                  { path: 'datasets', element: <AccountDatasetsPage /> },
+                 { path: 'datasets/:datasetId', element: <DatasetDetailPage /> }, // NEW: Dataset detail page route
                  { path: 'teams', element: <AccountTeamsPage /> },
                  { path: 'settings', element: <AccountSettingsPage /> },
              ]

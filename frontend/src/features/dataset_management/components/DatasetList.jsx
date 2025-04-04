@@ -1,10 +1,11 @@
 // frontend/src/features/dataset_management/components/DatasetList.jsx
-// ** NEW FILE **
+// ** UPDATED FILE - Added detail view link **
 import React from 'react';
+import { Link } from 'react-router-dom';
 import { useDatasets } from '../hooks/useDatasets';
 import Spinner from '../../../shared/ui/Spinner';
 import Card from '../../../shared/ui/Card';
-import { CircleStackIcon, TrashIcon, PencilIcon } from '@heroicons/react/24/outline'; // Add icons
+import { CircleStackIcon, TrashIcon, PencilIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
 import Button from '../../../shared/ui/Button';
 
 const DatasetList = () => {
@@ -56,7 +57,7 @@ const DatasetList = () => {
                  <tr>
                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Name</th>
                    <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Uploaded</th>
-                   {/* Add more columns later: size, team, status? */}
+                   <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Context</th>
                    <th scope="col" className="relative px-6 py-3">
                      <span className="sr-only">Actions</span>
                    </th>
@@ -74,11 +75,24 @@ const DatasetList = () => {
                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                         {formatDate(dataset.createdAt)}
                      </td>
+                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                        {dataset.description ? (
+                          <span className="text-green-600 dark:text-green-400">
+                            <span className="font-medium">Yes</span>
+                          </span>
+                        ) : (
+                          <span className="text-yellow-500 dark:text-yellow-400">
+                            <span className="font-medium">None</span>
+                          </span>
+                        )}
+                     </td>
                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
-                       {/* Add Edit Link/Button later */}
-                       {/* <Button size="sm" variant="ghost" title="Edit Metadata (Coming Soon)" disabled>
-                           <PencilIcon className="h-4 w-4" />
-                       </Button> */}
+                       {/* Added link to dataset detail page */}
+                       <Link to={`/account/datasets/${dataset._id}`}>
+                         <Button size="sm" variant="ghost" title="View & Edit Dataset">
+                           <InformationCircleIcon className="h-4 w-4 text-blue-500" />
+                         </Button>
+                       </Link>
                        {/* Add Delete Button later */}
                        {/* <Button size="sm" variant="ghost" onClick={() => handleDelete(dataset._id)} title="Delete Dataset">
                            <TrashIcon className="h-4 w-4 text-red-500" />

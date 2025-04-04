@@ -1,11 +1,11 @@
 # FE_BE_INTERACTION_README.md
-# ** UPDATED FILE - Prompt response + Dataset Read URL **
+# ** UPDATED FILE - Added User and Dataset Context Endpoints **
 
 # NeuroLedger: Frontend / Backend API Interaction
 
 This document defines the contract for communication between the NeuroLedger frontend (React) and backend (Node.js/Express) services.
 
-**Last Updated:** [Date - After Phase 5 Shift to Client-Side Execution]
+**Last Updated:** [Date - After Context Enhancements]
 
 ## 1. Base API URL
 
@@ -46,6 +46,22 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ---
 
+### Feature: Users (New)
+
+*   **`GET /api/v1/users/me`**
+    *   Gets current user's profile information.
+    *   **Auth:** Required.
+    *   **Success (200):** `{ status: 'success', data: User }`
+    *   **Errors:** `401` (Unauthorized), `404` (User not found), `500`.
+*   **`PUT /api/v1/users/me/settings`**
+    *   Updates user settings, including business context.
+    *   **Auth:** Required.
+    *   **Request:** `{ currency?: string, dateFormat?: string, aiContext?: string }`
+    *   **Success (200):** `{ status: 'success', data: User }`
+    *   **Errors:** `401` (Unauthorized), `404` (User not found), `500`.
+
+---
+
 ### Feature: Datasets
 
 *   **`GET /api/v1/datasets/upload-url`**
@@ -63,9 +79,28 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Auth:** Required (Login + Sub).
     *   **Success (200):** `{ data: Dataset[] }` (Note: Should include `_id` and `gcsPath`)
 *   **`GET /api/v1/datasets/{id}/read-url`**
-    *   **Description:** Generates a signed URL for reading the dataset content (used by frontend before sending to worker).
+    *   Generates a signed URL for reading the dataset content (used by frontend before sending to worker).
     *   **Auth:** Required (Login + Sub).
     *   **Success (200):** `{ status: 'success', data: { signedUrl: string } }`
+    *   **Errors:** `400` (Invalid ID), `404` (Dataset not found/accessible), `500`.
+
+*   **`GET /api/v1/datasets/{id}`** (New)
+    *   Gets a single dataset with details.
+    *   **Auth:** Required (Login + Sub).
+    *   **Success (200):** `{ status: 'success', data: Dataset }`
+    *   **Errors:** `400` (Invalid ID), `404` (Dataset not found/accessible), `500`.
+
+*   **`GET /api/v1/datasets/{id}/schema`** (New)
+    *   Gets dataset schema information and column descriptions.
+    *   **Auth:** Required (Login + Sub).
+    *   **Success (200):** `{ status: 'success', data: { schemaInfo: Array, columnDescriptions: Object, description: string } }`
+    *   **Errors:** `400` (Invalid ID), `404` (Dataset not found/accessible), `500`.
+
+*   **`PUT /api/v1/datasets/{id}`** (New)
+    *   Updates dataset information (context and column descriptions).
+    *   **Auth:** Required (Login + Sub).
+    *   **Request:** `{ description?: string, columnDescriptions?: Object }`
+    *   **Success (200):** `{ status: 'success', data: Dataset }`
     *   **Errors:** `400` (Invalid ID), `404` (Dataset not found/accessible), `500`.
 
 ---
@@ -102,7 +137,65 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ## 5. Key Data Models (Exchanged Objects)
 
-*(User, SubscriptionInfo, Dataset models remain mostly the same, ensure Dataset list includes `gcsPath`)*
+### User with Added Settings
+
+```typescript
+interface User {
+  _id: string;
+  firebaseUid: string;
+  email: string;
+  name?: string;
+  createdAt: string;
+  settings: {
+    currency: string;        // "USD", "EUR", etc.
+    dateFormat: string;      // "YYYY-MM-DD", "MM/DD/YYYY", etc.
+    aiContext?: string;      // Business context for Claude
+  };
+  subscriptionInfo: SubscriptionInfo;
+  onboardingCompleted: boolean;
+  teams?: string[];          // Array of Team IDs
+}
+```
+
+### Dataset with Added Context Fields
+
+```typescript
+interface Dataset {
+  _id: string;
+  name: string;
+  description?: string;      // Overall dataset context
+  gcsPath: string;
+  originalFilename: string;
+  fileSizeBytes?: number;
+  ownerId: string;
+  teamId?: string;
+  schemaInfo: Array<{        // Column information
+    name: string;
+    type: string;            // "string", "number", "date", etc.
+  }>;
+  columnDescriptions: {      // Column descriptions for context
+    [columnName: string]: string;
+  };
+  isIgnored: boolean;
+  createdAt: string;
+  lastUpdatedAt: string;
+}
+```
+
+### Schema Response
+
+```typescript
+interface SchemaResponse {
+  schemaInfo: Array<{
+    name: string;
+    type: string;
+  }>;
+  columnDescriptions: {
+    [columnName: string]: string;
+  };
+  description: string;
+}
+```
 
 ### Prompt Generation Response Data (POST /prompts - Phase 5 Client-Side Exec)
 

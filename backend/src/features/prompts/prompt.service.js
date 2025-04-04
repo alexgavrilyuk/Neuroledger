@@ -1,49 +1,79 @@
-// ================================================================================
-// FILE: NeuroLedger/backend/src/features/prompts/prompt.service.js
-// ================================================================================
 // backend/src/features/prompts/prompt.service.js
-// ** CORRECT VERSION FOR IFRAME: Generates React CODE Using Globals **
-
+// ** UPDATED FILE - Now includes business and dataset context **
 const anthropic = require('../../shared/external_apis/claude.client');
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
 const PromptHistory = require('./prompt.model');
 const logger = require('../../shared/utils/logger');
+const generateSystemPrompt = require('./system-prompt-template');
 
-// Context assembly function (Keep as is)
+// Enhanced context assembly function
 const assembleContext = async (userId, selectedDatasetIds) => {
-    let contextString = "Context:\n";
-    const user = await User.findById(userId).select('settings').lean();
-    contextString += `- User Settings: Currency=${user?.settings?.currency || 'USD'}, DateFormat=${user?.settings?.dateFormat || 'YYYY-MM-DD'}. ${user?.settings?.aiContext || ''}\n`;
-    contextString += `- Team Settings: (Not implemented yet)\n`;
-    contextString += "- Selected Datasets:\n";
-    if (selectedDatasetIds && selectedDatasetIds.length > 0) {
-        const datasets = await Dataset.find({ _id: { $in: selectedDatasetIds }, ownerId: userId })
-            .select('name description schemaInfo columnDescriptions').lean();
-        if (!datasets || datasets.length === 0) {
-            contextString += "  - No accessible datasets found for the provided IDs.\n";
+    let contextString = "";
+
+    try {
+        // Get user data including settings with business context
+        const user = await User.findById(userId).select('settings').lean();
+
+        // Add currency and date format from user settings
+        contextString += `- User Preferences: Currency=${user?.settings?.currency || 'USD'}, DateFormat=${user?.settings?.dateFormat || 'YYYY-MM-DD'}\n`;
+
+        // Add team settings if needed (future feature)
+        contextString += "- Team Settings: (Not implemented yet)\n";
+
+        // Add dataset context
+        contextString += "- Selected Datasets:\n";
+
+        if (selectedDatasetIds && selectedDatasetIds.length > 0) {
+            const datasets = await Dataset.find({ _id: { $in: selectedDatasetIds }, ownerId: userId })
+                .select('name description schemaInfo columnDescriptions').lean();
+
+            if (!datasets || datasets.length === 0) {
+                contextString += "  - No accessible datasets found for the provided IDs.\n";
+            } else {
+                datasets.forEach(ds => {
+                    contextString += `  - Name: ${ds.name}\n`;
+
+                    // Add dataset description if available
+                    if (ds.description) {
+                        contextString += `    Dataset Description: ${ds.description}\n`;
+                    } else {
+                        contextString += `    Description: (No description provided)\n`;
+                    }
+
+                    contextString += `    Columns:\n`;
+
+                    if (ds.schemaInfo && ds.schemaInfo.length > 0) {
+                        ds.schemaInfo.forEach(col => {
+                            const colDesc = ds.columnDescriptions && ds.columnDescriptions[col.name];
+                            const colName = typeof col === 'object' && col.name ? col.name : String(col);
+                            const colType = typeof col === 'object' && col.type ? col.type : 'unknown';
+                            const descText = colDesc ? `: ${colDesc}` : '';
+                            contextString += `      - ${colName} (Type: ${colType})${descText}\n`;
+                        });
+                    } else {
+                        contextString += `      - (No column schema available)\n`;
+                    }
+                });
+            }
         } else {
-            datasets.forEach(ds => {
-                contextString += `  - Name: ${ds.name}\n`;
-                contextString += `    Description: ${ds.description || '(No description provided)'}\n`;
-                contextString += `    Columns:\n`;
-                if (ds.schemaInfo && ds.schemaInfo.length > 0) {
-                    ds.schemaInfo.forEach(col => {
-                        const colDesc = ds.columnDescriptions?.[col.name];
-                        const colName = typeof col === 'object' && col.name ? col.name : String(col);
-                        const colType = typeof col === 'object' && col.type ? col.type : 'unknown';
-                        const descText = colDesc ? `: ${colDesc}` : '';
-                        contextString += `      - ${colName} (Type: ${colType})${descText}\n`;
-                    });
-                } else { contextString += `      - (No column schema available)\n`; }
-            });
+            contextString += "  - None selected.\n";
         }
-    } else { contextString += "  - None selected.\n"; }
-    return contextString;
+
+        return {
+            contextString,
+            userContext: user?.settings?.aiContext || ''
+        };
+    } catch (error) {
+        logger.error(`Error assembling context: ${error.message}`);
+        return {
+            contextString: "Error assembling detailed context: " + error.message,
+            userContext: ''
+        };
+    }
 };
 
-
-// --- generateCode function ASKS FOR REACT CODE using globals ---
+// generateCode function using the template
 const generateCode = async (userId, promptText, selectedDatasetIds) => {
     if (!anthropic) {
         logger.error("generateCode called but Anthropic client is not initialized.");
@@ -58,6 +88,7 @@ const generateCode = async (userId, promptText, selectedDatasetIds) => {
     let historyErrorMessage = null;
     let generatedCode = null; // Will store the code string
     let contextUsed = '';
+    let userContextUsed = '';
 
     // Create Initial History Record
     try {
@@ -70,46 +101,26 @@ const generateCode = async (userId, promptText, selectedDatasetIds) => {
     }
 
     try {
-        // 1. Assemble Context
+        // 1. Assemble Enhanced Context
         logger.debug(`Assembling context for historyId: ${historyId}`);
-        contextUsed = await assembleContext(userId, selectedDatasetIds);
+        const { contextString, userContext } = await assembleContext(userId, selectedDatasetIds);
+        contextUsed = contextString;
+        userContextUsed = userContext;
         logger.debug(`Context assembled successfully for historyId: ${historyId}. Length: ${contextUsed.length}`);
+        logger.debug(`Business context available: ${userContextUsed ? 'Yes' : 'No'}`);
 
-        // --- SYSTEM PROMPT ASKING FOR REACT CODE W/ GLOBALS ---
-        const systemPrompt = `You are NeuroLedger AI, an expert React developer and financial data analyst. Generate ONLY the body of a single JavaScript React functional component named 'ReportComponent'.
-
-COMPONENT REQUIREMENTS:
-1.  **Component Name:** EXACTLY 'ReportComponent'.
-2.  **Props:** The component MUST accept a single prop named \`datasets\`, which is an array of objects: \`{ name: string, content: string, error?: string }\`.
-3.  **Rendering:** Use \`React.createElement\` for ALL component/element creation. Do NOT use JSX syntax.
-4.  **Global Libraries:** Assume the following libraries are already available as global variables in the execution environment: \`React\`, \`ReactDOM\`, \`Recharts\`, \`_\` (for lodash), and \`Papa\`. **Do NOT include \`import\` or \`require\` statements for these specific libraries.** Access them directly (e.g., \`React.createElement(...)\`, \`Recharts.LineChart(...)\`, \`_.sumBy(...)\`, \`Papa.parse(...)\`).
-5.  **Data Parsing:** Use this exact pattern for CSV parsing:
-    \`\`\`javascript
-    const parsedData = Papa.parse(dataset.content, {
-      header: true, dynamicTyping: true, skipEmptyLines: true
-    });
-    \`\`\`
-    Handle potential errors during parsing within a try/catch block. Handle potential errors if a dataset is missing or has an error string in the prop.
-6.  **Analysis & Content:** Perform financial analysis based on the user prompt and data context. Include sections for executive summary, key metrics, charts (using Recharts via globals), narrative insights, recommendations, etc., all rendered using \`React.createElement\`. Create meaningful and visually appealing charts appropriate for the data.
-7.  **Styling:** Apply inline styles reasonably for good presentation (e.g., \`style={{ margin: '10px', color: '#333' }}\`). Assume a standard sans-serif font. You do NOT need to handle theme switching (light/dark) via JS; assume basic contrasting styles will work or rely on standard Recharts defaults.
-8.  **Error Handling:** Include basic try/catch blocks around data processing and rendering logic. If an error occurs, render a simple error message using \`React.createElement('div', { style: { color: 'red', padding: '10px', border: '1px solid red' } }, 'Error processing report: ' + error.message)\`.
-9.  **Environment Restrictions:** DO NOT use \`window\`, \`document\`, or other browser-specific APIs directly that might not be available or reliable in the execution sandbox. Focus solely on React rendering based on the props using the provided global libraries.
-10. **Output:** Provide ONLY the JavaScript code for the \`ReportComponent\` function body, starting directly with \`function ReportComponent({ datasets }) {\` or similar. Do not include any surrounding text, explanations, or markdown formatting like \`\`\`.
-
-DATA CONTEXT:
-${contextUsed}
-
-USER PROMPT:
-${promptText}
-
-Generate the React component code now.`;
-        // --- END SYSTEM PROMPT ---
-
+        // 2. Generate system prompt using the template
+        const systemPrompt = generateSystemPrompt({
+            userContext: userContextUsed,
+            datasetContext: contextUsed,
+            promptText
+        });
+        logger.debug(`System prompt generated for historyId: ${historyId}. Length: ${systemPrompt.length}`);
 
         const messages = [{ role: "user", content: "Generate the React component code based on the provided context and user prompt." }];
         const modelToUse = "claude-3-7-sonnet-20250219";
         // Allow more tokens for potentially complex code generation
-        const apiOptions = { model: modelToUse, max_tokens: 8192, system: systemPrompt, messages, temperature: 0.2 };
+        const apiOptions = { model: modelToUse, max_tokens: 16000, system: systemPrompt, messages, temperature: 0.2 };
 
         // 3. Call Claude API
         logger.debug(`Calling Claude API for CODE generation with model ${apiOptions.model}...`);
