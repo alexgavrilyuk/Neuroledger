@@ -1,1 +1,0 @@
-import{C as a,B as e,D as i,_ as o,P as w}from"./vendor-BtPwzfIq.js";window.React=a;window.ReactDOM=e;window.Recharts=i;window._=o;window.Papa=w;console.log("[Iframe Libs] Libraries attached to window.");window.iframeLibrariesLoaded=!0;
