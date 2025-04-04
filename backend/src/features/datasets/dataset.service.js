@@ -1,9 +1,10 @@
 // backend/src/features/datasets/dataset.service.js
-// ** UPDATED FILE - Ensure getSignedUrlForDataset is robust **
+// ** UPDATED FILE - Enhanced to support team datasets **
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const { getBucket } = require('../../shared/external_apis/gcs.client');
 const Dataset = require('./dataset.model');
+const TeamMember = require('../teams/team-member.model'); // Import TeamMember model
 const logger = require('../../shared/utils/logger');
 const Papa = require('papaparse');
 const XLSX = require('xlsx');
@@ -83,7 +84,7 @@ const getSignedUrlForDataset = async (gcsPath) => {
      }
  };
 
-// parseHeadersFromGCS (remains the same as your previous version)
+// parseHeadersFromGCS (remains the same)
 const parseHeadersFromGCS = async (gcsPath) => {
     // ... (keep existing logic) ...
     const bucket = getBucket();
@@ -127,10 +128,11 @@ const parseHeadersFromGCS = async (gcsPath) => {
     }
 };
 
-// createDatasetMetadata (remains the same as your previous version)
+/**
+ * Create dataset metadata - UPDATED to support team datasets
+ */
 const createDatasetMetadata = async (userId, datasetData) => {
-    // ... (keep existing logic) ...
-     const { name, gcsPath, originalFilename, fileSizeBytes } = datasetData;
+    const { name, gcsPath, originalFilename, fileSizeBytes, teamId } = datasetData;
     let headers = [];
     let schemaInfo = [];
     try {
@@ -139,13 +141,31 @@ const createDatasetMetadata = async (userId, datasetData) => {
     } catch (parseError) {
          logger.error(`Header parsing failed for ${gcsPath}, proceeding without schema: ${parseError.message}`);
     }
+
+    // If teamId is provided, verify user is a member of the team
+    if (teamId) {
+        const teamMember = await TeamMember.findOne({ teamId, userId }).lean();
+        if (!teamMember) {
+            logger.error(`User ${userId} attempted to create dataset for team ${teamId} without membership`);
+            throw new Error('You are not a member of this team');
+        }
+    }
+
     const dataset = new Dataset({
-        name: name || originalFilename, gcsPath, originalFilename, fileSizeBytes, ownerId: userId, schemaInfo,
-        createdAt: new Date(), lastUpdatedAt: new Date(),
+        name: name || originalFilename,
+        gcsPath,
+        originalFilename,
+        fileSizeBytes,
+        ownerId: userId,
+        teamId, // Add teamId (null if not provided)
+        schemaInfo,
+        createdAt: new Date(),
+        lastUpdatedAt: new Date(),
     });
+
     try {
         const savedDataset = await dataset.save();
-        logger.info(`Dataset metadata saved for user ${userId}, GCS path: ${gcsPath}, DB ID: ${savedDataset._id}`);
+        logger.info(`Dataset metadata saved for user ${userId}${teamId ? `, team ${teamId}` : ''}, GCS path: ${gcsPath}, DB ID: ${savedDataset._id}`);
         return savedDataset.toObject();
     } catch (error) {
         logger.error(`Failed to save dataset metadata for ${gcsPath}:`, error);
@@ -154,15 +174,38 @@ const createDatasetMetadata = async (userId, datasetData) => {
     }
 };
 
-// listDatasetsByUser (remains the same as your previous version)
+/**
+ * List datasets the user has access to - UPDATED to include team datasets
+ */
 const listDatasetsByUser = async (userId) => {
-    // ... (keep existing logic) ...
-     try {
-        const datasets = await Dataset.find({ ownerId: userId })
+    try {
+        // Get all teams the user is a member of
+        const teamMemberships = await TeamMember.find({ userId })
+            .select('teamId')
+            .lean();
+
+        const teamIds = teamMemberships.map(tm => tm.teamId);
+
+        // Find both personal datasets and team datasets the user has access to
+        const query = {
+            $or: [
+                { ownerId: userId, teamId: null }, // Personal datasets
+                { teamId: { $in: teamIds } }      // Team datasets
+            ]
+        };
+
+        const datasets = await Dataset.find(query)
           .sort({ createdAt: -1 })
-          .select('-schemaInfo -columnDescriptions');
-        logger.debug(`Found ${datasets.length} datasets for user ${userId}`);
-        return datasets.map(d => d.toObject());
+          .lean();
+
+        // Add isTeamDataset flag for frontend use
+        const datasetsWithFlag = datasets.map(ds => ({
+            ...ds,
+            isTeamDataset: ds.teamId !== null
+        }));
+
+        logger.debug(`Found ${datasetsWithFlag.length} datasets for user ${userId} (including team datasets)`);
+        return datasetsWithFlag;
     } catch (error) {
         logger.error(`Failed to list datasets for user ${userId}:`, error);
         throw new Error('Could not retrieve datasets.');
@@ -174,5 +217,5 @@ module.exports = {
     createDatasetMetadata,
     listDatasetsByUser,
     parseHeadersFromGCS,
-    getSignedUrlForDataset // Keep exported
+    getSignedUrlForDataset
 };

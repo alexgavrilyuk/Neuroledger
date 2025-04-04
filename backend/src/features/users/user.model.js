@@ -1,5 +1,5 @@
 // backend/src/features/users/user.model.js
-// ** UPDATED FILE **
+// ** UPDATED FILE - Add references to teams **
 const mongoose = require('mongoose');
 
 const UserSchema = new mongoose.Schema({
@@ -53,12 +53,13 @@ const UserSchema = new mongoose.Schema({
         default: null
     }
   },
-  // --- Stubs for later phases ---
+  // --- User Settings ---
   settings: {
     currency: { type: String, default: 'USD' },
     dateFormat: { type: String, default: 'YYYY-MM-DD' },
     aiContext: { type: String, default: '' }
   },
+  // --- Teams Reference - Now implemented ---
   teams: [{
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Team'

@@ -1,17 +1,16 @@
 // frontend/src/features/account_management/pages/AccountTeamsPage.jsx
-// ** NEW FILE - Placeholder **
 import React from 'react';
-import Card from '../../../shared/ui/Card';
+import CreateTeamForm from '../../team_management/components/CreateTeamForm';
+import TeamList from '../../team_management/components/TeamList';
+import PendingInvites from '../../team_management/components/PendingInvites';
 
 const AccountTeamsPage = () => {
   return (
-     <Card>
-        <Card.Header>Teams</Card.Header>
-        <Card.Body>
-            <p className="text-gray-600 dark:text-gray-400">Team management features (create team, invite members, etc.) will go here.</p>
-            {/* Add team components later */}
-        </Card.Body>
-    </Card>
+    <div className="space-y-6">
+      <CreateTeamForm />
+      <PendingInvites />
+      <TeamList />
+    </div>
   );
 };
 

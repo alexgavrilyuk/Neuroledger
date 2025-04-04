@@ -1,13 +1,15 @@
 // backend/src/features/prompts/prompt.service.js
-// ** UPDATED FILE - Now includes business and dataset context **
+// ** UPDATED FILE - Now includes team business context **
 const anthropic = require('../../shared/external_apis/claude.client');
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
+const Team = require('../teams/team.model');
+const TeamMember = require('../teams/team-member.model');
 const PromptHistory = require('./prompt.model');
 const logger = require('../../shared/utils/logger');
 const generateSystemPrompt = require('./system-prompt-template');
 
-// Enhanced context assembly function
+// Enhanced context assembly function - now includes team context
 const assembleContext = async (userId, selectedDatasetIds) => {
     let contextString = "";
 
@@ -18,21 +20,53 @@ const assembleContext = async (userId, selectedDatasetIds) => {
         // Add currency and date format from user settings
         contextString += `- User Preferences: Currency=${user?.settings?.currency || 'USD'}, DateFormat=${user?.settings?.dateFormat || 'YYYY-MM-DD'}\n`;
 
-        // Add team settings if needed (future feature)
-        contextString += "- Team Settings: (Not implemented yet)\n";
+        // Add user business context if available
+        if (user?.settings?.aiContext) {
+            contextString += `- User Business Context: ${user.settings.aiContext}\n`;
+        }
+
+        // Get team memberships and add team settings/context
+        const teamMemberships = await TeamMember.find({ userId }).lean();
+        if (teamMemberships && teamMemberships.length > 0) {
+            const teamIds = teamMemberships.map(membership => membership.teamId);
+            const teams = await Team.find({ _id: { $in: teamIds } }).lean();
+
+            if (teams.length > 0) {
+                contextString += "- Team Contexts:\n";
+                teams.forEach(team => {
+                    if (team.settings?.aiContext) {
+                        contextString += `  - Team "${team.name}": ${team.settings.aiContext}\n`;
+                    }
+                });
+            }
+        }
 
         // Add dataset context
         contextString += "- Selected Datasets:\n";
 
         if (selectedDatasetIds && selectedDatasetIds.length > 0) {
-            const datasets = await Dataset.find({ _id: { $in: selectedDatasetIds }, ownerId: userId })
-                .select('name description schemaInfo columnDescriptions').lean();
+            // Modify query to include both personal and team datasets the user has access to
+            const teamIds = teamMemberships ? teamMemberships.map(tm => tm.teamId) : [];
+
+            const datasets = await Dataset.find({
+                _id: { $in: selectedDatasetIds },
+                $or: [
+                    { ownerId: userId, teamId: null }, // Personal datasets
+                    { teamId: { $in: teamIds } }       // Team datasets user has access to
+                ]
+            }).populate('teamId', 'name').lean();
 
             if (!datasets || datasets.length === 0) {
                 contextString += "  - No accessible datasets found for the provided IDs.\n";
             } else {
                 datasets.forEach(ds => {
-                    contextString += `  - Name: ${ds.name}\n`;
+                    contextString += `  - Name: ${ds.name}`;
+
+                    // Add team name if it's a team dataset
+                    if (ds.teamId) {
+                        contextString += ` (Team: ${ds.teamId.name})`;
+                    }
+                    contextString += "\n";
 
                     // Add dataset description if available
                     if (ds.description) {

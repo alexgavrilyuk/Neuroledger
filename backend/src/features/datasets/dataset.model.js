@@ -1,5 +1,5 @@
 // backend/src/features/datasets/dataset.model.js
-// ** NEW FILE **
+// ** UPDATED FILE - Added teamId field for team datasets **
 const mongoose = require('mongoose');
 
 // Basic representation of schema info derived from headers
@@ -39,7 +39,7 @@ const DatasetSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
-  teamId: { // For team sharing later
+  teamId: { // For team sharing
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Team',
     index: true,
