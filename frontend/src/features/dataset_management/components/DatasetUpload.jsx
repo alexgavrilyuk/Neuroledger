@@ -2,6 +2,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { useDatasetUpload } from '../hooks/useDatasetUpload';
+import { useTeams } from '../../team_management/hooks/useTeams';
 import Button from '../../../shared/ui/Button';
 import {
     ArrowUpTrayIcon,
@@ -9,20 +10,27 @@ import {
     CheckCircleIcon,
     DocumentArrowUpIcon,
     DocumentIcon,
-    DocumentTextIcon
+    DocumentTextIcon,
+    UserGroupIcon
 } from '@heroicons/react/24/outline';
 import Card from '../../../shared/ui/Card';
 
 const DatasetUpload = ({ onUploadComplete }) => {
   const [file, setFile] = useState(null);
-  const { uploadFile, isUploading, uploadProgress, uploadError } = useDatasetUpload(() => {
+  const [selectedTeamId, setSelectedTeamId] = useState(null);
+  const { uploadFile, isUploading, uploadProgress, uploadError } = useDatasetUpload((dataset) => {
       // Callback when upload AND metadata creation is successful
       setFile(null); // Clear the selected file
+      setSelectedTeamId(null); // Reset team selection
       if (onUploadComplete) {
-          onUploadComplete(); // Notify parent to e.g., refetch list
+          onUploadComplete(dataset); // Notify parent to e.g., refetch list
       }
   });
   const fileInputRef = useRef();
+
+  // Get teams for the dropdown
+  const { teams, isLoading: teamsLoading } = useTeams();
+  const userAdminTeams = teams.filter(team => team.userRole === 'admin');
 
   const onDrop = useCallback((acceptedFiles) => {
     // Do something with the files
@@ -63,12 +71,13 @@ const DatasetUpload = ({ onUploadComplete }) => {
 
   const handleUploadClick = () => {
       if (file) {
-          uploadFile(file);
+          uploadFile(file, selectedTeamId);
       }
   }
 
   const handleClearFile = () => {
       setFile(null);
+      setSelectedTeamId(null);
       // If using ref for input, clear it too
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -138,35 +147,67 @@ const DatasetUpload = ({ onUploadComplete }) => {
 
             {/* Selected File Display - Enhanced with better visualization */}
             {file && !isUploading && !uploadError && (
-                <div className="flex items-center justify-between rounded-lg border border-gray-200 dark:border-gray-700 p-3 bg-gradient-subtle-light dark:bg-gradient-subtle-dark shadow-soft-sm dark:shadow-soft-dark-sm transition-all duration-200 hover:shadow-soft-md">
-                    <div className="flex items-center space-x-3">
-                        <div className="h-10 w-10 flex-shrink-0 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
-                            <FileIcon className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between rounded-lg border border-gray-200 dark:border-gray-700 p-3 bg-gradient-subtle-light dark:bg-gradient-subtle-dark shadow-soft-sm dark:shadow-soft-dark-sm transition-all duration-200 hover:shadow-soft-md">
+                        <div className="flex items-center space-x-3">
+                            <div className="h-10 w-10 flex-shrink-0 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
+                                <FileIcon className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-sm font-medium text-gray-700 dark:text-gray-300 truncate pr-2">{file.name}</span>
+                                <span className="text-xs text-gray-500 dark:text-gray-500">
+                                    {(file.size / (1024 * 1024)).toFixed(2)} MB
+                                </span>
+                            </div>
                         </div>
-                        <div className="flex flex-col">
-                            <span className="text-sm font-medium text-gray-700 dark:text-gray-300 truncate pr-2">{file.name}</span>
-                            <span className="text-xs text-gray-500 dark:text-gray-500">
-                                {(file.size / (1024 * 1024)).toFixed(2)} MB
-                            </span>
+                        <div className="flex items-center gap-x-3">
+                            <button
+                                onClick={handleClearFile}
+                                className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200"
+                                aria-label="Clear selection"
+                            >
+                                <XCircleIcon className="h-5 w-5" />
+                            </button>
                         </div>
                     </div>
-                    <div className="flex items-center gap-x-3">
+
+                    {/* Team Selection Dropdown */}
+                    {userAdminTeams.length > 0 && (
+                        <div className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg">
+                            <div className="flex items-center mb-2">
+                                <UserGroupIcon className="h-5 w-5 text-gray-500 mr-2" />
+                                <label htmlFor="team-select" className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                                    Upload to Team (Optional)
+                                </label>
+                            </div>
+                            <select
+                                id="team-select"
+                                className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm py-2 px-3 focus:ring-2 focus:ring-blue-500/25 focus:border-blue-500"
+                                value={selectedTeamId || ''}
+                                onChange={(e) => setSelectedTeamId(e.target.value || null)}
+                            >
+                                <option value="">Personal Dataset</option>
+                                {userAdminTeams.map(team => (
+                                    <option key={team._id} value={team._id}>{team.name}</option>
+                                ))}
+                            </select>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                {selectedTeamId
+                                    ? "This dataset will be shared with all members of the selected team."
+                                    : "Leave unselected to keep this dataset personal."}
+                            </p>
+                        </div>
+                    )}
+
+                    <div className="flex justify-end">
                         <Button
                             onClick={handleUploadClick}
-                            size="sm"
                             variant="primary"
                             leftIcon={ArrowUpTrayIcon}
                             className="shadow-soft-md hover:shadow-soft-lg"
                         >
-                            Upload
+                            Upload {selectedTeamId ? 'to Team' : ''}
                         </Button>
-                        <button
-                            onClick={handleClearFile}
-                            className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200"
-                            aria-label="Clear selection"
-                        >
-                            <XCircleIcon className="h-5 w-5" />
-                        </button>
                     </div>
                 </div>
             )}

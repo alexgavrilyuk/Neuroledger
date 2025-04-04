@@ -9,11 +9,11 @@ import {
   ArrowLeftOnRectangleIcon,
   Bars3Icon,
   XMarkIcon,
-  BellIcon,
   UserCircleIcon
 } from '@heroicons/react/24/outline';
 import { useOnboarding } from '../../features/onboarding/hooks/useOnboarding';
 import TutorialModal from '../../features/onboarding/components/TutorialModal';
+import NotificationBell from '../../features/notifications/components/NotificationBell';
 
 const AppLayout = () => {
   const { user, loading, actions } = useAuth();
@@ -21,7 +21,6 @@ const AppLayout = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
-  const [showNotifications, setShowNotifications] = useState(false);
   const location = useLocation();
 
   // Track scroll position to add shadow to header when scrolled
@@ -37,7 +36,6 @@ const AppLayout = () => {
   // Close sidebar when route changes on mobile
   useEffect(() => {
     setSidebarOpen(false);
-    setShowNotifications(false);
   }, [location.pathname]);
 
   // Listen for sidebar collapse state changes from Sidebar component
@@ -138,31 +136,8 @@ const AppLayout = () => {
              </div>
 
              <div className="flex items-center gap-x-4 lg:gap-x-6">
-                {/* Notifications button - Enhanced with badge and interaction */}
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setShowNotifications(!showNotifications)}
-                    className="relative p-1.5 text-gray-400 dark:text-gray-500 hover:text-gray-500 dark:hover:text-gray-400 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-150"
-                    aria-label="View notifications"
-                  >
-                    <BellIcon className="h-6 w-6" aria-hidden="true" />
-                    {/* Notification badge with animation */}
-                    <span className="absolute top-0 right-0 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white dark:ring-gray-900 animate-pulse"></span>
-                  </button>
-
-                  {/* Notifications dropdown - Will be expanded in future */}
-                  {showNotifications && (
-                    <div className="absolute right-0 z-10 mt-2 w-80 origin-top-right rounded-md bg-white dark:bg-gray-800 py-1 shadow-soft-lg dark:shadow-soft-dark-lg ring-1 ring-black ring-opacity-5 focus:outline-none animate-fadeIn">
-                      <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
-                        <h3 className="text-sm font-medium text-gray-900 dark:text-white">Notifications</h3>
-                      </div>
-                      <div className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400">
-                        No new notifications
-                      </div>
-                    </div>
-                  )}
-                </div>
+                {/* Notifications bell - ADDED HERE */}
+                <NotificationBell />
 
                 {/* Theme switcher */}
                 <ThemeSwitcher />

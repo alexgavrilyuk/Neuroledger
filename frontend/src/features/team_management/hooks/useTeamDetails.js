@@ -45,7 +45,7 @@ export const useTeamDetails = (teamId) => {
     fetchTeamDetails();
   }, [fetchTeamDetails]);
 
-  const updateTeamSettings = async (settings) => {
+  const updateTeamSettings = useCallback(async (settings) => {
     if (!teamId) return;
 
     setIsLoading(true);
@@ -68,9 +68,9 @@ export const useTeamDetails = (teamId) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [teamId]);
 
-  const inviteUser = async (email, role = 'member') => {
+  const inviteUser = useCallback(async (email, role = 'member') => {
     if (!teamId) return;
 
     setIsLoading(true);
@@ -89,9 +89,9 @@ export const useTeamDetails = (teamId) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [teamId]);
 
-  const updateMemberRole = async (memberId, role) => {
+  const updateMemberRole = useCallback(async (memberId, role) => {
     if (!teamId) return;
 
     setIsLoading(true);
@@ -127,9 +127,9 @@ export const useTeamDetails = (teamId) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [teamId]);
 
-  const removeMember = async (memberId) => {
+  const removeMember = useCallback(async (memberId) => {
     if (!teamId) return;
 
     setIsLoading(true);
@@ -158,33 +158,28 @@ export const useTeamDetails = (teamId) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [teamId]);
 
-  const fetchTeamDatasets = async () => {
+  const fetchTeamDatasets = useCallback(async () => {
     if (!teamId) return [];
 
-    setIsLoading(true);
-    setError(null);
     try {
       const response = await apiClient.get(`/teams/${teamId}/datasets`);
       if (response.data.status === 'success') {
-        return response.data.data;
+        return response.data.data || [];
       } else {
         throw new Error(response.data.message || 'Failed to fetch team datasets');
       }
     } catch (err) {
       console.error("Failed to fetch team datasets:", err);
-      setError(err.response?.data?.message || err.message || 'Could not load team datasets.');
       return [];
-    } finally {
-      setIsLoading(false);
     }
-  };
+  }, [teamId]);
 
-  // Function to manually refetch if needed
-  const refetch = () => {
+  // Function to manually refetch
+  const refetch = useCallback(() => {
     fetchTeamDetails();
-  };
+  }, [fetchTeamDetails]);
 
   return {
     team,
