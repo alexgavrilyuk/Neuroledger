@@ -1,269 +1,239 @@
-Okay, let's break down the detailed file-level architecture plan for both the frontend and backend of NeuroLedger, adhering strictly to the Vertical Slice Architecture (VSA).
+NeuroLedger: Revised Build Plan & Architecture Documentation (Iframe Execution)
 
-**Important Considerations:**
+1. Application Overview
 
-*   **VSA Goal:** The primary goal here is isolation. A team working on the `datasets` feature should ideally only need to modify files within `features/datasets/` and potentially consume well-defined, stable elements from `features/shared/`. Cross-feature dependencies outside of `shared` should be minimized or eliminated.
-*   **READMEs:** Remember, *every* feature directory (`features/auth/`, `features/datasets/`, etc.) on *both* frontend and backend **MUST** contain a `README.md`. This README details the feature's purpose, its APIs (for backend features), the UI components/pages (for frontend features), data models involved, and any specific setup or operational notes. This is paramount for coordinating separate teams.
-*   **`features/shared/`:** This is *not* a dumping ground. It's for genuinely reusable, stable, cross-cutting concerns like base UI elements, core authentication logic wrappers, API client configurations, database connection setups, etc.
-*   **File Granularity:** This plan outlines key files. Depending on complexity, controllers, services, or components might be broken down further into smaller files within their respective directories, but they would still belong to that feature slice.
-*   **Error Handling & Logging:** While not explicitly listed in every file, assume robust error handling and logging are implemented, likely using shared middleware/utilities.
-*   **Testing:** Test files (`*.test.js` or `*.spec.js`) would typically reside alongside the files they test or in a dedicated `__tests__` subfolder within each feature slice directory. They are omitted here for brevity but are essential.
+NeuroLedger is a web application empowering users to generate financial reports using natural language prompts against their uploaded datasets.
 
----
+Core Workflow (Current Iframe Architecture):
 
-## Backend Architecture Plan (Node.js / Express)
+Authentication: Users sign up/log in via Firebase.
 
-```
+Subscription: Users select a (dummy) plan/trial to activate features.
+
+Onboarding: First-time users see a tutorial.
+
+Data Management: Users upload Excel/CSV datasets to GCS, manage basic metadata.
+
+Context Configuration: (Minimal in current implementation) Basic user/team settings placeholders exist.
+
+Prompting: Users type prompts in a chat interface, selecting relevant datasets.
+
+AI Code Generation (BE): Backend receives prompt/context, calls Claude API instructing it to generate React code string.
+
+Code & Data Fetching (FE):
+
+Frontend receives the React code string from the backend.
+
+Frontend requests and receives signed read URLs from the backend for the selected datasets.
+
+Frontend fetches the actual dataset content directly from GCS using these URLs.
+
+Sandboxed Execution (FE):
+
+The generated code string and fetched dataset content are passed securely via postMessage into a sandboxed iframe (sandbox="allow-scripts").
+
+A bootstrapper HTML file (iframe-bootstrapper.html) within the iframe loads necessary libraries (React, Recharts, etc.) via CDN.
+
+The bootstrapper executes the received code string (using new Function()) within the iframe's isolated environment, passing the data and library globals.
+
+The AI-generated React component renders inside the iframe.
+
+Report Display: The rendered report is viewed within the iframe, typically presented inside a modal in the main application.
+
+Iteration & Export: (Future) Users can continue prompting. Export/drilldown features TBD.
+
+Key Goals:
+
+Leverage AI (Claude) for automated report code string generation.
+
+Provide secure (via iframe sandbox) client-side execution and rendering of AI-generated reports.
+
+Offer a modern, themeable UI.
+
+Enable basic data upload and selection.
+
+Target UI Aesthetic: Modern, clean, intuitive, professional, themeable (Light/Dark implemented).
+
+2. Backend Architecture (Node.js / Express - Current State)
+
+Core Principle: Vertical Slice Architecture (VSA). code_execution slice removed/not implemented.
+
+Directory Structure & File Descriptions:
+
 neuroledger-backend/
 ├── src/
 │   ├── features/
-│   │   ├── auth/
-│   │   │   ├── auth.controller.js      # Handles incoming HTTP requests for auth (e.g., POST /api/v1/auth/session)
-│   │   │   ├── auth.service.js         # Verifies Firebase ID token using shared Firebase Admin client
-│   │   │   ├── auth.routes.js          # Defines API routes like /session, connects routes to controller methods
-│   │   │   └── README.md               # Explains auth flow, token verification logic, endpoints
+│   │   ├── auth/               # Handles authentication verification
+│   │   │   ├── auth.controller.js  # HTTP handler for POST /api/v1/auth/session. Verifies token via service, gets/creates user.
+│   │   │   ├── auth.service.js     # Verifies Firebase ID token, finds/creates user in DB via user.model.
+│   │   │   ├── auth.routes.js      # Defines POST /session route.
+│   │   │   └── README.md           # Details: Firebase token verification, user get/create logic, endpoint spec.
 │   │   │
-│   │   ├── users/
-│   │   │   ├── user.controller.js      # Handles requests for user profile (GET /me), settings (PUT /me/settings)
-│   │   │   ├── user.service.js         # Logic to fetch/update user data in DB, interacts with UserModel
-│   │   │   ├── user.model.js           # Defines the User schema/model (e.g., using Mongoose or Sequelize) - includes profile info, settings
-│   │   │   ├── user.routes.js          # Defines routes like /me, /me/settings
-│   │   │   └── README.md               # Explains user data structure, endpoints, settings options
+│   │   ├── users/              # Manages user data model
+│   │   │   ├── user.model.js       # Mongoose schema for User (firebaseUid, email, name, subscriptionInfo, onboardingCompleted, settings/teams placeholders). Includes hasActiveSubscription helper.
+│   │   │   └── README.md           # Details: User data model fields and purpose. (No controller/service/routes implemented yet for profile/settings updates).
 │   │   │
-│   │   ├── subscriptions/
-│   │   │   ├── subscription.controller.js # Handles requests for subscription status (GET /status), plan selection (POST /select)
-│   │   │   ├── subscription.service.js    # Logic for checking/updating subscription status (dummy logic initially), associating plans with users
-│   │   │   ├── subscription.model.js      # Defines Subscription schema or adds fields to UserModel (tier, trialEndDate, status)
-│   │   │   ├── subscription.routes.js     # Defines routes like /status, /select
-│   │   │   └── README.md                  # Explains subscription tiers, status logic, endpoints (notes dummy implementation)
+│   │   ├── subscriptions/      # Manages dummy subscription status
+│   │   │   ├── subscription.controller.js # HTTP handlers for GET /status, POST /select.
+│   │   │   ├── subscription.service.js    # Dummy logic to update user.subscriptionInfo based on planId ('trial', 'plus'), checks trial expiry.
+│   │   │   ├── subscription.routes.js     # Defines GET /status, POST /select routes.
+│   │   │   └── README.md                  # Details: Dummy subscription logic, interaction with User model, endpoints specs.
 │   │   │
-│   │   ├── datasets/
-│   │   │   ├── dataset.controller.js   # Handles requests for listing (GET /), uploading (POST /), details (GET /{id}), metadata update (PUT /{id}), delete (DELETE /{id}), getting upload URL (GET /upload-url)
-│   │   │   ├── dataset.service.js      # Logic for interacting with GCS (via shared client) for uploads/signed URLs, DB operations (metadata, schema storage), basic schema detection (parsing headers)
-│   │   │   ├── dataset.model.js        # Defines Dataset schema (name, description, gcsPath, ownerId, teamId, schemaInfo, userColumnDescriptions, isIgnored)
-│   │   │   ├── dataset.routes.js       # Defines all dataset-related routes
-│   │   │   └── README.md               # Explains dataset management, GCS interaction, schema storage, metadata fields, endpoints
+│   │   ├── datasets/           # Manages dataset uploads, metadata, and read access
+│   │   │   ├── dataset.controller.js   # HTTP handlers: GET /upload-url (for PUT), POST / (create metadata), GET / (list), GET /{id}/read-url (for GET).
+│   │   │   ├── dataset.service.js      # Logic: Generates GCS signed URLs (PUT & GET), saves metadata to DB, parses headers (CSV/XLSX), lists datasets, checks file existence before generating read URL.
+│   │   │   ├── dataset.model.js        # Mongoose schema for Dataset (name, gcsPath, ownerId, schemaInfo, etc.).
+│   │   │   ├── dataset.routes.js       # Defines dataset CRUD-related routes including upload/read URLs.
+│   │   │   └── README.md               # Details: Dataset model, GCS interaction (upload/read URLs), header parsing, endpoints specs including read URL.
 │   │   │
-│   │   ├── teams/
-│   │   │   ├── team.controller.js      # Handles requests for team CRUD (GET /, POST /, GET /{id}, PUT /{id}), member management (POST /{id}/members, DELETE /{id}/members)
-│   │   │   ├── team.service.js         # Logic for creating teams, sending invites (using an email service via shared client), managing members, updating team settings/context
-│   │   │   ├── team.model.js           # Defines Team schema (name, ownerId, settings) and TeamMember schema (teamId, userId, role, status)
-│   │   │   ├── team.routes.js          # Defines all team-related routes
-│   │   │   └── README.md               # Explains team structure, invite flow, member roles, endpoints
+│   │   ├── prompts/            # Handles prompt request, context assembly, AI code generation
+│   │   │   ├── prompt.controller.js    # HTTP handler for POST /. Validates, calls service, returns { aiGeneratedCode, promptId }.
+│   │   │   ├── prompt.service.js       # Core Logic: Assembles context (user settings placeholder, dataset schemas/metadata). Calls Claude API instructing it to generate **React code string**. Stores history. Returns code string. **Does NOT execute code.**
+│   │   │   ├── prompt.model.js         # Mongoose schema for PromptHistory (stores prompt, context, selected datasets, *aiGeneratedCode*, status, etc.).
+│   │   │   ├── prompt.routes.js        # Defines POST / route.
+│   │   │   └── README.md               # **IMPORTANT:** Details context assembly, Claude interaction asking for CODE, API response structure containing `aiGeneratedCode`.
 │   │   │
-│   │   ├── prompts/
-│   │   │   ├── prompt.controller.js    # Handles request to initiate analysis (POST /)
-│   │   │   ├── prompt.service.js       # Core logic: Fetches user/team settings, dataset metadata/schema/descriptions, assembles the full context prompt for Claude, calls Claude API (via shared client), receives generated React code, passes code to Code Execution service, returns result/status. May store prompt history.
-│   │   │   ├── prompt.routes.js        # Defines the main /api/v1/prompts route
-│   │   │   └── README.md               # Explains context assembly logic, Claude API interaction, interaction with Code Execution service, endpoint
-│   │   │
-│   │   ├── code_execution/
-│   │   │   ├── execution.controller.js # Handles internal requests (likely not directly HTTP exposed, but called by prompt.service) to execute code
-│   │   │   ├── execution.service.js    # **CRITICAL & COMPLEX:** Sets up secure sandbox (e.g., vm2, Docker), fetches necessary data read-only, executes the received React code, captures output/errors, enforces resource limits (CPU, memory, time), returns structured result or error.
-│   │   │   ├── execution.sandbox.js    # (or similar) Abstracted logic for the chosen sandboxing mechanism
-│   │   │   └── README.md               # **VERY IMPORTANT:** Details the sandboxing strategy, security measures, resource limits, input/output format, potential risks.
-│   │   │
-│   │   └── shared/
+│   │   └── shared/             # Shared utilities, configurations, clients
 │   │       ├── middleware/
-│   │       │   ├── auth.middleware.js  # Express middleware to verify Firebase token on incoming requests (uses auth.service), attach user info to request object
-│   │       │   ├── error.handler.js  # Centralized error handling middleware
-│   │       │   ├── subscription.guard.js # Middleware to check user's subscription status before allowing access to certain features/routes
-│   │       │   └── README.md           # Explains available middleware and how to use them
+│   │       │   ├── auth.middleware.js  # Verifies Firebase token, attaches `req.user`.
+│   │       │   ├── error.handler.js  # Global Express error handler.
+│   │       │   ├── subscription.guard.js # Checks `req.user.subscriptionInfo` status/trial date.
+│   │       │   └── README.md           # Documents middleware.
 │   │       ├── utils/
-│   │       │   ├── logger.js         # Configured logging utility (e.g., Winston)
-│   │       │   ├── helpers.js        # General utility functions (string formatting, etc.)
-│   │       │   └── README.md           # Documents utility functions
+│   │       │   └── logger.js         # Simple console logger.
 │   │       ├── config/
-│   │       │   ├── index.js          # Loads environment variables (Firebase creds, DB URI, Claude API key, GCS bucket), validates them, and exports a config object
-│   │       │   └── README.md           # Lists required environment variables
+│   │       │   └── index.js          # Loads/validates/exports .env variables (PORT, MONGO_URI, FIREBASE_PROJECT_ID, GCS_BUCKET_NAME, CLAUDE_API_KEY).
 │   │       ├── db/
-│   │       │   ├── connection.js     # Establishes and manages database connection (e.g., Mongoose connect)
-│   │       │   └── README.md           # Explains DB connection setup
+│   │       │   └── connection.js     # Establishes Mongoose DB connection.
 │   │       ├── external_apis/
-│   │       │   ├── firebase.client.js # Initializes Firebase Admin SDK
-│   │       │   ├── gcs.client.js      # Initializes Google Cloud Storage client, provides functions for signed URLs, file operations
-│   │       │   ├── claude.client.js   # Initializes client/wrapper for calling the Anthropic Claude API
-│   │       │   ├── email.service.js  # Wrapper for sending emails (e.g., team invites via SendGrid or similar)
-│   │       │   └── README.md          # Explains how to use API clients, required keys (referenced from config)
-│   │       └── README.md             # Overview of all shared components
+│   │       │   ├── firebase.client.js # Initializes Firebase Admin SDK.
+│   │       │   ├── gcs.client.js      # Initializes Google Cloud Storage client. Provides `getBucket`.
+│   │       │   ├── claude.client.js   # Initializes Anthropic Claude client.
+│   │       │   └── email.service.js  # Placeholder - Not implemented yet.
+│   │       └── README.md             # Overview of shared modules.
 │   │
-│   ├── config/                     # General app config if not handled entirely in shared/config
-│   ├── server.js                   # Entry point: Initializes Express app, applies core middleware (CORS, body-parser), loads main router (`./routes.js`), starts the server listener.
-│   ├── app.js                      # Often used to configure the Express application instance itself (middleware, etc.), separate from the server listener logic in server.js
-│   └── routes.js                   # Main router: Imports and mounts all feature-specific routers under base paths (e.g., app.use('/api/v1/auth', authRoutes))
+│   ├── app.js                      # Configures Express app instance (middleware).
+│   ├── routes.js                   # Main API router mounting feature routers under `/api/v1`.
+│   └── server.js                   # Entry point: Connects DB, starts HTTP server.
 │
-├── .env.example                # Example environment variables file
-├── package.json                # Project dependencies and scripts
-└── README.md                   # High-level project overview, setup instructions, link to FE/BE Interaction README
-```
+├── .env                        # Actual secrets (Untracked)
+├── .env.example                # Template for required environment variables.
+├── firebase-service-account.json # Firebase credentials (Untracked)
+├── gcs-service-account.json    # GCS credentials (Untracked)
+├── package.json                # Dependencies (Should contain ONLY backend libs: express, mongoose, firebase-admin, @google-cloud/storage, @anthropic-ai/sdk, dotenv, cors, papaparse, xlsx etc. **REMOVE react, react-dom, recharts etc.**)
+├── .gitignore                  # Ignores node_modules, .env, service account keys.
+└── README.md                   # Project overview, setup, reflects implemented phases & iframe architecture.
+Use code with caution.
+3. Frontend Architecture (React / Vite / Tailwind CSS - Current State)
 
----
+Core Principle: VSA for features. report_display handles iframe logic. Data fetching for reports now in usePromptSubmit.
 
-## Frontend Architecture Plan (React / Tailwind CSS)
+Directory Structure & File Descriptions:
 
-```
 neuroledger-frontend/
 ├── public/
-│   └── index.html              # Main HTML file, React app mounts here
-│   └── ...                     # Other static assets (favicon, etc.)
+│   ├── iframe-bootstrapper.html # **KEY FILE:** Static HTML loaded into sandbox iframe. Loads CDN libs (React, ReactDOM, Recharts, _, Papa, XLSX), listens for postMessage, executes received code via new Function(), renders report, sends status back.
+│   └── placeholder-image.svg    # Example image for onboarding.
+│   └── vite.svg                 # Default Vite icon.
 │
 ├── src/
 │   ├── features/
-│   │   ├── auth/
+│   │   ├── auth/               # Login/Signup UI & Logic
+│   │   │   ├── components/     # LoginForm.jsx, SignupForm.jsx (UI, basic validation)
+│   │   │   ├── hooks/          # useAuthActions.js (Handles calling context actions, post-signup logout/redirect)
+│   │   │   ├── pages/          # LoginPage.jsx (Displays success msg), SignupPage.jsx
+│   │   │   └── README.md       # Details auth flow, post-signup redirect.
+│   │   │
+│   │   ├── onboarding/       # Initial tutorial modal
+│   │   │   ├── components/     # TutorialModal.jsx, TutorialStep.jsx
+│   │   │   ├── hooks/          # useOnboarding.js (Manages visibility via localStorage & user prop)
+│   │   │   └── README.md       # Details onboarding trigger/persistence logic.
+│   │   │
+│   │   ├── subscription/     # Dummy subscription plan selection
+│   │   │   ├── components/     # PlanSelectorCard.jsx (Styled plan display)
+│   │   │   ├── pages/          # SubscriptionPage.jsx (Layout, handles selection API call, updates AuthContext user)
+│   │   │   └── README.md       # Details dummy plan selection flow.
+│   │   │
+│   │   ├── dashboard/        # Main chat/prompting interface
 │   │   │   ├── components/
-│   │   │   │   ├── LoginForm.jsx       # UI component for the login form fields and button
-│   │   │   │   ├── SignupForm.jsx      # UI component for the signup form fields and button
-│   │   │   │   └── AuthLayout.jsx      # Optional: Layout specific to auth pages (e.g., centered card)
+│   │   │   │   ├── ChatInterface.jsx   # Displays messages.
+│   │   │   │   ├── MessageBubble.jsx   # Renders individual message; handles 'report_iframe_ready' type with "View Report" button, calls onViewReport prop with reportInfo { code, datasets }.
+│   │   │   │   ├── PromptInput.jsx     # Textarea, dataset selector (uses useDatasets), submit button.
+│   │   │   │   └── ProgressIndicator.jsx # Shows processing stages.
+│   │   │   ├── hooks/
+│   │   │   │   ├── useChatHistory.js   # Manages array of chat messages.
+│   │   │   │   └── usePromptSubmit.js  # **KEY HOOK:** Handles prompt submission: calls BE POST /prompts -> receives code -> calls BE GET /datasets/{id}/read-url -> fetches data from GCS -> updates message state with { code, datasets } for ReportViewer. Manages loading/error/progress stages.
 │   │   │   ├── pages/
-│   │   │   │   ├── LoginPage.jsx       # Page component handling login logic (state, calling Firebase/AuthContext)
-│   │   │   │   └── SignupPage.jsx      # Page component handling signup logic
+│   │   │   │   └── DashboardPage.jsx   # Orchestrates dashboard: renders components, manages ReportViewer modal state, passes reportInfo/themeName to modal.
+│   │   │   └── README.md               # **IMPORTANT:** Details the revised flow: receiving code, fetching data, triggering ReportViewer via modal.
+│   │   │
+│   │   ├── dataset_management/ # UI for dataset upload/listing (within Account)
+│   │   │   ├── components/     # DatasetUpload.jsx (Uses useDatasetUpload), DatasetList.jsx (Uses useDatasets).
 │   │   │   ├── hooks/
-│   │   │   │   └── useAuthActions.js   # Custom hook encapsulating Firebase login/signup/logout calls and updating shared AuthContext
-│   │   │   └── README.md               # Explains auth UI components, pages, interaction with Firebase SDK and AuthContext
+│   │   │   │   ├── useDatasetUpload.js # Manages 3-step GCS upload (get URL, PUT to GCS, POST metadata to BE).
+│   │   │   │   └── useDatasets.js      # Fetches dataset list from BE (GET /datasets). Used here and in Dashboard.
+│   │   │   └── README.md               # Details upload/list UI components and hooks. Mentions use in Dashboard.
 │   │   │
-│   │   ├── onboarding/
+│   │   ├── account_management/ # Structure for account sections
+│   │   │   ├── layouts/        # AccountLayout.jsx (Provides header and sub-navigation for /account/* routes)
+│   │   │   ├── pages/          # AccountDatasetsPage.jsx (Integrates dataset components), AccountProfilePage.jsx, AccountTeamsPage.jsx, AccountSettingsPage.jsx (Placeholders).
+│   │   │   └── README.md       # Details account section structure and sub-navigation.
+│   │   │
+│   │   ├── report_display/   # Handles rendering the report via iframe
 │   │   │   ├── components/
-│   │   │   │   ├── TutorialStep.jsx    # Component for a single step/slide in the tutorial
-│   │   │   │   └── TutorialModal.jsx   # Modal container for the tutorial steps, handles navigation, "Don't show again"
-│   │   │   ├── hooks/
-│   │   │   │   └── useOnboarding.js    # Hook to manage onboarding state (visibility, current step, "don't show again" persistence)
-│   │   │   └── README.md               # Explains onboarding flow, components, state management
+│   │   │   │   └── ReportViewer.jsx # **KEY COMPONENT:** Renders sandboxed iframe pointing to iframe-bootstrapper.html. Manages iframe state (loading, ready, error). Uses postMessage to send { code, datasets } and theme updates *into* iframe. Listens for status messages *from* iframe. Displays loading/error overlays.
+│   │   │   └── README.md           # **IMPORTANT:** Explains iframe sandboxing approach, postMessage communication, security points, interaction with bootstrapper.
 │   │   │
-│   │   ├── subscription/
-│   │   │   ├── components/
-│   │   │   │   └── PlanSelectorCard.jsx # UI card displaying a subscription plan option
-│   │   │   ├── pages/
-│   │   │   │   └── SubscriptionPage.jsx # Page shown after signup/if no active sub, displays plans, handles selection (dummy API call)
-│   │   │   └── README.md               # Explains subscription selection UI, interaction with backend (dummy endpoint)
-│   │   │
-│   │   ├── dashboard/
-│   │   │   ├── components/
-│   │   │   │   ├── ChatInterface.jsx   # Main container for displaying messages/artefacts
-│   │   │   │   ├── PromptInput.jsx     # Text input area for user prompts, handles submission
-│   │   │   │   ├── MessageBubble.jsx   # Component to display user prompt or simple text response from AI
-│   │   │   │   └── ReportArtefact.jsx  # Container holding the dynamically rendered report (uses report_display feature)
-│   │   │   ├── hooks/
-│   │   │   │   ├── useChatHistory.js   # Manages the state of the chat conversation (messages, loading states)
-│   │   │   │   └── usePromptSubmit.js  # Handles logic for sending prompt + context to backend API
-│   │   │   ├── pages/
-│   │   │   │   └── DashboardPage.jsx   # Main page users interact with after login/setup
-│   │   │   └── README.md               # Explains chat UI, state management, prompt submission flow
-│   │   │
-│   │   ├── dataset_management/ # (Likely rendered within AccountManagement pages)
-│   │   │   ├── components/
-│   │   │   │   ├── DatasetList.jsx     # Displays table/list of user's/team's datasets
-│   │   │   │   ├── DatasetUpload.jsx   # Component handling file selection and upload logic (using signed URL from BE)
-│   │   │   │   ├── DatasetMetadataForm.jsx # Form for editing dataset name, description, context
-│   │   │   │   ├── SchemaViewerEditor.jsx # Displays detected schema, allows users to add descriptions per column
-│   │   │   │   └── DatasetActions.jsx  # Buttons for delete, ignore/unignore dataset
-│   │   │   ├── hooks/
-│   │   │   │   ├── useDatasets.js      # Hook to fetch and manage dataset list state
-│   │   │   │   └── useDatasetUpload.js # Hook to manage file upload process (get signed URL, upload to GCS, notify BE)
-│   │   │   └── README.md               # Explains dataset UI components, fetching/upload logic, state management
-│   │   │
-│   │   ├── team_management/ # (Likely rendered within AccountManagement pages)
-│   │   │   ├── components/
-│   │   │   │   ├── TeamList.jsx        # Displays list of teams user belongs to
-│   │   │   │   ├── MemberList.jsx      # Displays members of a selected team
-│   │   │   │   ├── InviteMemberForm.jsx # Form to invite new members by email
-│   │   │   │   └── TeamSettingsForm.jsx # Form for editing team name, context settings
-│   │   │   ├── hooks/
-│   │   │   │   └── useTeamManagement.js # Hook to fetch team data, manage invites, update settings
-│   │   │   └── README.md               # Explains team management UI, API interactions
-│   │   │
-│   │   ├── account_management/
-│   │   │   ├── components/
-│   │   │   │   ├── AccountSidebar.jsx  # Navigation within the account section (Profile, Datasets, Teams, Settings)
-│   │   │   │   ├── UserProfileForm.jsx # Form for editing user profile info
-│   │   │   │   ├── GeneralSettingsForm.jsx # Form for currency, date format, etc.
-│   │   │   │   └── AISettingsForm.jsx  # Form for user-level AI context settings
-│   │   │   ├── pages/
-│   │   │   │   ├── AccountPage.jsx     # Main container page for all account management sections, handles routing/display of subsections
-│   │   │   │   ├── UserProfilePage.jsx # Specific view/route for profile editing
-│   │   │   │   ├── DatasetMgmtPage.jsx # View/route embedding dataset_management components
-│   │   │   │   ├── TeamMgmtPage.jsx    # View/route embedding team_management components
-│   │   │   │   └── SettingsPage.jsx    # View/route for general and AI settings forms
-│   │   │   └── README.md               # Explains account section structure, forms, navigation
-│   │   │
-│   │   ├── report_display/ # (Component feature, used by Dashboard)
-│   │   │   ├── components/
-│   │   │   │   ├── DynamicRenderer.jsx # **KEY COMPONENT:** Takes structured data/code output from BE and attempts to render it (text, figures, charts using shared ChartWrapper)
-│   │   │   │   ├── ErrorDisplay.jsx    # Component to show if code execution failed
-│   │   │   │   └── LoadingSkeleton.jsx # Placeholder shown while report is generating/rendering
-│   │   │   ├── hooks/
-│   │   │   │   └── useReportInteractions.js # Hook potentially managing state for drill-downs or other interactions within the rendered report
-│   │   │   └── README.md               # Explains how reports are rendered dynamically, handles charts, errors, interactivity hooks
-│   │   │
-│   │   └── shared/
-│   │       ├── ui/                     # Base, reusable, unopinionated UI components styled with Tailwind
-│   │       │   ├── Button.jsx
-│   │       │   ├── Input.jsx
-│   │       │   ├── Card.jsx
-│   │       │   ├── Modal.jsx
-│   │       │   ├── Spinner.jsx
-│   │       │   ├── Table.jsx
-│   │       │   ├── ChartWrapper.jsx    # Wrapper around the chosen charting library (e.g., Recharts, Chart.js) ensuring consistent styling/theming
-│   │       │   ├── Icon.jsx            # Component for rendering SVG icons consistently
-│   │       │   └── README.md           # Documents available UI primitives, props, usage
-│   │       ├── layouts/
-│   │       │   ├── AppLayout.jsx       # Main application layout (e.g., with sidebar, header) after login
-│   │       │   ├── CenteredLayout.jsx  # Simple layout for centering content (e.g., login, signup)
-│   │       │   └── README.md           # Explains different page layouts
-│   │       ├── hooks/
-│   │       │   ├── useApi.js           # Hook wrapping the shared Axios instance for making API calls (handles loading/error state)
-│   │       │   ├── useAuth.js          # Hook to easily access auth state and actions from AuthContext
-│   │       │   ├── useTheme.js         # Hook to access current theme and theme switching function from ThemeContext
-│   │       │   └── README.md           # Documents shared custom hooks
-│   │       ├── contexts/
-│   │       │   ├── AuthContext.jsx     # Provides authentication state (user, token, loading, error) and actions (login, logout) globally using React Context API
-│   │       │   ├── ThemeContext.jsx    # Provides current theme state and theme switching function
-│   │       │   └── README.md           # Explains available global contexts and their provided values/functions
-│   │       ├── services/
-│   │       │   ├── apiClient.js        # Configured Axios instance (base URL, interceptors for adding auth token, handling standard errors)
-│   │       │   └── README.md           # Explains API client setup and usage patterns
-│   │       ├── theme/
-│   │       │   ├── themes.js           # Object defining color palettes, fonts, etc., for light, dark, and other themes (compatible with Tailwind's theme config)
-│   │       │   ├── ThemeProvider.jsx   # Context provider that applies the selected theme (e.g., adds class to root element) and allows switching
-│   │       │   └── README.md           # Explains how theming works, how to define themes
-│   │       ├── assets/                 # Shared images, icons, fonts
-│   │       │   └── icons/              # SVG icons, potentially as React components
-│   │       ├── utils/
-│   │       │   ├── formatters.js       # Functions for formatting dates, currency, numbers
-│   │       │   ├── constants.js        # Shared constant values (e.g., API paths, event names)
-│   │       │   └── helpers.js          # Miscellaneous browser utility functions
-│   │       ├── types/                  # (If using TypeScript) Shared type definitions
-│   │       └── README.md               # Overview of all shared components and utilities
+│   │   └── shared/             # Shared UI, hooks, contexts, etc.
+│   │       ├── ui/             # Base presentational components: Button, Card, Input, Spinner, Modal, Checkbox. (Themeable via Tailwind dark: variants)
+│   │       ├── layouts/        # AppLayout.jsx (Main authenticated layout with Sidebar), CenteredLayout.jsx (Public split-screen layout)
+│   │       ├── hooks/          # useAuth.js, useTheme.js
+│   │       ├── contexts/       # AuthContext.jsx (Manages user state, interacts with BE session), ThemeContext.jsx (Manages light/dark mode via class on <html>, localStorage)
+│   │       ├── services/       # apiClient.js (Axios instance with auth interceptor), firebase.js (Firebase SDK init)
+│   │       ├── theme/          # ThemeProvider.jsx, ThemeSwitcher.jsx, themes.js (Basic theme defs)
+│   │       ├── components/     # Sidebar.jsx (Used by AppLayout)
+│   │       ├── utils/          # logger.js (Frontend console logger)
+│   │       └── README.md       # Overview of shared elements.
 │   │
-│   ├── App.jsx                     # Root component: Sets up Context Providers (Auth, Theme), Router
-│   ├── index.js (or main.jsx)      # Entry point: Renders the App component into the DOM
-│   ├── routes.jsx                  # Defines application routes using react-router-dom, maps paths to Page components (consider lazy loading features)
-│   └── styles/
-│       ├── index.css               # Main CSS file, includes Tailwind directives (@tailwind base; @tailwind components; @tailwind utilities;)
-│       └── global.css              # Any additional global custom styles
+│   ├── App.jsx                     # Root: Sets up Context Providers, Router.
+│   ├── index.css                   # Imports Tailwind directives, global base styles.
+│   ├── main.jsx                    # Renders App into DOM.
+│   └── routes.jsx                  # Defines routes, ProtectedRoute, PublicOnlyRoute logic. Lazy loads pages.
 │
-├── tailwind.config.js          # Tailwind CSS configuration (theme extensions, plugins)
-├── package.json                # Project dependencies and scripts
-└── README.md                   # High-level project overview, setup instructions, link to FE/BE Interaction README
-```
+├── .env                        # Actual secrets (Untracked)
+├── .env.example                # Template for FE env variables (VITE_FIREBASE_*, VITE_API_BASE_URL).
+├── index.html                  # Root HTML, includes Google Font link.
+├── package.json                # Frontend dependencies (React, Tailwind, Axios, Firebase, react-router-dom, react-dropzone, recharts, lodash, papaparse, xlsx, dompurify etc.)
+├── tailwind.config.js          # Tailwind config (darkMode: 'class', Inter font, plugins: forms, typography).
+├── postcss.config.js           # PostCSS config for Tailwind/Autoprefixer.
+├── vite.config.js              # Vite build config. (No special iframe bundling needed).
+├── .gitignore                  # Ignores node_modules, dist, .env.
+├── FE_BE_INTERACTION_README.md # API contract doc (Updated for iframe flow).
+├── UI_README.md                # Styling guidelines.
+└── README.md                   # Project overview, setup, reflects implemented phases & iframe architecture.
+Use code with caution.
+4. FE/BE Interaction Documentation (FE_BE_INTERACTION_README.md - Key Points reflecting Current State)
 
----
+Base URL: /api/v1
 
-**FE/BE Interaction README (`FE_BE_INTERACTION_README.md`)**
+Auth: Authorization: Bearer <Firebase ID Token>. POST /auth/session for init.
 
-This crucial, shared document (ideally in a common repo or linked prominently in both FE and BE READMEs) would detail:
+Responses: Standard status: 'success'/'error'.
 
-1.  **Base API URL:** e.g., `/api/v1`
-2.  **Authentication:** Flow description (Firebase ID Token sent in `Authorization: Bearer <token>` header).
-3.  **Standard Response Formats:** Success (`{ status: 'success', data: ... }`), Error (`{ status: 'error', message: '...', code: '...', details?: ... }`).
-4.  **Endpoint Definitions:** Detailed list of all backend API endpoints, grouped by feature (matching the backend feature slices):
-    *   Method (GET, POST, PUT, DELETE)
-    *   Path (e.g., `/users/me`)
-    *   Required Headers (e.g., Authorization)
-    *   Request Body Schema (if applicable)
-    *   Success Response Schema
-    *   Error Response Codes/Schemas
-5.  **Key Data Models:** Structures for User, Dataset, Team, etc., as exchanged between FE and BE.
+Endpoints:
 
----
+POST /auth/session -> { data: User }
 
-This structure provides a strong foundation for VSA, enabling parallel development and clear responsibilities while maintaining consistency through shared elements and comprehensive documentation via READMEs. Remember to emphasize the critical nature and complexity of the `code_execution` feature on the backend.
+GET /subscriptions/status -> { data: SubscriptionInfo }
+
+POST /subscriptions/select -> { data: User } (Returns full User)
+
+GET /datasets/upload-url?filename&fileSize -> { data: { signedUrl, gcsPath } }
+
+POST /datasets -> { data: Dataset }
+
+GET /datasets -> { data: Dataset[] }
+
+GET /datasets/{id}/read-url -> { data: { signedUrl } } (Crucial for FE data fetching)
+
+POST /prompts -> { data: { aiGeneratedCode: string, promptId: string } } (Returns code string, NOT executed result)
