@@ -124,6 +124,20 @@ const TeamDetailsPage = () => {
     }
   };
 
+  // Function to handle member updates
+  const handleMemberUpdate = async () => {
+    // Refresh the team details to get updated member list
+    try {
+      const response = await apiClient.get(`/teams/${teamId}`);
+      if (response.data.status === 'success') {
+        setTeam(response.data.data);
+        setTeamMembers(response.data.data.members || []);
+      }
+    } catch (err) {
+      console.error("Failed to refresh team details after member update:", err);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex justify-center items-center min-h-[50vh]">
@@ -256,41 +270,12 @@ const TeamDetailsPage = () => {
             )}
 
             {/* Member List */}
-            <Card>
-              <Card.Header>Team Members</Card.Header>
-              <Card.Body>
-                {teamMembers.length === 0 ? (
-                  <p className="text-gray-500">No members in this team.</p>
-                ) : (
-                  <ul className="divide-y divide-gray-200 dark:divide-gray-700">
-                    {teamMembers.map((member) => (
-                      <li key={member._id || member.email} className="py-4">
-                        <div className="flex items-center">
-                          <div className="flex-shrink-0">
-                            <div className="h-10 w-10 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center">
-                              {member.role === 'admin' ? (
-                                <svg className="h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                                </svg>
-                              ) : (
-                                <svg className="h-6 w-6 text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                                </svg>
-                              )}
-                            </div>
-                          </div>
-                          <div className="ml-4">
-                            <h3 className="font-medium">{member.name || member.email}</h3>
-                            <p className="text-sm text-gray-500">{member.email}</p>
-                            <p className="text-sm text-gray-500">{member.role === 'admin' ? 'Administrator' : 'Member'}</p>
-                          </div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </Card.Body>
-            </Card>
+            <MemberList
+              teamId={teamId}
+              members={teamMembers}
+              isAdmin={isAdmin}
+              onMemberUpdated={handleMemberUpdate}
+            />
           </div>
         )}
 

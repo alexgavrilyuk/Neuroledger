@@ -45,7 +45,7 @@ export const useTeamDetails = (teamId) => {
     fetchTeamDetails();
   }, [fetchTeamDetails]);
 
-  const updateTeamSettings = useCallback(async (settings) => {
+  const updateTeamSettings = async (settings) => {
     if (!teamId) return;
 
     setIsLoading(true);
@@ -68,7 +68,7 @@ export const useTeamDetails = (teamId) => {
     } finally {
       setIsLoading(false);
     }
-  }, [teamId]);
+  };
 
   const inviteUser = useCallback(async (email, role = 'member') => {
     if (!teamId) return;
