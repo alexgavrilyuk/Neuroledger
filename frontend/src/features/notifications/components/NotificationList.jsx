@@ -1,6 +1,7 @@
 // frontend/src/features/notifications/components/NotificationList.jsx
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { useNotifications } from '../hooks/useNotifications';
+import { useTeamInvites } from '../../team_management/hooks/useTeamInvites';
 import Spinner from '../../../shared/ui/Spinner';
 import {
   UserGroupIcon,
@@ -9,13 +10,39 @@ import {
   XMarkIcon,
   UserPlusIcon,
   UserMinusIcon,
-  ShieldCheckIcon
+  ShieldCheckIcon,
+  CheckIcon,
+  XCircleIcon,
+  TrashIcon
 } from '@heroicons/react/24/outline';
-import { format, formatDistanceToNow } from 'date-fns';
+import { formatDistanceToNow } from 'date-fns';
 
 const NotificationList = ({ onClose }) => {
-  const { notifications, isLoading, error, fetchMore } = useNotifications();
+  const { notifications, isLoading, error, fetchMore, markAsRead, refetch, deleteNotification } = useNotifications();
+  const { acceptInvite, rejectInvite, invites } = useTeamInvites();
+  const [actionInProgress, setActionInProgress] = useState(null);
+  const [actionError, setActionError] = useState(null);
+  const [processedInvites, setProcessedInvites] = useState({});
   const notifRef = useRef(null);
+
+  // Load processed invites from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('processedInvites');
+      if (saved) {
+        setProcessedInvites(JSON.parse(saved));
+      }
+    } catch (err) {
+      console.error('Error loading processed invites from localStorage', err);
+    }
+  }, []);
+
+  // Save processed invites to localStorage when they change
+  useEffect(() => {
+    if (Object.keys(processedInvites).length > 0) {
+      localStorage.setItem('processedInvites', JSON.stringify(processedInvites));
+    }
+  }, [processedInvites]);
 
   // Close when clicking outside of notification panel
   useEffect(() => {
@@ -30,6 +57,91 @@ const NotificationList = ({ onClose }) => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [onClose]);
+
+  // Check if an invite notification should show buttons
+  const shouldShowInviteButtons = (notification) => {
+    if (notification.type !== 'team_invite' || !notification.data?.inviteId) {
+      return false;
+    }
+
+    // Check if the invite has been processed locally
+    if (processedInvites[notification.data.inviteId]) {
+      return false;
+    }
+
+    // Check if the invite still exists in the backend
+    const inviteExists = invites.some(invite => invite._id === notification.data.inviteId);
+    return inviteExists;
+  };
+
+  // Handle accept invite action
+  const handleAcceptInvite = async (inviteId, notificationId, teamName) => {
+    setActionInProgress(notificationId);
+    setActionError(null);
+
+    try {
+      await acceptInvite(inviteId);
+
+      // Mark invite as processed locally
+      setProcessedInvites(prev => ({
+        ...prev,
+        [inviteId]: { status: 'accepted', teamName }
+      }));
+
+      // Mark notification as read
+      await markAsRead([notificationId]);
+
+      // Refresh notifications to show the new "Team Joined" notification
+      setTimeout(() => {
+        refetch();
+      }, 500);
+    } catch (err) {
+      console.error("Failed to accept team invite:", err);
+      setActionError({
+        id: notificationId,
+        message: err.message || 'Failed to accept invitation'
+      });
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  // Handle reject invite action
+  const handleRejectInvite = async (inviteId, notificationId) => {
+    setActionInProgress(notificationId);
+    setActionError(null);
+
+    try {
+      await rejectInvite(inviteId);
+
+      // Mark invite as processed locally
+      setProcessedInvites(prev => ({
+        ...prev,
+        [inviteId]: { status: 'declined' }
+      }));
+
+      // Mark notification as read
+      await markAsRead([notificationId]);
+    } catch (err) {
+      console.error("Failed to reject team invite:", err);
+      setActionError({
+        id: notificationId,
+        message: err.message || 'Failed to reject invitation'
+      });
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  // Handle notification deletion
+  const handleDeleteNotification = async (notificationId) => {
+    try {
+      await deleteNotification(notificationId);
+      refetch();
+    } catch (err) {
+      console.error("Failed to delete notification:", err);
+    }
+  };
 
   // Icon mapping for different notification types
   const getIcon = (type) => {
@@ -89,31 +201,120 @@ const NotificationList = ({ onClose }) => {
         {/* Notifications list */}
         {notifications.length > 0 && (
           <div className="max-h-96 overflow-y-auto">
-            {notifications.map((notification) => (
-              <div
-                key={notification._id}
-                className={`px-4 py-3 border-b border-gray-100 dark:border-gray-700 last:border-0 ${
-                  !notification.isRead ? 'bg-blue-50 dark:bg-blue-900/20' : ''
-                }`}
-              >
-                <div className="flex">
-                  <div className="flex-shrink-0 mr-3 mt-0.5">
-                    {getIcon(notification.type)}
-                  </div>
-                  <div className="flex-grow min-w-0">
-                    <p className="text-sm font-medium text-gray-900 dark:text-white">
-                      {notification.title}
-                    </p>
-                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-                      {notification.message}
-                    </p>
-                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                      {formatDistanceToNow(new Date(notification.createdAt), { addSuffix: true })}
-                    </p>
+            {notifications.map((notification) => {
+              const showInviteButtons = shouldShowInviteButtons(notification);
+              const isProcessed = notification.data?.inviteId && processedInvites[notification.data.inviteId];
+
+              return (
+                <div
+                  key={notification._id}
+                  className={`px-4 py-3 border-b border-gray-100 dark:border-gray-700 last:border-0 relative ${
+                    !notification.isRead && !isProcessed ? 'bg-blue-50 dark:bg-blue-900/20' : ''
+                  }`}
+                >
+                  {/* Delete button */}
+                  <button
+                    onClick={() => handleDeleteNotification(notification._id)}
+                    className="absolute top-2 right-2 p-1 rounded-full text-gray-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors"
+                    title="Delete notification"
+                  >
+                    <TrashIcon className="h-4 w-4" />
+                  </button>
+
+                  <div className="flex pr-5">
+                    <div className="flex-shrink-0 mr-3 mt-0.5">
+                      {getIcon(notification.type)}
+                    </div>
+                    <div className="flex-grow min-w-0">
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                        {notification.title}
+                      </p>
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+                        {notification.message}
+                      </p>
+                      <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                        {formatDistanceToNow(new Date(notification.createdAt), { addSuffix: true })}
+                      </p>
+
+                      {/* Team invite actions - only if needed */}
+                      {showInviteButtons && (
+                        <div className="mt-3">
+                          {actionError?.id === notification._id && (
+                            <p className="text-xs text-rose-500 dark:text-rose-400 mb-2">
+                              {actionError.message}
+                            </p>
+                          )}
+                          <div className="flex space-x-2">
+                            <button
+                              onClick={() => handleAcceptInvite(
+                                notification.data.inviteId,
+                                notification._id,
+                                notification.data.teamName
+                              )}
+                              disabled={actionInProgress !== null}
+                              className="flex-1 inline-flex justify-center items-center py-1.5 px-3 text-sm font-medium rounded-md
+                                         bg-blue-500 text-white hover:bg-blue-600
+                                         transition-colors duration-150
+                                         disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {actionInProgress === notification._id ? (
+                                <Spinner size="xs" color="text-white" className="mr-1" />
+                              ) : (
+                                <CheckIcon className="h-4 w-4 mr-1" />
+                              )}
+                              Accept
+                            </button>
+                            <button
+                              onClick={() => handleRejectInvite(notification.data.inviteId, notification._id)}
+                              disabled={actionInProgress !== null}
+                              className="flex-1 inline-flex justify-center items-center py-1.5 px-3 text-sm font-medium rounded-md
+                                         border border-gray-300 bg-white text-gray-700
+                                         hover:bg-gray-50 hover:text-gray-900
+                                         dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200
+                                         dark:hover:bg-gray-600
+                                         transition-colors duration-150
+                                         disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {actionInProgress === notification._id ? (
+                                <Spinner size="xs" className="mr-1" />
+                              ) : (
+                                <XCircleIcon className="h-4 w-4 mr-1" />
+                              )}
+                              Decline
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Show status for processed invitations */}
+                      {isProcessed && (
+                        <div className="mt-2">
+                          <span
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                              isProcessed.status === 'accepted'
+                                ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
+                                : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
+                            }`}
+                          >
+                            {isProcessed.status === 'accepted' ? (
+                              <>
+                                <CheckIcon className="mr-1 h-3 w-3" />
+                                Accepted
+                              </>
+                            ) : (
+                              <>
+                                <XCircleIcon className="mr-1 h-3 w-3" />
+                                Declined
+                              </>
+                            )}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 

@@ -112,6 +112,33 @@ export const useNotifications = () => {
     }
   };
 
+  // New function to delete a notification
+  const deleteNotification = async (notificationId) => {
+    if (!user || !notificationId) return;
+
+    try {
+      const response = await apiClient.delete(`/notifications/${notificationId}`);
+
+      if (response.data.status === 'success') {
+        // Update local state
+        setNotifications(prev => prev.filter(notification => notification._id !== notificationId));
+
+        // Update unread count if needed
+        const deletedNotification = notifications.find(n => n._id === notificationId);
+        if (deletedNotification && !deletedNotification.isRead) {
+          setUnreadCount(prev => Math.max(0, prev - 1));
+        }
+
+        return true;
+      } else {
+        throw new Error(response.data.message || 'Failed to delete notification');
+      }
+    } catch (err) {
+      console.error("Failed to delete notification:", err);
+      throw err;
+    }
+  };
+
   // Function to manually refetch if needed
   const refetch = () => {
     fetchNotifications();
@@ -136,6 +163,7 @@ export const useNotifications = () => {
     error,
     refetch,
     markAsRead,
+    deleteNotification,
     fetchMore: (limit) => fetchNotifications(limit, notifications.length)
   };
 };
