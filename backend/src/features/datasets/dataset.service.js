@@ -1,5 +1,4 @@
 // backend/src/features/datasets/dataset.service.js
-// ** UPDATED FILE - Enhanced to support team datasets **
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const { getBucket } = require('../../shared/external_apis/gcs.client');
@@ -212,10 +211,74 @@ const listDatasetsByUser = async (userId) => {
     }
 };
 
+/**
+ * Delete a dataset and its corresponding GCS file
+ */
+const deleteDatasetById = async (datasetId, userId) => {
+    try {
+        // Find the dataset
+        const dataset = await Dataset.findById(datasetId);
+
+        if (!dataset) {
+            throw new Error('Dataset not found or not accessible.');
+        }
+
+        // Check if user has permissions to delete
+        // If it's a personal dataset, verify ownerId
+        // If it's a team dataset, verify user is a team admin
+        if (dataset.ownerId.toString() !== userId.toString()) {
+            if (dataset.teamId) {
+                // Check if user is admin of the team
+                const teamMember = await TeamMember.findOne({
+                    teamId: dataset.teamId,
+                    userId,
+                    role: 'admin'
+                });
+
+                if (!teamMember) {
+                    throw new Error('You do not have permission to delete this team dataset.');
+                }
+            } else {
+                throw new Error('Dataset not found or not accessible.');
+            }
+        }
+
+        // Get the bucket and file reference
+        const bucket = getBucket();
+        const file = bucket.file(dataset.gcsPath);
+
+        // Check if the file exists in GCS
+        const [exists] = await file.exists();
+
+        // Delete the file from GCS if it exists
+        if (exists) {
+            try {
+                await file.delete();
+                logger.info(`GCS file deleted: ${dataset.gcsPath}`);
+            } catch (gcsError) {
+                logger.error(`Error deleting GCS file ${dataset.gcsPath}:`, gcsError);
+                // Continue with DB deletion even if GCS deletion fails
+            }
+        } else {
+            logger.warn(`GCS file not found during deletion: ${dataset.gcsPath}`);
+        }
+
+        // Delete the dataset from MongoDB
+        await Dataset.findByIdAndDelete(datasetId);
+
+        logger.info(`Dataset ${datasetId} deleted by user ${userId}`);
+        return true;
+    } catch (error) {
+        logger.error(`Failed to delete dataset ${datasetId} by user ${userId}:`, error);
+        throw error;
+    }
+};
+
 module.exports = {
     generateUploadUrl,
     createDatasetMetadata,
     listDatasetsByUser,
     parseHeadersFromGCS,
-    getSignedUrlForDataset
+    getSignedUrlForDataset,
+    deleteDatasetById
 };

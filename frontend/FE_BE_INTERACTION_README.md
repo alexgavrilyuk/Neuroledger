@@ -1,5 +1,5 @@
 # FE_BE_INTERACTION_README.md
-# ** UPDATED FILE - Added User and Dataset Context Endpoints **
+# ** UPDATED FILE - Added Dataset Deletion Endpoint **
 
 # NeuroLedger: Frontend / Backend API Interaction
 
@@ -72,7 +72,7 @@ This document defines the contract for communication between the NeuroLedger fro
 *   **`POST /api/v1/datasets`**
     *   Creates dataset metadata after GCS upload.
     *   **Auth:** Required (Login + Sub).
-    *   **Request:** `{ gcsPath, originalFilename, name?, fileSizeBytes? }`
+    *   **Request:** `{ gcsPath, originalFilename, name?, fileSizeBytes?, teamId? }`
     *   **Success (201):** `{ data: Dataset }`
 *   **`GET /api/v1/datasets`**
     *   Lists user's datasets.
@@ -102,6 +102,12 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Request:** `{ description?: string, columnDescriptions?: Object }`
     *   **Success (200):** `{ status: 'success', data: Dataset }`
     *   **Errors:** `400` (Invalid ID), `404` (Dataset not found/accessible), `500`.
+
+*   **`DELETE /api/v1/datasets/{id}`** (New)
+    *   Deletes a dataset and its associated file in GCS.
+    *   **Auth:** Required (Login + Sub).
+    *   **Success (200):** `{ status: 'success', message: 'Dataset deleted successfully' }`
+    *   **Errors:** `400` (Invalid ID), `403` (Not allowed for team datasets), `404` (Dataset not found/accessible), `500`.
 
 ---
 
@@ -155,9 +161,10 @@ interface User {
   onboardingCompleted: boolean;
   teams?: string[];          // Array of Team IDs
 }
+
 ```
 
-### Dataset with Added Context Fields
+Dataset with Added Context Fields
 
 ```typescript
 interface Dataset {
@@ -182,9 +189,8 @@ interface Dataset {
 }
 ```
 
-### Schema Response
-
-```typescript
+Schema Response
+```
 interface SchemaResponse {
   schemaInfo: Array<{
     name: string;
@@ -197,11 +203,13 @@ interface SchemaResponse {
 }
 ```
 
-### Prompt Generation Response Data (POST /prompts - Phase 5 Client-Side Exec)
-
-```typescript
+Prompt Generation Response Data (POST /prompts - Phase 5 Client-Side Exec)
+```
 interface PromptGenResponseData {
     aiGeneratedCode: string | null; // Null if generation failed
     promptId: string;
 }
 ```
+
+
+

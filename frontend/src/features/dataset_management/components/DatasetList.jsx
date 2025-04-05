@@ -1,13 +1,13 @@
 // frontend/src/features/dataset_management/components/DatasetList.jsx
-import React from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useDatasets } from '../hooks/useDatasets';
 import Spinner from '../../../shared/ui/Spinner';
 import Card from '../../../shared/ui/Card';
+import Modal from '../../../shared/ui/Modal';
 import {
     CircleStackIcon,
     TrashIcon,
-    PencilIcon,
     InformationCircleIcon,
     ArrowPathIcon,
     CalendarIcon,
@@ -18,7 +18,10 @@ import {
 import Button from '../../../shared/ui/Button';
 
 const DatasetList = () => {
-  const { datasets, isLoading, error, refetch } = useDatasets();
+  const { datasets, isLoading, error, refetch, deleteDataset } = useDatasets();
+  const [deletingDataset, setDeletingDataset] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   const formatDate = (dateString) => {
     if (!dateString) return '-';
@@ -29,11 +32,22 @@ const DatasetList = () => {
     } catch (e) { return '-' }
   };
 
-   // Add delete handler later
-   const handleDelete = (datasetId) => {
-       console.warn("Delete functionality not implemented yet for:", datasetId);
-       // TODO: Call API to delete, then refetch()
-   };
+  const handleDelete = async () => {
+    if (!deletingDataset) return;
+
+    setIsDeleting(true);
+    setDeleteError(null);
+
+    try {
+      await deleteDataset(deletingDataset._id);
+      // Successfully deleted, close modal
+      setDeletingDataset(null);
+    } catch (err) {
+      setDeleteError(err.message || 'Failed to delete dataset');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   return (
     <Card elevation="default" className="overflow-hidden">
@@ -160,14 +174,14 @@ const DatasetList = () => {
                            <DocumentMagnifyingGlassIcon className="h-5 w-5" />
                          </Link>
 
-                         {/* Future Delete Button - Commented out until implementation */}
-                         {/* <button
+                         {/* Delete Button */}
+                         <button
                            className="p-1.5 rounded-md text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors duration-200"
-                           onClick={() => handleDelete(dataset._id)}
+                           onClick={() => setDeletingDataset(dataset)}
                            title="Delete Dataset"
                          >
                            <TrashIcon className="h-5 w-5" />
-                         </button> */}
+                         </button>
                        </div>
                      </td>
                    </tr>
@@ -186,6 +200,63 @@ const DatasetList = () => {
           </div>
         </Card.Footer>
       )}
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        isOpen={!!deletingDataset}
+        onClose={() => {
+          setDeletingDataset(null);
+          setDeleteError(null);
+        }}
+        title="Delete Dataset"
+      >
+        <Modal.Body>
+          {deletingDataset && (
+            <div className="space-y-4">
+              <div className="flex items-start">
+                <div className="flex-shrink-0 text-red-500 mt-0.5">
+                  <ExclamationCircleIcon className="h-6 w-6" />
+                </div>
+                <div className="ml-3">
+                  <h3 className="text-base font-medium text-gray-900 dark:text-white">
+                    Are you sure you want to delete this dataset?
+                  </h3>
+                  <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                    This will permanently delete <span className="font-medium">{deletingDataset.name}</span> and remove all associated data. This action cannot be undone.
+                  </p>
+                </div>
+              </div>
+
+              {deleteError && (
+                <div className="p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700/50 rounded-md text-sm text-red-600 dark:text-red-400">
+                  {deleteError}
+                </div>
+              )}
+            </div>
+          )}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setDeletingDataset(null);
+              setDeleteError(null);
+            }}
+            disabled={isDeleting}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            leftIcon={TrashIcon}
+            onClick={handleDelete}
+            isLoading={isDeleting}
+            disabled={isDeleting}
+          >
+            Delete Dataset
+          </Button>
+        </Modal.Footer>
+      </Modal>
     </Card>
   );
 };

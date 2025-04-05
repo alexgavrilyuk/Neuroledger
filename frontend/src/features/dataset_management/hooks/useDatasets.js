@@ -1,5 +1,4 @@
 // frontend/src/features/dataset_management/hooks/useDatasets.js
-// ** NEW FILE **
 import { useState, useEffect, useCallback } from 'react';
 import apiClient from '../../../shared/services/apiClient';
 import { useAuth } from '../../../shared/hooks/useAuth'; // Needed to re-fetch on auth change maybe
@@ -39,12 +38,36 @@ export const useDatasets = () => {
     fetchDatasets();
   }, [fetchDatasets]);
 
+  // Delete dataset function
+  const deleteDataset = async (datasetId) => {
+    setError(null);
+    try {
+      const response = await apiClient.delete(`/datasets/${datasetId}`);
+      if (response.data.status === 'success') {
+        // Remove the deleted dataset from the state
+        setDatasets(prev => prev.filter(dataset => dataset._id !== datasetId));
+        return true;
+      } else {
+        throw new Error(response.data.message || 'Failed to delete dataset');
+      }
+    } catch (err) {
+      console.error("Failed to delete dataset:", err);
+      const errorMessage = err.response?.data?.message || err.message || 'Failed to delete dataset';
+      setError(errorMessage);
+      throw new Error(errorMessage);
+    }
+  };
+
   // Function to manually refetch if needed (e.g., after upload)
   const refetch = () => {
     fetchDatasets();
   };
 
-  // Add delete/update functions here later if needed
-
-  return { datasets, isLoading, error, refetch };
+  return {
+    datasets,
+    isLoading,
+    error,
+    refetch,
+    deleteDataset
+  };
 };

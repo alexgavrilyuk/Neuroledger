@@ -1,5 +1,4 @@
 // backend/src/features/datasets/dataset.routes.js
-// ** UPDATED FILE - Added routes for schema, details, and update **
 const express = require('express');
 const datasetController = require('./dataset.controller');
 const { protect } = require('../../shared/middleware/auth.middleware');
@@ -22,8 +21,6 @@ router.get('/', datasetController.listDatasets);
 // GET /api/v1/datasets/:id/read-url
 router.get('/:id/read-url', datasetController.getReadUrl);
 
-// --- NEW ROUTES ---
-
 // GET /api/v1/datasets/:id (Get single dataset details)
 router.get('/:id', datasetController.getDataset);
 
@@ -32,5 +29,8 @@ router.get('/:id/schema', datasetController.getSchema);
 
 // PUT /api/v1/datasets/:id (Update dataset context and column descriptions)
 router.put('/:id', datasetController.updateDataset);
+
+// DELETE /api/v1/datasets/:id (Delete a dataset and its GCS file)
+router.delete('/:id', datasetController.deleteDataset);
 
 module.exports = router;

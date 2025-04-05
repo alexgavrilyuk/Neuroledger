@@ -1,5 +1,4 @@
 // backend/src/features/datasets/dataset.controller.js
-// ** UPDATED FILE - Added getSchema and updateDataset endpoints **
 const datasetService = require('./dataset.service');
 const logger = require('../../shared/utils/logger');
 const mongoose = require('mongoose'); // Import mongoose for ID validation
@@ -86,8 +85,6 @@ const getReadUrl = async (req, res, next) => {
          next(error); // Pass to global error handler
     }
 };
-
-// --- NEW ENDPOINTS ---
 
 // Get a single dataset with details
 const getDataset = async (req, res, next) => {
@@ -188,13 +185,46 @@ const updateDataset = async (req, res, next) => {
     }
 };
 
+// Delete dataset and its GCS file
+const deleteDataset = async (req, res, next) => {
+    const { id } = req.params;
+    const userId = req.user._id;
+
+    // Validate MongoDB ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ status: 'error', message: 'Invalid dataset ID format.' });
+    }
+
+    try {
+        // Call service method to delete from both DB and GCS
+        await datasetService.deleteDatasetById(id, userId);
+
+        logger.info(`User ${userId} successfully deleted dataset ${id}`);
+        res.status(200).json({
+            status: 'success',
+            message: 'Dataset deleted successfully'
+        });
+    } catch (error) {
+        if (error.message === 'Dataset not found or not accessible.') {
+            return res.status(404).json({ status: 'error', message: error.message });
+        }
+        if (error.message === 'You do not have permission to delete this team dataset.') {
+            return res.status(403).json({ status: 'error', message: error.message });
+        }
+
+        logger.error(`Error deleting dataset ${id} for user ${userId}: ${error.message}`);
+        next(error);
+    }
+};
+
 // Export the controller functions
 module.exports = {
     getUploadUrl,
     createDataset,
     listDatasets,
     getReadUrl,
-    getDataset,     // NEW: Get single dataset details
-    getSchema,      // NEW: Get dataset schema information
-    updateDataset,  // NEW: Update dataset context and column descriptions
+    getDataset,     // Get single dataset details
+    getSchema,      // Get dataset schema information
+    updateDataset,  // Update dataset context and column descriptions
+    deleteDataset,  // Delete dataset and its GCS file
 };
