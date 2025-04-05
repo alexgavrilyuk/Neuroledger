@@ -13,7 +13,8 @@ import {
     CalendarIcon,
     CheckBadgeIcon,
     ExclamationCircleIcon,
-    DocumentMagnifyingGlassIcon
+    DocumentMagnifyingGlassIcon,
+    UserGroupIcon
 } from '@heroicons/react/24/outline';
 import Button from '../../../shared/ui/Button';
 
@@ -139,7 +140,15 @@ const DatasetList = () => {
                               <CircleStackIcon className="h-5 w-5 text-blue-600 dark:text-blue-400" />
                             </div>
                             <div className="ml-4">
-                              <div className="text-sm font-medium text-gray-900 dark:text-white">{dataset.name}</div>
+                              <div className="text-sm font-medium text-gray-900 dark:text-white flex items-center">
+                                {dataset.name}
+                                {dataset.isTeamDataset && dataset.teamName && (
+                                  <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-300">
+                                    <UserGroupIcon className="h-3 w-3 mr-1" />
+                                    {dataset.teamName}
+                                  </span>
+                                )}
+                              </div>
                               <div className="text-xs text-gray-500 dark:text-gray-400">{dataset.originalFilename}</div>
                             </div>
                          </div>

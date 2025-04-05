@@ -1,6 +1,7 @@
 // backend/src/features/notifications/notification.controller.js
 const notificationService = require('./notification.service');
 const logger = require('../../shared/utils/logger');
+const mongoose = require('mongoose');
 
 /**
  * Get all notifications for the current user
@@ -64,8 +65,44 @@ const markAsRead = async (req, res, next) => {
   }
 };
 
+/**
+ * Delete a notification
+ */
+const deleteNotification = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { notificationId } = req.params;
+
+    // Validate notification ID format
+    if (!mongoose.Types.ObjectId.isValid(notificationId)) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Invalid notification ID format'
+      });
+    }
+
+    const result = await notificationService.deleteNotificationById(userId, notificationId);
+
+    if (!result.success) {
+      return res.status(404).json({
+        status: 'error',
+        message: result.message || 'Notification not found or not accessible'
+      });
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: { success: true }
+    });
+  } catch (error) {
+    logger.error(`Error deleting notification: ${error.message}`);
+    next(error);
+  }
+};
+
 module.exports = {
   getUserNotifications,
   getUnreadCount,
-  markAsRead
+  markAsRead,
+  deleteNotification
 };

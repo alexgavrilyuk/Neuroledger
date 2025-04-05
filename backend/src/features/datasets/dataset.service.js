@@ -4,6 +4,7 @@ const path = require('path');
 const { getBucket } = require('../../shared/external_apis/gcs.client');
 const Dataset = require('./dataset.model');
 const TeamMember = require('../teams/team-member.model'); // Import TeamMember model
+const Team = require('../teams/team.model'); // Import Team model for population
 const logger = require('../../shared/utils/logger');
 const Papa = require('papaparse');
 const XLSX = require('xlsx');
@@ -187,7 +188,7 @@ const createDatasetMetadata = async (userId, datasetData) => {
 };
 
 /**
- * List datasets the user has access to - UPDATED to include team datasets
+ * List datasets the user has access to - UPDATED to include team datasets and team names
  */
 const listDatasetsByUser = async (userId) => {
     try {
@@ -198,26 +199,41 @@ const listDatasetsByUser = async (userId) => {
 
         const teamIds = teamMemberships.map(tm => tm.teamId);
 
-        // Find both personal datasets and team datasets the user has access to
-        const query = {
-            $or: [
-                { ownerId: userId, teamId: null }, // Personal datasets
-                { teamId: { $in: teamIds } }      // Team datasets
-            ]
-        };
+        // Find personal datasets (no teamId)
+        const personalDatasets = await Dataset.find({
+            ownerId: userId,
+            teamId: null
+        })
+        .sort({ createdAt: -1 })
+        .lean();
 
-        const datasets = await Dataset.find(query)
-          .sort({ createdAt: -1 })
-          .lean();
+        // Find team datasets with populated team info
+        const teamDatasets = await Dataset.find({
+            teamId: { $in: teamIds }
+        })
+        .populate('teamId', 'name') // Populate the team name
+        .sort({ createdAt: -1 })
+        .lean();
 
-        // Add isTeamDataset flag for frontend use
-        const datasetsWithFlag = datasets.map(ds => ({
-            ...ds,
-            isTeamDataset: ds.teamId !== null
-        }));
+        // Mark team datasets and add teamName field
+        const datasetsWithTeamInfo = [
+            ...personalDatasets.map(ds => ({
+                ...ds,
+                isTeamDataset: false,
+                teamName: null
+            })),
+            ...teamDatasets.map(ds => ({
+                ...ds,
+                isTeamDataset: true,
+                teamName: ds.teamId ? ds.teamId.name : null // Extract name from populated teamId
+            }))
+        ];
 
-        logger.debug(`Found ${datasetsWithFlag.length} datasets for user ${userId} (including team datasets)`);
-        return datasetsWithFlag;
+        // Sort by creation date (newest first)
+        datasetsWithTeamInfo.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        logger.debug(`Found ${datasetsWithTeamInfo.length} datasets for user ${userId} (including team datasets)`);
+        return datasetsWithTeamInfo;
     } catch (error) {
         logger.error(`Failed to list datasets for user ${userId}:`, error);
         throw new Error('Could not retrieve datasets.');

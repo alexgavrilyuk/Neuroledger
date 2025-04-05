@@ -17,4 +17,7 @@ router.get('/unread-count', notificationController.getUnreadCount);
 // PUT /api/v1/notifications/mark-read - Mark notifications as read
 router.put('/mark-read', notificationController.markAsRead);
 
+// DELETE /api/v1/notifications/:notificationId - Delete a specific notification
+router.delete('/:notificationId', notificationController.deleteNotification);
+
 module.exports = router;

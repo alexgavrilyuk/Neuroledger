@@ -93,6 +93,30 @@ const markAsRead = async (userId, notificationIds) => {
 };
 
 /**
+ * Delete a notification by ID
+ */
+const deleteNotificationById = async (userId, notificationId) => {
+  try {
+    // Find and delete notification, ensuring it belongs to the user
+    const result = await Notification.deleteOne({
+      _id: notificationId,
+      userId: userId
+    });
+
+    if (result.deletedCount === 0) {
+      logger.warn(`No notification found with ID ${notificationId} for user ${userId}, or user doesn't own it`);
+      return { success: false, message: 'Notification not found or not accessible' };
+    }
+
+    logger.debug(`Deleted notification ${notificationId} for user ${userId}`);
+    return { success: true, deletedCount: result.deletedCount };
+  } catch (error) {
+    logger.error(`Error deleting notification ${notificationId} for user ${userId}: ${error.message}`);
+    throw error;
+  }
+};
+
+/**
  * Delete old notifications (used for maintenance, could be scheduled)
  */
 const deleteOldNotifications = async (days = 30) => {
@@ -135,5 +159,6 @@ module.exports = {
   getUserNotifications,
   markAsRead,
   deleteOldNotifications,
-  getUnreadCount
+  getUnreadCount,
+  deleteNotificationById
 };
