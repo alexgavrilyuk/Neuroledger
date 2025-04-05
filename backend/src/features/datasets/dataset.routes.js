@@ -3,8 +3,16 @@ const express = require('express');
 const datasetController = require('./dataset.controller');
 const { protect } = require('../../shared/middleware/auth.middleware');
 const { requireActiveSubscription } = require('../../shared/middleware/subscription.guard');
+const multer = require('multer');
 
 const router = express.Router();
+
+// Configure multer for memory storage
+const storage = multer.memoryStorage();
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+});
 
 router.use(protect);
 router.use(requireActiveSubscription);
@@ -14,6 +22,9 @@ router.get('/upload-url', datasetController.getUploadUrl);
 
 // POST /api/v1/datasets (Create metadata AFTER successful GCS upload)
 router.post('/', datasetController.createDataset);
+
+// New proxy upload endpoint
+router.post('/proxy-upload', upload.single('file'), datasetController.proxyUpload);
 
 // GET /api/v1/datasets (List user's datasets)
 router.get('/', datasetController.listDatasets);

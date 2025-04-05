@@ -15,8 +15,7 @@ const SIGNED_URL_READ_EXPIRATION = 5 * 60 * 1000; // ** REDUCED TO 5 minutes for
  * Generates a unique GCS path and a signed URL for uploading a file (PUT).
  */
 const generateUploadUrl = async (userId, originalFilename, fileSize) => {
-    // ... (logic remains the same as your previous version) ...
-     if (!fileSize || isNaN(parseInt(fileSize)) || parseInt(fileSize) <= 0) {
+    if (!fileSize || isNaN(parseInt(fileSize)) || parseInt(fileSize) <= 0) {
         logger.error(`Invalid fileSize provided for upload URL generation: ${fileSize}`);
         throw new Error('Valid file size is required to generate upload URL.');
     }
@@ -24,14 +23,22 @@ const generateUploadUrl = async (userId, originalFilename, fileSize) => {
     const bucket = getBucket();
     const uniqueFilename = `${uuidv4()}-${originalFilename}`;
     const gcsPath = `${userId}/${uniqueFilename}`;
-    const options = {
-        version: 'v4',
-        action: 'write',
-        expires: Date.now() + SIGNED_URL_UPLOAD_EXPIRATION,
-        contentLengthRange: { min: fileSizeNum, max: fileSizeNum },
-        method: 'PUT',
-    };
+
+    // Set CORS configuration for the bucket
     try {
+        // Add CORS settings to allow requests from any origin
+        const options = {
+            version: 'v4',
+            action: 'write',
+            expires: Date.now() + SIGNED_URL_UPLOAD_EXPIRATION,
+            contentLengthRange: { min: fileSizeNum, max: fileSizeNum },
+            method: 'PUT',
+            // Add CORS-related options
+            origin: '*',
+            responseDisposition: 'inline',
+            responseType: 'application/json',
+        };
+
         const [url] = await bucket.file(gcsPath).getSignedUrl(options);
         logger.info(`Generated v4 PUT signed URL for user ${userId}, path: ${gcsPath}, size: ${fileSizeNum}`);
         return { signedUrl: url, gcsPath: gcsPath };
@@ -147,6 +154,12 @@ const createDatasetMetadata = async (userId, datasetData) => {
         if (!teamMember) {
             logger.error(`User ${userId} attempted to create dataset for team ${teamId} without membership`);
             throw new Error('You are not a member of this team');
+        }
+
+        // Additional check: verify user is an admin of the team
+        if (teamMember.role !== 'admin') {
+            logger.error(`User ${userId} attempted to create dataset for team ${teamId} without admin role`);
+            throw new Error('Only team admins can upload datasets to a team');
         }
     }
 

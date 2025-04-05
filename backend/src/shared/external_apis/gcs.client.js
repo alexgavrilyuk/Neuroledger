@@ -1,5 +1,4 @@
 // backend/src/shared/external_apis/gcs.client.js
-// ** NEW FILE **
 const { Storage } = require('@google-cloud/storage');
 const path = require('path');
 const config = require('../config');
@@ -30,7 +29,6 @@ const getBucket = () => {
     }
     return storage.bucket(config.gcsBucketName);
 }
-
 
 module.exports = {
     storage, // Export storage instance if needed elsewhere directly

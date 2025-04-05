@@ -71,7 +71,10 @@ const DatasetUpload = ({ onUploadComplete }) => {
 
   const handleUploadClick = () => {
       if (file) {
-          uploadFile(file, selectedTeamId);
+          // Pass selectedTeamId to uploadFile - this is the key fix
+          // Ensure selectedTeamId is passed correctly (as string, not empty string)
+          const teamId = selectedTeamId && selectedTeamId !== '' ? selectedTeamId : null;
+          uploadFile(file, teamId);
       }
   }
 

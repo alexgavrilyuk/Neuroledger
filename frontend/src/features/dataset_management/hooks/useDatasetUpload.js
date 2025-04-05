@@ -15,53 +15,38 @@ export const useDatasetUpload = (onComplete) => {
     setUploadError(null);
 
     try {
-      // 1. Request signed URL for upload
-      const getUrlResponse = await apiClient.get(`/datasets/upload-url?filename=${encodeURIComponent(file.name)}&fileSize=${file.size}`);
+      // Create FormData for file upload
+      const formData = new FormData();
+      formData.append('file', file);
 
-      if (getUrlResponse.data.status !== 'success') {
-        throw new Error(getUrlResponse.data.message || 'Failed to get upload URL');
+      // Add teamId if provided
+      if (teamId) {
+        formData.append('teamId', teamId);
       }
 
-      const { signedUrl, gcsPath } = getUrlResponse.data.data;
-
-      // 2. Upload to GCS using the signed URL
-      const uploadResponse = await fetch(signedUrl, {
-        method: 'PUT',
-        body: file,
-        headers: {
-          'Content-Type': file.type || 'application/octet-stream'
-        },
+      // Upload directly to our proxy endpoint
+      const response = await apiClient.post('/datasets/proxy-upload', formData, {
         onUploadProgress: (progressEvent) => {
           const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
           setUploadProgress(percentCompleted);
+        },
+        headers: {
+          'Content-Type': 'multipart/form-data'
         }
       });
 
-      if (!uploadResponse.ok) {
-        throw new Error(`Upload failed with status: ${uploadResponse.status}`);
+      if (response.data.status !== 'success') {
+        throw new Error(response.data.message || 'Failed to upload dataset');
       }
 
       // Simulate completion for a moment so users can see 100%
       setUploadProgress(100);
 
-      // 3. Create metadata record with backend
-      const metadataResponse = await apiClient.post('/datasets', {
-        gcsPath,
-        originalFilename: file.name,
-        name: file.name, // Default to filename, user can rename later
-        fileSizeBytes: file.size,
-        teamId: teamId || null // Add teamId if provided
-      });
-
-      if (metadataResponse.data.status !== 'success') {
-        throw new Error(metadataResponse.data.message || 'Failed to create dataset metadata');
-      }
-
-      // If we got here, all steps succeeded
+      // If we got here, everything succeeded
       setTimeout(() => {
         setIsUploading(false);
-        if (onComplete) onComplete(metadataResponse.data.data);
-      }, 1000); // Keep 100% progress visible briefly
+        if (onComplete) onComplete(response.data.data);
+      }, 1000);
 
     } catch (error) {
       console.error('Dataset upload failed:', error);

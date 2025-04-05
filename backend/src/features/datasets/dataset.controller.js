@@ -20,11 +20,11 @@ const getUploadUrl = async (req, res, next) => {
 
 // createDataset (remains the same)
 const createDataset = async (req, res, next) => {
-    const { name, gcsPath, originalFilename, fileSizeBytes } = req.body;
+    const { name, gcsPath, originalFilename, fileSizeBytes, teamId } = req.body;
     if (!gcsPath || !originalFilename) return res.status(400).json({ status: 'error', message: 'gcsPath and originalFilename are required.' });
     try {
         const userId = req.user._id;
-        const datasetData = { name, gcsPath, originalFilename, fileSizeBytes };
+        const datasetData = { name, gcsPath, originalFilename, fileSizeBytes, teamId };
         const newDataset = await datasetService.createDatasetMetadata(userId, datasetData);
         res.status(201).json({ status: 'success', data: newDataset });
     } catch (error) {
@@ -97,7 +97,21 @@ const getDataset = async (req, res, next) => {
     }
 
     try {
-        const dataset = await require('./dataset.model').findOne({ _id: id, ownerId: userId });
+        // Find dataset with team access consideration
+        const TeamMember = require('../teams/team-member.model');
+
+        // First, get all teams the user is a member of
+        const teamMemberships = await TeamMember.find({ userId }).select('teamId').lean();
+        const teamIds = teamMemberships.map(tm => tm.teamId);
+
+        // Then find dataset either owned by user or belonging to user's team
+        const dataset = await require('./dataset.model').findOne({
+            _id: id,
+            $or: [
+                { ownerId: userId },  // User is owner
+                { teamId: { $in: teamIds } }  // Or belongs to user's team
+            ]
+        });
 
         if (!dataset) {
             logger.warn(`User ${userId} attempted to access inaccessible dataset ID: ${id}`);
@@ -122,7 +136,21 @@ const getSchema = async (req, res, next) => {
     }
 
     try {
-        const dataset = await require('./dataset.model').findOne({ _id: id, ownerId: userId });
+        // Find dataset with team access consideration
+        const TeamMember = require('../teams/team-member.model');
+
+        // First, get all teams the user is a member of
+        const teamMemberships = await TeamMember.find({ userId }).select('teamId').lean();
+        const teamIds = teamMemberships.map(tm => tm.teamId);
+
+        // Then find dataset either owned by user or belonging to user's team
+        const dataset = await require('./dataset.model').findOne({
+            _id: id,
+            $or: [
+                { ownerId: userId },  // User is owner
+                { teamId: { $in: teamIds } }  // Or belongs to user's team
+            ]
+        });
 
         if (!dataset) {
             logger.warn(`User ${userId} attempted to access schema for inaccessible dataset ID: ${id}`);
@@ -144,7 +172,7 @@ const getSchema = async (req, res, next) => {
     }
 };
 
-// Update dataset information (context + column descriptions)
+// Update dataset information - also needs the same access pattern
 const updateDataset = async (req, res, next) => {
     const { id } = req.params;
     const userId = req.user._id;
@@ -156,7 +184,21 @@ const updateDataset = async (req, res, next) => {
     }
 
     try {
-        const dataset = await require('./dataset.model').findOne({ _id: id, ownerId: userId });
+        // Find dataset with team access consideration
+        const TeamMember = require('../teams/team-member.model');
+
+        // First, get all teams the user is a member of
+        const teamMemberships = await TeamMember.find({ userId }).select('teamId').lean();
+        const teamIds = teamMemberships.map(tm => tm.teamId);
+
+        // Then find dataset either owned by user or belonging to user's team
+        const dataset = await require('./dataset.model').findOne({
+            _id: id,
+            $or: [
+                { ownerId: userId },  // User is owner
+                { teamId: { $in: teamIds } }  // Or belongs to user's team
+            ]
+        });
 
         if (!dataset) {
             logger.warn(`User ${userId} attempted to update inaccessible dataset ID: ${id}`);
@@ -217,6 +259,81 @@ const deleteDataset = async (req, res, next) => {
     }
 };
 
+// New proxy upload function
+const proxyUpload = async (req, res, next) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                status: 'error',
+                message: 'No file provided'
+            });
+        }
+
+        const userId = req.user._id;
+        const { teamId } = req.body;
+        const file = req.file;
+
+        // Generate unique filename
+        const { v4: uuidv4 } = require('uuid');
+        const uniqueFilename = `${uuidv4()}-${file.originalname}`;
+        const gcsPath = `${userId}/${uniqueFilename}`;
+
+        // Get bucket
+        const { getBucket } = require('../../shared/external_apis/gcs.client');
+        const bucket = getBucket();
+
+        // Create file in GCS
+        const blob = bucket.file(gcsPath);
+        const blobStream = blob.createWriteStream({
+            resumable: false,
+            contentType: file.mimetype
+        });
+
+        // Set up error handler
+        blobStream.on('error', (error) => {
+            logger.error(`Error uploading to GCS: ${error}`);
+            return res.status(500).json({
+                status: 'error',
+                message: 'Error uploading file to storage'
+            });
+        });
+
+        // Set up completion handler
+        blobStream.on('finish', async () => {
+            try {
+                // Create dataset metadata
+                const datasetData = {
+                    name: file.originalname,
+                    gcsPath,
+                    originalFilename: file.originalname,
+                    fileSizeBytes: file.size,
+                    teamId: teamId || null
+                };
+
+                const newDataset = await datasetService.createDatasetMetadata(userId, datasetData);
+
+                return res.status(201).json({
+                    status: 'success',
+                    data: newDataset
+                });
+            } catch (err) {
+                logger.error(`Error creating dataset metadata: ${err}`);
+                return res.status(500).json({
+                    status: 'error',
+                    message: err.message || 'Error creating dataset metadata'
+                });
+            }
+        });
+
+        // Upload file buffer to GCS
+        blobStream.end(req.file.buffer);
+
+    } catch (error) {
+        logger.error(`Error in proxy upload: ${error}`);
+        next(error);
+    }
+};
+
 // Export the controller functions
 module.exports = {
     getUploadUrl,
@@ -227,4 +344,5 @@ module.exports = {
     getSchema,      // Get dataset schema information
     updateDataset,  // Update dataset context and column descriptions
     deleteDataset,  // Delete dataset and its GCS file
+    proxyUpload     // New proxy upload function
 };
