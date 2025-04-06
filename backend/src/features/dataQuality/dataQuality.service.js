@@ -978,18 +978,38 @@ Your response must be valid JSON. The report should be clear, actionable, and ac
   try {
     // Call Claude API with the synthesis prompt
     const response = await anthropic.messages.create({
-      model: "claude-3-sonnet-20240229",
-      max_tokens: 4000,
+      model: "claude-3-7-sonnet-20250219",
+      max_tokens: 8000,
       temperature: 0.2,
-      system: "You are an expert data scientist specialized in creating data quality audit reports. You synthesize technical findings into clear, actionable reports for business users. Always respond with a valid, well-structured JSON object containing all requested sections.",
+      system: "You are an expert data scientist specialized in creating data quality audit reports. You synthesize technical findings into clear, actionable reports for business users. Always respond with a valid, well-structured JSON object containing all requested sections. CRITICAL: Your response MUST be ONLY the raw JSON object itself, starting strictly with '{' and ending with '}'. Do NOT include ```json, ```, or any other text, explanations, or markdown formatting outside the JSON structure.",
       messages: [{ role: "user", content: promptText }]
     });
 
     // Parse the JSON response
     const responseText = response.content[0].text;
+
+    // Add logging for the raw AI response
+    logger.debug(`--- RAW AI SYNTHESIS RESPONSE ---`);
+    logger.debug(responseText); // Log the full raw response
+    logger.debug(`--- END RAW AI SYNTHESIS RESPONSE ---`);
+
+    let jsonString = responseText.trim(); // Start with the raw, trimmed response
+
+    // Look for markdown code fences and extract JSON if present
+    const jsonRegex = /```(?:json)?\s*([\s\S]*?)\s*```/; // Regex to find ```json ... ``` or ``` ... ```
+    const match = jsonString.match(jsonRegex);
+
+    if (match && match[1]) {
+      logger.debug("Extracted JSON content from Markdown code fence before parsing.");
+      jsonString = match[1].trim(); // Use the extracted JSON content
+    } else {
+      logger.debug("No Markdown code fence detected, attempting to parse raw response.");
+      // Proceed to parse jsonString as is.
+    }
+
     try {
       // Try to parse the JSON response
-      const jsonResponse = JSON.parse(responseText);
+      const jsonResponse = JSON.parse(jsonString);
 
       // Add timestamp and source to metadata
       if (!jsonResponse.metadata) {
