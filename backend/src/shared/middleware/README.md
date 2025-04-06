@@ -2,25 +2,49 @@
 
 ## Shared: Middleware
 
-This directory contains reusable Express middleware functions.
+This directory contains reusable Express middleware functions applied globally or to specific routes/features to handle common cross-cutting concerns like authentication, authorization, error handling, and request validation.
 
 ### Files
 
 *   **`auth.middleware.js`**:
-    *   Defines the `protect` middleware function.
-    *   Verifies the Firebase ID token from the `Authorization` header using the Firebase Admin SDK.
-    *   Fetches the corresponding MongoDB user document.
-    *   Attaches the user document (as a plain object) to `req.user`.
-    *   Handles token validation errors (401 Unauthorized).
+    *   Exports `protect`.
+    *   **Purpose:** Verifies user authentication based on a Firebase ID token provided in the `Authorization: Bearer <token>` header.
+    *   **Functionality:**
+        *   Uses `firebase-admin` (via `shared/external_apis/firebase.client.js`) to verify the token.
+        *   Fetches the corresponding `User` document from the database using the `firebaseUid` from the decoded token.
+        *   Attaches the full Mongoose `User` document (as a plain object using `.toObject()`) to `req.user`.
+        *   Handles missing tokens, invalid/expired tokens (returning 401 with specific messages/codes), and cases where the user isn't found in the DB.
+
 *   **`error.handler.js`**:
-    *   Defines a global Express error handling middleware.
-    *   Logs errors and sends a standardized JSON error response. Must be the last middleware added.
-*   **`subscription.guard.js`**: (New in Phase 2)
-    *   Defines the `requireActiveSubscription` middleware.
-    *   **Assumes `protect` middleware has already run** and `req.user` is available.
-    *   Checks `req.user.subscriptionInfo.status` and `trialEndsAt` to determine if the user has active access rights.
-    *   Calls `next()` if access is permitted.
-    *   Returns a `403 Forbidden` response with a specific `code` ('SUBSCRIPTION_INACTIVE', 'TRIAL_EXPIRED') if access is denied due to subscription status.
+    *   Exports `errorHandler`.
+    *   **Purpose:** Global error handling middleware. **Must be the last middleware added** in `app.js`.
+    *   **Functionality:**
+        *   Catches errors passed via `next(error)`.
+        *   Logs the full error using the shared logger.
+        *   Sends a standardized JSON error response: `{ status: 'error', message: string, stack?: string }`.
+        *   Sets appropriate HTTP status code (defaults to 500 if not already set).
+        *   Includes the error stack trace only in the `development` environment.
+
+*   **`subscription.guard.js`**:
+    *   Exports `requireActiveSubscription`.
+    *   **Purpose:** Enforces subscription-based access control for specific features/endpoints. **Requires `protect` middleware to have run previously.**
+    *   **Functionality:**
+        *   Checks the `subscriptionInfo` on the `req.user` object (attached by `protect`).
+        *   Uses the `user.hasActiveSubscription()` helper method (defined in `user.model.js`) or falls back to checking status (`active` or `trialing`).
+        *   Specifically checks for trial expiry (`trialEndsAt`) if status is `trialing`.
+        *   Calls `next()` if the subscription is considered active.
+        *   Returns a `403 Forbidden` response with a specific `code` (`SUBSCRIPTION_INACTIVE` or `TRIAL_EXPIRED`) if access is denied.
+
+*   **`cloudTask.middleware.js`**:
+    *   Exports `validateCloudTaskToken`.
+    *   **Purpose:** Authenticates requests coming from Google Cloud Tasks to internal worker endpoints (like the data quality audit worker).
+    *   **Functionality:**
+        *   Expects an OIDC token in the `Authorization: Bearer <token>` header (sent automatically by Cloud Tasks when configured with OIDC).
+        *   Uses `google-auth-library` to verify the token's signature and claims.
+        *   Validates the token's `audience` claim against the expected worker endpoint URL (from `shared/config`).
+        *   Validates the token's `email` claim against the expected Cloud Tasks service account email (from `shared/config` or default).
+        *   Attaches the verified token payload to `req.cloudTaskPayload` for potential downstream use.
+        *   Returns `401 Unauthorized` or `403 Forbidden` if validation fails.
 
 ### Future Files
 
@@ -29,19 +53,23 @@ This directory contains reusable Express middleware functions.
 
 ### Usage
 
-Middleware functions are applied globally in `app.js` or selectively on specific routes/routers.
+Middleware functions are typically applied in `app.js` (for global middleware like `errorHandler`) or within specific feature route files (`*.routes.js`) using `router.use()` for router-level middleware or directly on individual routes.
 
 ```javascript
-// Example usage in app.js (Error Handler)
-const errorHandler = require('./shared/middleware/error.handler');
-// ...
-app.use(errorHandler);
+// Example: Global error handler in app.js
+const errorHandler = require('./shared/middleware/error.handler.js');
+// ... (other app setup)
+app.use(errorHandler); // Must be last
 
-// Example usage in a feature route file (Protecting all routes in a feature)
-const { protect } = require('../shared/middleware/auth.middleware');
+// Example: Protecting all routes in teams.routes.js
+const { protect } = require('../../shared/middleware/auth.middleware');
 router.use(protect);
 
-// Example usage in a specific feature route (Subscription Guard)
-const { requireActiveSubscription } = require('../shared/middleware/subscription.guard.js');
-// Assuming 'protect' already ran on the router or earlier
-router.post('/create-report', requireActiveSubscription, reportController.create);
+// Example: Route requiring subscription in prompts.routes.js
+const { requireActiveSubscription } = require('../../shared/middleware/subscription.guard.js');
+// Assumes 'protect' already ran via router.use(protect)
+router.post('/', requireActiveSubscription, promptController.generateAndExecuteReport);
+
+// Example: Protecting internal worker route in dataQuality.routes.js
+const { validateCloudTaskToken } = require('../../shared/middleware/cloudTask.middleware.js');
+internalRouter.post('/internal/quality-audit-worker', validateCloudTaskToken, dataQualityController.handleWorkerRequest);

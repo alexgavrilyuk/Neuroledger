@@ -3,36 +3,37 @@
 
 ## Shared: Theme
 
-This directory manages application theming (e.g., light/dark mode) and related configuration.
+This directory manages application theming (light/dark mode) configuration and the UI component for switching themes.
 
 ### Files
 
 *   **`themes.js`**:
-    *   Defines JavaScript objects (`lightTheme`, `darkTheme`) containing theme properties. These mainly store descriptive names or potentially Tailwind class names for reference, but the primary theme colors are now defined directly in `tailwind.config.js`.
-*   **`ThemeProvider.jsx`**:
-    *   The React Context provider component (`ThemeContext.Provider`).
-    *   Manages the current theme state (`themeName`).
-    *   Reads/writes the theme preference to `localStorage`.
-    *   Applies the appropriate class (`light` or `dark`) to the root `<html>` element to enable Tailwind's `darkMode: 'class'` strategy.
+    *   Defines simple JavaScript objects (`lightTheme`, `darkTheme`) containing descriptive theme properties (like `name: 'light'`).
+    *   **Note:** These JS objects are *not* the primary source of theme styling. The actual colors and styles are defined using Tailwind CSS utility classes and configured in `tailwind.config.js`.
 *   **`ThemeSwitcher.jsx`**:
-    *   A UI component (button using Heroicons) allowing the user to toggle between light and dark themes.
-    *   Uses the `useTheme` hook.
+    *   A UI button component that allows the user to toggle between light and dark themes.
+    *   Uses the `useTheme` hook to get the current `themeName` and the `toggleTheme` function.
+    *   Displays appropriate icons (`SunIcon`/`MoonIcon`) with transition animations based on the current theme.
 
-### Related Files
+### Related Files & Concepts
 
+*   **`frontend/src/shared/contexts/ThemeContext.jsx`**:
+    *   Defines the `ThemeContext` and the `ThemeProvider` component.
+    *   `ThemeProvider` manages the current theme state (`themeName`).
+    *   It reads/writes the theme preference to `localStorage` (`neuroledger-theme`).
+    *   **Crucially, it applies the appropriate class (`light` or `dark`) to the root `<html>` element**, enabling Tailwind's `darkMode: 'class'` strategy.
+*   **`frontend/src/shared/hooks/useTheme.js`**: The hook used by components (like `ThemeSwitcher`) to access the theme context (`themeName`, `toggleTheme`, etc.).
 *   **`frontend/tailwind.config.js`**:
-    *   Must have `darkMode: 'class'` enabled.
-    *   **Crucially defines the color palette** (using Tailwind's default `blue` and `gray` families or custom definitions) under `theme.extend.colors` if customized.
-    *   **Sets the default font family** ('Inter') under `theme.extend.fontFamily`.
-*   **`frontend/index.html`**: Includes the link to import the 'Inter' font family from Google Fonts.
-*   **`frontend/src/index.css`**: Sets base text colors and font-smoothing.
-*   **`frontend/src/shared/contexts/ThemeContext.jsx`**: Defines the actual Context object used by the provider.
-*   **`frontend/src/shared/hooks/useTheme.js`**: Hook to consume the ThemeContext.
+    *   Must have `darkMode: 'class'` enabled in its configuration.
+    *   **Defines the actual color palette** used by Tailwind utility classes for both light and dark modes (e.g., `colors.gray`, `colors.blue`).
+    *   Defines the default font family (`fontFamily.sans`).
+*   **`frontend/index.html`**: Should include the necessary `<link>` tag(s) to import web fonts (e.g., 'Inter' from Google Fonts).
+*   **`frontend/src/index.css`**: May define base text colors, background colors, and font smoothing for the `body`.
 
 ### Usage
 
-1.  Ensure the 'Inter' font is linked in `index.html`.
-2.  Configure fonts and colors in `tailwind.config.js`.
-3.  Wrap the application in `ThemeProvider` in `App.jsx`.
-4.  Use Tailwind's utility classes (e.g., `bg-white dark:bg-gray-800`, `text-gray-900 dark:text-white`, `font-sans`) in components for styling. The `dark:` variants will work automatically based on the class applied by `ThemeProvider`.
-5.  Place the `ThemeSwitcher` component somewhere accessible (e.g., in `AppLayout` or `CenteredLayout`).
+1.  Ensure fonts are linked in `index.html` and configured in `tailwind.config.js`.
+2.  Define colors for light/dark mode in `tailwind.config.js` and ensure `darkMode: 'class'` is set.
+3.  Wrap the application root (e.g., in `App.jsx`) with the `ThemeProvider` from `shared/contexts/ThemeContext.jsx`.
+4.  Use Tailwind's utility classes (e.g., `bg-white dark:bg-gray-800`, `text-gray-900 dark:text-white`) throughout components. The `dark:` variants will apply automatically based on the class set on the `<html>` tag by the `ThemeProvider`.
+5.  Place the `ThemeSwitcher` component in a suitable location (e.g., in the header within `AppLayout`).

@@ -10,36 +10,43 @@ This directory contains foundational, reusable, and themeable UI building blocks
 *   **Presentational:** Focused on look and feel, minimal internal state.
 *   **Reusable:** Designed for use across different features.
 *   **Themeable:** Styles adapt to light/dark mode using Tailwind's `dark:` variants and the configured color palette.
-*   **Composable:** Can be combined to build more complex UI.
+*   **Composable:** Can be combined to build more complex UI (e.g., `Card` sub-components, `Modal` sub-components).
 *   **Accessible:** Includes appropriate ARIA attributes and focus management where applicable.
 
 ### Dependencies
 
 *   `@heroicons/react` (for optional icons in Button, Input, etc.)
 *   `@tailwindcss/forms` (plugin used for base input styling, configured in `tailwind.config.js`)
+*   `react` (`forwardRef`, `createPortal`)
 
 ### Files
 
 *   **`Button.jsx`**: Renders a styled button.
     *   **Props:** `children`, `onClick`, `type`, `variant` ('primary', 'secondary', 'danger', 'ghost'), `size` ('sm', 'md', 'lg'), `disabled`, `isLoading`, `className`, `leftIcon`, `rightIcon` (Heroicon components).
-    *   Styling: Uses refined padding, `rounded-md`, supports icons, clear hover/focus states using the primary color, and consistent variants based on the shared UI style guide.
-*   **`Card.jsx`**: Renders a container with background, shadow/border, and rounded corners. Includes optional `Card.Header`, `Card.Body`, `Card.Footer` sub-components.
-    *   **Props:** `children`, `className`, `padding` ('default', 'compact', 'none' for Card.Body).
-    *   Styling: Uses `rounded-lg`, soft shadows (light mode) or subtle borders (dark mode), configured background colors. Sub-components provide structure and standard padding/borders.
-*   **`Input.jsx`**: Renders a styled input field with optional label, error message, and icons.
+    *   Styling: Uses refined padding, `rounded-md`, supports icons, clear hover/focus states, loading indicator, and consistent variants.
+*   **`Card.jsx`**: Renders a container with background, shadow/border, and rounded corners. Includes optional `Card.Header`, `Card.Body`, `Card.Footer` sub-components for structure.
+    *   **Props:** `children`, `className`, `elevation` ('default', 'low'), `padding` ('default', 'compact', 'none' for Card.Body).
+    *   Styling: Uses `rounded-lg`, soft shadows/borders, configured background colors. Sub-components provide structure and standard padding/borders.
+*   **`Checkbox.jsx`**: Renders a styled checkbox with support for label, hint, error, and indeterminate states. Includes `CheckboxGroup` wrapper.
+    *   **Props (Checkbox):** `id`, `name`, `value`, `label`, `checked`, `onChange`, `disabled`, `indeterminate`, `required`, `error`, `hint`, `className`, `labelClassName`, `size` ('sm', 'md', 'lg').
+    *   **Props (CheckboxGroup):** `children`, `label`, `hint`, `error`, `className`, `orientation` ('vertical', 'horizontal').
+    *   Styling: Custom appearance replacing default checkbox, handles different states (checked, indeterminate, disabled, error) and sizes.
+*   **`Input.jsx`**: Renders a styled text input field with optional label, error message, and icons.
     *   **Props:** `id`, `name`, `type`, `value`, `onChange`, `placeholder`, `disabled`, `required`, `className`, `label`, `error`, `leadingIcon`, `trailingIcon` (Heroicon components).
-    *   Styling: Uses base styles from `@tailwindcss/forms`, `rounded-md`, appropriate padding (adjusting for icons), clear focus ring using the primary color, standard border/background colors.
-*   **`Spinner.jsx`**: Renders an SVG loading spinner.
-    *   **Props:** `size`, `color`, `className`.
+    *   Styling: Uses base styles from `@tailwindcss/forms`, `rounded-md`, padding adjustment for icons, clear focus ring, standard border/background colors.
+*   **`Modal.jsx`**: Renders a modal dialog using `createPortal`. Includes `Modal.Header`, `Modal.Body`, `Modal.Footer` sub-components.
+    *   **Props:** `isOpen`, `onClose`, `title`, `children`, `size` ('xs'...'2xl', 'full'), `hideCloseButton`, `closeOnOverlayClick`, `trapFocus`, `closeOnEscape`, `slideFrom` ('bottom', 'top', 'left', 'right', 'none').
+    *   Features: Focus trapping, Escape key closing, overlay click closing, entry animations.
+*   **`Spinner.jsx`**: Renders an SVG/CSS loading indicator.
+    *   **Props:** `size` ('xs'...'xl'), `color` (Tailwind class), `secondaryColor` (Tailwind class), `variant` ('circle', 'dots', 'bars', 'pulse'), `className`, `label`, `showLabel`.
+    *   Supports different visual styles and sizes.
 
 ### Future Components
 
-*   `Modal.jsx`
 *   `Table.jsx`
 *   `Select.jsx`
 *   `TextArea.jsx`
 *   `Tooltip.jsx`
-*   `Checkbox.jsx`
 *   `ChartWrapper.jsx`
 *   `Icon.jsx` (if more generic icon handling is needed)
 *   `Avatar.jsx`
@@ -65,3 +72,4 @@ function MyFormComponent() {
     </Card>
   );
 }
+```
