@@ -1,8 +1,7 @@
 // backend/src/features/datasets/dataset.model.js
-// ** UPDATED FILE - Added teamId field for team datasets **
+// ** UPDATED FILE - Added quality audit fields **
 const mongoose = require('mongoose');
 
-// Basic representation of schema info derived from headers
 const ColumnSchema = new mongoose.Schema({
     name: { type: String, required: true }, // Original header name
     type: { type: String, default: 'string' }, // Inferred type (keep simple for now)
@@ -59,9 +58,28 @@ const DatasetSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
-   lastUpdatedAt: {
-      type: Date,
-      default: Date.now,
+  lastUpdatedAt: {
+    type: Date,
+    default: Date.now,
+  },
+  // NEW: Quality audit related fields
+  qualityStatus: {
+    type: String,
+    enum: ['not_run', 'processing', 'ok', 'warning', 'error'],
+    default: 'not_run',
+    index: true,
+  },
+  qualityAuditRequestedAt: {
+    type: Date,
+    default: null,
+  },
+  qualityAuditCompletedAt: {
+    type: Date,
+    default: null,
+  },
+  qualityReport: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
   }
 });
 

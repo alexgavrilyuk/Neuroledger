@@ -1,13 +1,14 @@
 // backend/src/routes.js
-// ** UPDATED FILE - Added team and notification routes **
+// ** UPDATED FILE - Added dataQuality routes **
 const express = require('express');
 const authRoutes = require('./features/auth/auth.routes');
 const subscriptionRoutes = require('./features/subscriptions/subscription.routes');
 const datasetRoutes = require('./features/datasets/dataset.routes');
 const promptRoutes = require('./features/prompts/prompt.routes');
 const userRoutes = require('./features/users/user.routes');
-const teamRoutes = require('./features/teams/team.routes'); // NEW: Added team routes
-const notificationRoutes = require('./features/notifications/notification.routes'); // NEW: Added notification routes
+const teamRoutes = require('./features/teams/team.routes');
+const notificationRoutes = require('./features/notifications/notification.routes');
+const { router: dataQualityRoutes, internalRouter: dataQualityInternalRoutes } = require('./features/dataQuality/dataQuality.routes');
 
 const router = express.Router();
 
@@ -22,7 +23,9 @@ router.use('/subscriptions', subscriptionRoutes);
 router.use('/datasets', datasetRoutes);
 router.use('/prompts', promptRoutes);
 router.use('/users', userRoutes);
-router.use('/teams', teamRoutes); // NEW: Mount team routes at /api/v1/teams
-router.use('/notifications', notificationRoutes); // NEW: Mount notification routes at /api/v1/notifications
+router.use('/teams', teamRoutes);
+router.use('/notifications', notificationRoutes);
+router.use('/', dataQualityRoutes); // Mount data quality routes (they include /datasets/...)
+router.use('/', dataQualityInternalRoutes); // Mount internal worker routes
 
 module.exports = router;
