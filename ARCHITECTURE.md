@@ -325,35 +325,35 @@ sequenceDiagram
     FE_UI->>BE_API: GET /chats/:sessionId/messages
     BE_API-->>FE_UI: 200 { data: [Messages] }
     
-    FE_UI->>BE_API: POST /chats/:sessionId/messages (Send message)
-    Note over BE_API: Creates user message + AI placeholder
+    FE_UI->>BE_API: POST /chats/:sessionId/messages (Send message: promptText, selectedDatasetIds)
+    Note over BE_API: Creates user message + AI placeholder (PromptHistory)
     Note over BE_API: Creates Cloud Task for AI processing
-    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage } }
+    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage, updatedSession } }
     
-    CloudTask->>BE_Worker: POST /internal/chat-ai-worker (with OIDC Token)
+    CloudTask->>BE_Worker: POST /internal/chat-ai-worker (with OIDC Token & payload)
     Note over BE_Worker: Validates token
     BE_Worker-->>CloudTask: 200 OK (Acknowledge receipt)
     
-    Note over BE_Worker: Builds context with chat history
+    Note over BE_Worker: Builds context with chat history (using PromptHistory model)
     BE_Worker->>BE_Socket: Emit 'chat:message:processing' event
     BE_Socket->>FE_Socket: WebSocket event
-    FE_Socket->>FE_UI: Update UI (show loading)
+    FE_Socket->>FE_UI: Update UI (show loading for specific aiMessageId)
     
     BE_Worker->>Claude: Create Message (With Chat History)
     Claude-->>BE_Worker: Code Response
     
-    Note over BE_Worker: Updates AI message in DB
-    BE_Worker->>BE_Socket: Emit 'chat:message:completed' event
+    Note over BE_Worker: Updates AI message (PromptHistory) in DB with code, status, etc.
+    BE_Worker->>BE_Socket: Emit 'chat:message:completed' event (with updated aiMessage)
     BE_Socket->>FE_Socket: WebSocket event
     FE_Socket->>FE_UI: Update UI (show completed message)
     
     Note over FE_UI: User now sends a follow-up message
     FE_UI->>BE_API: POST /chats/:sessionId/messages (Follow-up)
     Note over BE_API: Creates new user+AI messages
-    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage } }
+    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage, updatedSession } }
     
     CloudTask->>BE_Worker: POST /internal/chat-ai-worker
-    Note over BE_Worker: Builds context WITH PREVIOUS MESSAGES
+    Note over BE_Worker: Builds context WITH PREVIOUS MESSAGES from PromptHistory
     Note over Claude: AI response considers previous context
 ```
 

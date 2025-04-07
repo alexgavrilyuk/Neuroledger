@@ -316,6 +316,76 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ---
 
+### Feature: Chat
+
+*   **`POST /api/v1/chats`**
+    *   **Description:** Creates a new chat session for the authenticated user.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Body:** `{ "teamId"?: string, "title"?: string }` (Both optional).
+    *   **Success (201 Created):** `{ status: 'success', data: ChatSession }`
+    *   **Errors:** `400` (Validation errors), `401`, `403`, `500`.
+
+*   **`GET /api/v1/chats`**
+    *   **Description:** Lists chat sessions accessible to the user (personal + teams user is member of), sorted by last activity descending.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Query Params:** `limit` (number, default 10), `skip` (number, default 0).
+    *   **Success (200 OK):** `{ status: 'success', data: [ChatSession] }`
+    *   **Errors:** `401`, `403`, `500`.
+
+*   **`GET /api/v1/chats/{sessionId}`**
+    *   **Description:** Gets details for a single chat session. Accessible if user is owner or member of the team the session belongs to.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId).
+    *   **Success (200 OK):** `{ status: 'success', data: ChatSession }`
+    *   **Errors:** `400` (Invalid ID), `401`, `403`, `404` (Not found or inaccessible), `500`.
+
+*   **`PATCH /api/v1/chats/{sessionId}`**
+    *   **Description:** Updates the title of a chat session. Accessible if user is owner or member of the team the session belongs to.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId).
+    *   **Request Body:** `{ "title": string }` (Required).
+    *   **Success (200 OK):** `{ status: 'success', data: ChatSession }` (Updated session)
+    *   **Errors:** `400` (Invalid ID, Missing title), `401`, `403`, `404` (Not found or inaccessible), `500`.
+
+*   **`DELETE /api/v1/chats/{sessionId}`**
+    *   **Description:** Deletes a chat session. Accessible if user is owner or member of the team the session belongs to.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId).
+    *   **Success (200 OK):** `{ status: 'success', message: 'Chat session deleted successfully' }`
+    *   **Errors:** `400` (Invalid ID), `401`, `403`, `404` (Not found or inaccessible), `500`.
+
+*   **`POST /api/v1/chats/{sessionId}/messages`**
+    *   **Description:** Sends a user message, creates an AI message placeholder, and queues a background task (Cloud Task) for generating the AI response. Returns immediately.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId).
+    *   **Request Body:** `{ "promptText": string, "selectedDatasetIds": string[] }` (`promptText` required).
+    *   **Success (202 Accepted):** `{ status: 'success', data: { userMessage: PromptHistory, aiMessage: PromptHistory, updatedSession: ChatSession } }` (Returns the created user message, the placeholder AI message, and the updated session).
+    *   **Errors:** `400` (Invalid ID, Missing promptText), `401`, `403`, `404` (Session not found or inaccessible), `500`.
+
+*   **`GET /api/v1/chats/{sessionId}/messages`**
+    *   **Description:** Gets messages (both user and AI) for a specific chat session, sorted by creation date ascending.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId).
+    *   **Query Params:** `limit` (number, default 50), `skip` (number, default 0).
+    *   **Success (200 OK):** `{ status: 'success', data: [PromptHistory] }`
+    *   **Errors:** `400` (Invalid ID), `401`, `403`, `404` (Session not found or inaccessible), `500`.
+
+*   **`GET /api/v1/chats/{sessionId}/messages/{messageId}`**
+    *   **Description:** Gets a single message by its ID within a specific chat session.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId), `messageId` (MongoDB ObjectId).
+    *   **Success (200 OK):** `{ status: 'success', data: PromptHistory }`
+    *   **Errors:** `400` (Invalid IDs), `401`, `403`, `404` (Message/Session not found or inaccessible), `500`.
+
+*   **`POST /api/v1/internal/chat-ai-worker`**
+    *   **Description:** Internal worker endpoint invoked by Cloud Tasks to process AI message generation asynchronously. **Not for direct frontend use.**
+    *   **Auth:** Internal - Validated via Cloud Tasks OIDC Token (`validateCloudTaskToken` middleware).
+    *   **Request Body:** `{ "sessionId": string, "userId": string, "userMessageId": string, "aiMessageId": string }` (Payload from the task queue).
+    *   **Success (200 OK):** `{ status: 'success', message: 'Task received' }` (Returned immediately, actual processing happens in background).
+    *   **Errors:** `400` (Invalid payload), `401`/`403` (Invalid/Missing OIDC token).
+
+---
+
 ### Feature: Notifications
 
 *   **`GET /api/v1/notifications`**
@@ -506,6 +576,44 @@ interface SchemaResponseData {
 interface PromptGenResponseData {
   aiGeneratedCode: string | null; // Null if generation failed
   promptId: string; // ObjectId of PromptHistory record
+}
+```
+
+### ChatSession
+```typescript
+interface ChatSession {
+  _id: string;
+  userId: string; // User ObjectId
+  teamId?: string | null; // Team ObjectId or null
+  title: string; // User-defined or default title
+  createdAt: string; // ISO Date string
+  lastActivityAt: string; // ISO Date string (updated on new message)
+  messageIds: string[]; // Array of PromptHistory ObjectIds
+}
+```
+
+### PromptHistory (Used for Chat Messages & Standalone Prompts)
+```typescript
+interface PromptHistory {
+  _id: string;
+  userId: string; // User ObjectId
+  teamId?: string | null; // Team ObjectId or null
+  chatSessionId?: string | null; // ChatSession ObjectId (null for standalone prompts)
+  promptText?: string; // User's input (null for AI response placeholder)
+  role: 'user' | 'assistant'; // Role of the message sender
+  selectedDatasetIds?: string[]; // Datasets used as context
+  contextSummary?: string; // Description of context used
+  systemPrompt?: string; // The prompt sent to the AI
+  aiGeneratedCode?: string; // The raw code/text response from AI
+  status: 'pending' | 'processing' | 'completed' | 'error'; // Status of AI generation
+  errorMessage?: string; // Error message if status is 'error'
+  tokenUsage?: { // Claude API token usage
+    inputTokens: number;
+    outputTokens: number;
+  };
+  modelUsed?: string; // e.g., 'claude-3-haiku-20240307'
+  stopReason?: string; // e.g., 'end_turn'
+  createdAt: string; // ISO Date string
 }
 ```
 
