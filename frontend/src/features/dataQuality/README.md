@@ -25,10 +25,110 @@ Unlike other feature slices, this one primarily contains UI components intended 
         *   Displays report metadata (generation time, score explanation).
     *   **Dependencies:** `shared/ui/Card`, `shared/ui/Button`, `@heroicons/react`.
 
+### Report Structure
+
+The `qualityReport` structure returned by the backend API has the following format:
+
+```typescript
+interface QualityReport {
+  // Core report sections
+  executiveSummary: string;
+  qualityScore: number; // 0-100 scale
+  overallStatus: 'ok' | 'warning' | 'error';
+  keyFindings: Array<{
+    category: string; // e.g., "Completeness", "Accuracy", "Consistency" 
+    description: string;
+    severity: 'low' | 'medium' | 'high';
+  }>;
+  
+  // Detailed analysis (grouped by category)
+  detailedAnalysis: {
+    [category: string]: Array<{
+      description: string;
+      details?: string;
+      affectedColumns?: string[];
+      severity: 'low' | 'medium' | 'high';
+    }>
+  };
+  
+  // Prioritized recommendations
+  recommendations: Array<{
+    priority: number; // 1 (highest) to N
+    description: string;
+    rationale?: string;
+    benefit?: string;
+  }>;
+  
+  // Metadata
+  generatedAt: string; // ISO date string
+  processingTimeSeconds: number;
+  metadata?: {
+    columnStatistics?: object;
+    [key: string]: any;
+  };
+}
+```
+
+The `DataQualityReportDisplay` component parses this structure to present an intuitive, organized view to the user. The component handles severity color-coding (red for high, yellow for medium, green for low/ok), and creates collapsible sections for the detailed analysis categories.
+
 ### Usage
 
 These components are designed to be integrated into pages where data quality information needs to be displayed, such as a dataset detail view. The parent component is responsible for:
 
 1.  Fetching the audit status (`GET /api/v1/datasets/{id}/quality-audit/status`) or the full report (`GET /api/v1/datasets/{id}/quality-audit`).
 2.  Calculating `elapsedTimeSeconds` if displaying the progress indicator.
-3.  Providing the `reportData`, `onResetAudit` callback (which should likely call `DELETE /api/v1/datasets/{id}/quality-audit` and handle state updates), and `isResetting` state to the `DataQualityReportDisplay`.
+3.  Providing the `reportData`, `onResetAudit` callback (which should call `DELETE /api/v1/datasets/{id}/quality-audit` and handle state updates), and `isResetting` state to the `DataQualityReportDisplay`.
+
+### Recommended Polling Strategy
+
+When a quality audit is in the `processing` state, implement the following polling strategy:
+
+```jsx
+// Inside your component that manages the audit state
+useEffect(() => {
+  let pollingInterval;
+  
+  if (qualityStatus === 'processing') {
+    // Start a timer to track elapsed time since processing began
+    const startTime = Date.now();
+    setElapsedTimeSeconds(0);
+    
+    // Update elapsed time every second for the progress indicator
+    const elapsedTimer = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+      setElapsedTimeSeconds(elapsedSec);
+    }, 1000);
+    
+    // Poll the status endpoint every 5 seconds
+    pollingInterval = setInterval(async () => {
+      try {
+        const response = await apiClient.get(`/datasets/${datasetId}/quality-audit/status`);
+        const newStatus = response.data.data.qualityStatus;
+        
+        // If status changed from processing, stop polling and fetch full report
+        if (newStatus !== 'processing') {
+          clearInterval(pollingInterval);
+          clearInterval(elapsedTimer);
+          fetchFullReport();
+        }
+        
+        // Add a timeout to prevent infinite polling (10 minutes)
+        if (Math.floor((Date.now() - startTime) / 1000) > 600) {
+          clearInterval(pollingInterval);
+          clearInterval(elapsedTimer);
+          setPollingError("Quality audit is taking longer than expected. Please check back later.");
+        }
+      } catch (error) {
+        console.error("Error polling audit status:", error);
+        clearInterval(pollingInterval);
+      }
+    }, 5000);
+  }
+  
+  return () => {
+    clearInterval(pollingInterval);
+  };
+}, [qualityStatus, datasetId]);
+```
+
+This approach provides a responsive user experience while avoiding unnecessary API calls.

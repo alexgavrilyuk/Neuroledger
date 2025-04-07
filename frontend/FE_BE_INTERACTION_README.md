@@ -159,44 +159,50 @@ This document defines the contract for communication between the NeuroLedger fro
 *   **`POST /api/v1/datasets/{datasetId}/quality-audit`**
     *   **Description:** Initiates an asynchronous quality audit for the specified dataset. Requires dataset description and column descriptions to be set. Fails if an audit is already running or completed.
     *   **Auth:** Required (Login + Active Subscription).
+    *   **Permission:** User must be dataset owner OR a team admin if it's a team dataset.
     *   **Request Params:** `datasetId` (MongoDB ObjectId).
     *   **Request Body:** None.
     *   **Success (202 Accepted):** `{ status: 'success', data: { status: 'processing' } }`
     *   **Errors:**
-        *   `400`: Invalid `datasetId`; Missing context (`code: 'MISSING_CONTEXT'` or `'MISSING_COLUMN_DESCRIPTIONS'`).
+        *   `400`: Invalid `datasetId`; Missing context (`code: 'MISSING_CONTEXT'`) or incomplete column descriptions (`code: 'MISSING_COLUMN_DESCRIPTIONS'`).
         *   `401`, `403` (Subscription inactive; Not owner/team admin).
         *   `404`: Dataset not found.
         *   `409 Conflict`: Audit already running (`code: 'AUDIT_IN_PROGRESS'`) or completed (`code: 'AUDIT_ALREADY_COMPLETE'`).
         *   `500`.
 
 *   **`GET /api/v1/datasets/{datasetId}/quality-audit/status`**
-    *   **Description:** Gets the current status (`not_run`, `processing`, `ok`, `warning`, `error`) and timestamps for a quality audit. Checks access (Owner or Team Member).
+    *   **Description:** Gets the current status (`not_run`, `processing`, `ok`, `warning`, `error`) and timestamps for a quality audit.
     *   **Auth:** Required (Login + Active Subscription).
+    *   **Permission:** User must be dataset owner OR any team member if it's a team dataset.
     *   **Request Params:** `datasetId` (MongoDB ObjectId).
     *   **Success (200 OK):** `{ status: 'success', data: { qualityStatus: string, requestedAt: Date|null, completedAt: Date|null } }`
     *   **Errors:** `400` (Invalid ID), `401`, `403` (Subscription inactive; Not owner/member), `404` (Not found or inaccessible), `500`.
+    *   **Frontend Usage:** This endpoint should be polled every 5 seconds during audit processing until status changes from `processing`. A timeout of 10 minutes is recommended.
 
 *   **`GET /api/v1/datasets/{datasetId}/quality-audit`**
-    *   **Description:** Gets the complete audit report if available. Checks access (Owner or Team Member).
+    *   **Description:** Gets the complete audit report if available.
     *   **Auth:** Required (Login + Active Subscription).
+    *   **Permission:** User must be dataset owner OR any team member if it's a team dataset.
     *   **Request Params:** `datasetId` (MongoDB ObjectId).
     *   **Success (200 OK - Completed):** `{ status: 'success', data: { qualityStatus: 'ok'|'warning'|'error', requestedAt: Date, completedAt: Date, report: Object } }`
     *   **Success (202 Accepted - Processing):** `{ status: 'success', data: { qualityStatus: 'processing', requestedAt: Date, message: 'Quality audit is still processing.' } }`
     *   **Errors:** `400` (Invalid ID), `401`, `403` (Subscription inactive; Not owner/member), `404` (Not found or inaccessible; No audit run yet - `code: 'NO_AUDIT'`), `500`.
 
 *   **`DELETE /api/v1/datasets/{datasetId}/quality-audit`**
-    *   **Description:** Resets a completed or failed audit on the dataset. Checks access (Owner or Team Member). Cannot reset while processing.
+    *   **Description:** Resets a completed or failed audit on the dataset. Cannot reset while processing.
     *   **Auth:** Required (Login + Active Subscription).
+    *   **Permission:** User must be dataset owner OR any team member if it's a team dataset.
     *   **Request Params:** `datasetId` (MongoDB ObjectId).
-    *   **Success (200 OK):** `{ status: 'success', data: { qualityStatus: 'not_run', message: 'Quality audit has been reset...' } }`
+    *   **Success (200 OK):** `{ status: 'success', data: { qualityStatus: 'not_run', message: 'Quality audit has been reset successfully' } }`
     *   **Errors:** `400` (Invalid ID), `401`, `403` (Subscription inactive; Not owner/member), `404` (Not found or inaccessible), `409 Conflict` (Audit in progress - `code: 'AUDIT_IN_PROGRESS'`), `500`.
 
 *   **`POST /api/v1/internal/quality-audit-worker`**
     *   **Description:** Internal worker endpoint invoked by Cloud Tasks to process quality audits asynchronously. **Not for direct frontend use.**
     *   **Auth:** Internal - Validated via Cloud Tasks OIDC Token (`validateCloudTaskToken` middleware).
     *   **Request Body:** `{ "datasetId": string, "userId": string }`
-    *   **Success (200 OK):** `{ status: 'success', message: 'Task received and processing started' }` (Returned immediately).
+    *   **Success (200 OK):** `{ status: 'success', message: 'Task received and processing started' }` (Returned immediately, actual processing happens in background).
     *   **Errors:** `400` (Invalid payload), `401`/`403` (Invalid/Missing OIDC token).
+    *   **Note:** The worker immediately returns 200 OK to Cloud Tasks and processes the audit asynchronously, updating the dataset status upon completion or failure.
 
 ---
 

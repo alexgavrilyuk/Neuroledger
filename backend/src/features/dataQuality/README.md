@@ -11,11 +11,12 @@ This feature slice provides functionality for running AI-enhanced data quality a
     *   **Controller (`initiateAudit`)**: Validates the `datasetId` format. Calls the service. Handles specific errors returned by the service (e.g., missing context, permissions, already running) with appropriate HTTP status codes (400, 403, 404, 409).
     *   **Service (`initiateQualityAudit`)**:
         *   Fetches the `Dataset` by ID.
-        *   Performs permission checks: User must be the dataset owner OR an admin of the team owning the dataset (requires `TeamMember` model).
-        *   Validates prerequisites: Checks if `dataset.description` and all `dataset.columnDescriptions` (based on `dataset.schemaInfo`) are present. Throws specific errors if missing.
-        *   Checks `dataset.qualityStatus`: Throws errors if status is `processing`, `ok`, `warning`, or `error` (preventing re-runs without reset).
-        *   Updates `Dataset`: Sets `qualityStatus` to `processing`, sets `qualityAuditRequestedAt`, clears previous report/timestamps. Saves the dataset.
-        *   Creates Cloud Task: Constructs a task payload (`{ datasetId, userId }`), configures an HTTP request targeting the internal worker endpoint (`/internal/quality-audit-worker`) with an OIDC token for authentication, and enqueues the task using the `@google-cloud/tasks` client.
+        *   **Permission Check**: User must be the dataset owner OR an admin of the team owning the dataset (requires `TeamMember` model with `role: 'admin'`).
+        *   **Context Validation**: Checks if `dataset.description` is present. If missing, throws error with specific message triggering `code: 'MISSING_CONTEXT'`.
+        *   **Column Descriptions Validation**: Checks that all `dataset.columnDescriptions` (based on `dataset.schemaInfo`) are present. If any are missing, throws error with specific message triggering `code: 'MISSING_COLUMN_DESCRIPTIONS'` and includes the names of missing columns.
+        *   **Status Check**: Checks `dataset.qualityStatus`. Throws specific errors if status is `processing` (`code: 'AUDIT_IN_PROGRESS'`), or one of `ok`, `warning`, `error` (`code: 'AUDIT_ALREADY_COMPLETE'`), preventing re-runs without reset.
+        *   **Updates Dataset**: Sets `qualityStatus` to `processing`, sets `qualityAuditRequestedAt`, clears previous report/timestamps. Saves the dataset.
+        *   **Creates Cloud Task**: Constructs a task payload (`{ datasetId, userId }`), configures an HTTP request targeting the internal worker endpoint (`/internal/quality-audit-worker`) with an OIDC token for authentication, and enqueues the task using the `@google-cloud/tasks` client.
     *   **Response (202 Accepted)**: Controller returns `{ status: 'success', data: { status: 'processing' } }` immediately to the user, indicating the task is queued.
 
 2.  **Worker Processing (`POST /internal/quality-audit-worker`)**:
@@ -37,18 +38,44 @@ This feature slice provides functionality for running AI-enhanced data quality a
 
 3.  **Status Checking (`GET /datasets/{id}/quality-audit/status`)**:
     *   User (via frontend) polls this endpoint.
-    *   **Controller (`getAuditStatus`)**: Validates ID, performs access check (owner or team member using `TeamMember`), fetches `Dataset`, and returns current `qualityStatus`, `requestedAt`, and `completedAt` fields.
+    *   **Controller (`getAuditStatus`)**:
+        *   Validates ID, performs access check (owner or team member using `TeamMember`).
+        *   **Permission Check**: User must be the dataset owner OR any member of the team owning the dataset (access is more permissive than initiation).
+        *   Fetches `Dataset`, and returns current `qualityStatus`, `requestedAt`, and `completedAt` fields.
 
 4.  **Report Access (`GET /datasets/{id}/quality-audit`)**:
     *   User (via frontend) requests the final report.
-    *   **Controller (`getAuditReport`)**: Validates ID, performs access check, fetches `Dataset`. Returns:
-        *   `404` if `qualityStatus` is `not_run`.
-        *   `202` with status `processing` if `qualityStatus` is `processing`.
-        *   `200` with the full `qualityReport` object (and status/timestamps) if `qualityStatus` is `ok`, `warning`, or `error`.
+    *   **Controller (`getAuditReport`)**:
+        *   Validates ID, performs access check.
+        *   **Permission Check**: User must be the dataset owner OR any member of the team owning the dataset (same as status check).
+        *   Returns:
+            *   `404` with `code: 'NO_AUDIT'` if `qualityStatus` is `not_run`.
+            *   `202` with status `processing` if `qualityStatus` is `processing`.
+            *   `200` with the full `qualityReport` object (and status/timestamps) if `qualityStatus` is `ok`, `warning`, or `error`.
 
 5.  **Reset (`DELETE /datasets/{id}/quality-audit`)**:
     *   User (via frontend) can reset a completed/failed audit to allow a new one.
-    *   **Controller (`resetAudit`)**: Validates ID, performs access check. Checks status is not `processing` (409 error if it is). Resets `qualityStatus` to `not_run` and clears `qualityReport` and timestamp fields on the `Dataset`. Saves the dataset. Returns 200 OK.
+    *   **Controller (`resetAudit`)**:
+        *   Validates ID, performs access check.
+        *   **Permission Check**: User must be the dataset owner OR any member of the team owning the dataset (same as status/report access).
+        *   Checks status is not `processing` (409 error with `code: 'AUDIT_IN_PROGRESS'` if it is).
+        *   Resets `qualityStatus` to `not_run` and clears `qualityReport` and timestamp fields on the `Dataset`. Saves the dataset.
+        *   Returns 200 OK with message confirming reset.
+
+### Permission Model Summary
+
+* **Initiating an audit (`POST`)**: Requires dataset owner OR team admin role
+* **Checking status (`GET status`)**: Requires dataset owner OR any team member
+* **Viewing report (`GET audit`)**: Requires dataset owner OR any team member
+* **Resetting audit (`DELETE`)**: Requires dataset owner OR any team member
+
+### Error Codes
+
+* **`MISSING_CONTEXT`**: Dataset description is missing or empty (400)
+* **`MISSING_COLUMN_DESCRIPTIONS`**: One or more column descriptions are missing or empty (400)
+* **`AUDIT_IN_PROGRESS`**: An audit is already running for this dataset (409)
+* **`AUDIT_ALREADY_COMPLETE`**: Dataset has already been audited, must reset first (409)
+* **`NO_AUDIT`**: No audit has been run for this dataset yet (404)
 
 ### File Responsibilities
 
@@ -131,21 +158,36 @@ This feature slice provides functionality for running AI-enhanced data quality a
     *   `roles/iam.serviceAccountTokenCreator` (needed for OIDC token generation)
     *   The invoking service account (used by Cloud Tasks to call your service) needs appropriate permissions if your endpoint requires authentication beyond the OIDC token itself (e.g., `roles/run.invoker` if deployed on Cloud Run). The `validateCloudTaskToken` middleware handles the OIDC validation.
 
+### Configuration Values
+
+The `cloudTaskHandler.js` uses the following configuration values with fallbacks:
+
+```javascript
+const project = config.projectId || process.env.GOOGLE_CLOUD_PROJECT;
+const location = config.cloudTasksLocation || 'us-central1';
+const queue = config.qualityAuditQueueName || 'neuroledger-quality-audit-queue';
+const serviceUrl = config.serviceUrl || `https://${process.env.GOOGLE_CLOUD_PROJECT}.appspot.com`;
+```
+
+If you're not running on Google App Engine, make sure to set these values explicitly in your config.
+
 ### API Endpoints
 
 *   **`POST /api/v1/datasets/{datasetId}/quality-audit`**
     *   **Auth**: Required (Login + Active Subscription)
+    *   **Permission**: User must be dataset owner OR team admin for team datasets
     *   **Description**: Initiates an asynchronous quality audit for the specified dataset. Requires dataset description and column descriptions to be set. Fails if an audit is already running or completed (use DELETE to reset).
     *   **Request Params**: `datasetId` (MongoDB ObjectId)
     *   **Success (202 Accepted)**: `{ status: 'success', data: { status: 'processing' } }`
     *   **Errors**:
-        *   `400 Bad Request`: Invalid `datasetId` format; Missing context (`dataset.description` or `dataset.columnDescriptions`), includes `code: 'MISSING_CONTEXT'` or `code: 'MISSING_COLUMN_DESCRIPTIONS'`. 
+        *   `400 Bad Request`: Invalid `datasetId` format; Missing dataset description (`code: 'MISSING_CONTEXT'`); Missing column descriptions (`code: 'MISSING_COLUMN_DESCRIPTIONS'`). 
         *   `403 Forbidden`: User does not have permission (not owner or team admin).
         *   `404 Not Found`: Dataset with the given ID not found.
         *   `409 Conflict`: Audit already in progress (`code: 'AUDIT_IN_PROGRESS'`) or completed (`code: 'AUDIT_ALREADY_COMPLETE'`).
 
 *   **`GET /api/v1/datasets/{datasetId}/quality-audit/status`**
     *   **Auth**: Required (Login + Active Subscription)
+    *   **Permission**: User must be dataset owner OR any team member for team datasets
     *   **Description**: Gets the current status (`not_run`, `processing`, `ok`, `warning`, `error`) and timestamps for a quality audit.
     *   **Request Params**: `datasetId` (MongoDB ObjectId)
     *   **Success (200 OK)**: `{ status: 'success', data: { qualityStatus: string, requestedAt: Date|null, completedAt: Date|null } }`
@@ -155,6 +197,7 @@ This feature slice provides functionality for running AI-enhanced data quality a
 
 *   **`GET /api/v1/datasets/{datasetId}/quality-audit`**
     *   **Auth**: Required (Login + Active Subscription)
+    *   **Permission**: User must be dataset owner OR any team member for team datasets
     *   **Description**: Gets the complete audit report if available.
     *   **Request Params**: `datasetId` (MongoDB ObjectId)
     *   **Success (200 OK - Completed)**: `{ status: 'success', data: { qualityStatus: 'ok'|'warning'|'error', requestedAt: Date, completedAt: Date, report: Object } }` (where `report` is the detailed JSON structure from AI synthesis).
@@ -165,9 +208,10 @@ This feature slice provides functionality for running AI-enhanced data quality a
 
 *   **`DELETE /api/v1/datasets/{datasetId}/quality-audit`**
     *   **Auth**: Required (Login + Active Subscription)
+    *   **Permission**: User must be dataset owner OR any team member for team datasets
     *   **Description**: Resets a completed or failed audit, clearing the status and report fields on the dataset to allow running a new audit.
     *   **Request Params**: `datasetId` (MongoDB ObjectId)
-    *   **Success (200 OK)**: `{ status: 'success', data: { qualityStatus: 'not_run', message: 'Quality audit has been reset...' } }`
+    *   **Success (200 OK)**: `{ status: 'success', data: { qualityStatus: 'not_run', message: 'Quality audit has been reset successfully' } }`
     *   **Errors**:
         *   `400 Bad Request`: Invalid `datasetId` format.
         *   `404 Not Found`: Dataset not found or user lacks access.
