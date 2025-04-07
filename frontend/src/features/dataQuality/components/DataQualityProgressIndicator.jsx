@@ -1,9 +1,55 @@
 // frontend/src/features/dataQuality/components/DataQualityProgressIndicator.jsx
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Spinner from '../../../shared/ui/Spinner';
 import { ClockIcon, MagnifyingGlassIcon, BeakerIcon, DocumentChartBarIcon, DocumentTextIcon } from '@heroicons/react/24/outline';
 
-const DataQualityProgressIndicator = ({ status, elapsedTimeSeconds }) => {
+const DataQualityProgressIndicator = ({ status, requestedAt }) => {
+  // Internal state for timer
+  const [internalElapsedTime, setInternalElapsedTime] = useState(0);
+  const timerRef = useRef(null);
+
+  // Calculate elapsed time based on requestedAt timestamp and current time
+  const calculateElapsedTime = () => {
+    if (!requestedAt) return 0;
+
+    try {
+      const requestTime = new Date(requestedAt);
+      const now = new Date();
+      const elapsedMs = now - requestTime;
+
+      // Ensure we have a positive value
+      return elapsedMs > 0 ? Math.floor(elapsedMs / 1000) : 0;
+    } catch (err) {
+      console.error('Error calculating elapsed time:', err);
+      return 0;
+    }
+  };
+
+  // Initialize the timer when the component mounts or when requestedAt changes
+  useEffect(() => {
+    // Calculate initial elapsed time
+    if (status === 'processing' && requestedAt) {
+      const initialElapsedTime = calculateElapsedTime();
+      setInternalElapsedTime(initialElapsedTime);
+
+      // Start the timer
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+
+      timerRef.current = setInterval(() => {
+        setInternalElapsedTime(calculateElapsedTime());
+      }, 1000);
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [status, requestedAt]);
+
   // Define the stages of the quality audit process
   const stages = [
     { id: 'init', name: 'Initializing', icon: ClockIcon },
@@ -16,11 +62,10 @@ const DataQualityProgressIndicator = ({ status, elapsedTimeSeconds }) => {
   // Determine current stage based on elapsed time
   // This is an approximation since we don't have real-time stage updates
   const getCurrentStage = () => {
-    if (!elapsedTimeSeconds) return 'init';
-    if (elapsedTimeSeconds < 10) return 'init';
-    if (elapsedTimeSeconds < 30) return 'analyze';
-    if (elapsedTimeSeconds < 60) return 'interpret';
-    if (elapsedTimeSeconds < 90) return 'report';
+    if (internalElapsedTime < 3) return 'init';
+    if (internalElapsedTime < 10) return 'analyze';
+    if (internalElapsedTime < 17) return 'interpret';
+    if (internalElapsedTime < 90) return 'report';
     return 'complete';
   };
 
@@ -28,7 +73,7 @@ const DataQualityProgressIndicator = ({ status, elapsedTimeSeconds }) => {
 
   // Format elapsed time
   const formatElapsedTime = (seconds) => {
-    if (!seconds) return '0:00';
+    if (seconds === undefined || seconds === null) return '0:00';
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -49,7 +94,7 @@ const DataQualityProgressIndicator = ({ status, elapsedTimeSeconds }) => {
             </span>
           </div>
           <span className="text-xs font-medium text-blue-500 dark:text-blue-400">
-            {formatElapsedTime(elapsedTimeSeconds)}
+            {formatElapsedTime(internalElapsedTime)}
           </span>
         </div>
 

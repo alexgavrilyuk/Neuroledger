@@ -42,13 +42,11 @@ const DatasetDetailPage = () => {
   const [isInitiatingAudit, setIsInitiatingAudit] = useState(false);
   const [isLoadingAuditReport, setIsLoadingAuditReport] = useState(false);
   const [isResettingAudit, setIsResettingAudit] = useState(false);
-  const [elapsedTimeSeconds, setElapsedTimeSeconds] = useState(0);
   const [isContextComplete, setIsContextComplete] = useState(false);
   const [showContextModal, setShowContextModal] = useState(false);
 
   // References for polling
   const pollingIntervalRef = useRef(null);
-  const startTimeRef = useRef(null);
 
   useEffect(() => {
     const fetchDataset = async () => {
@@ -106,6 +104,7 @@ const DatasetDetailPage = () => {
       // Clean up polling interval if component unmounts
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
       }
     };
   }, [datasetId]);
@@ -113,19 +112,11 @@ const DatasetDetailPage = () => {
   // Start polling when audit status is 'processing'
   useEffect(() => {
     if (auditStatus === 'processing') {
-      // Set start time for elapsed time tracking
-      if (!startTimeRef.current && auditRequestedAt) {
-        startTimeRef.current = new Date(auditRequestedAt);
-        // Update elapsed time
-        updateElapsedTime();
-      }
-
-      // Start polling
+      // Only start polling interval if not already running
       if (!pollingIntervalRef.current) {
         pollingIntervalRef.current = setInterval(() => {
           fetchAuditStatus();
-          updateElapsedTime();
-        }, 5000); // Poll every 5 seconds
+        }, 1000); // Poll API every 1 second
       }
     } else {
       // Stop polling when no longer processing
@@ -138,28 +129,15 @@ const DatasetDetailPage = () => {
       if (['ok', 'warning', 'error'].includes(auditStatus) && !auditReport) {
         fetchAuditReport();
       }
-
-      // Reset start time if not processing
-      if (auditStatus !== 'processing') {
-        startTimeRef.current = null;
-        setElapsedTimeSeconds(0);
-      }
     }
 
     return () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
       }
     };
   }, [auditStatus, auditRequestedAt]);
-
-  const updateElapsedTime = () => {
-    if (startTimeRef.current) {
-      const now = new Date();
-      const elapsedMs = now - startTimeRef.current;
-      setElapsedTimeSeconds(Math.floor(elapsedMs / 1000));
-    }
-  };
 
   const fetchAuditStatus = async () => {
     try {
@@ -222,12 +200,23 @@ const DatasetDetailPage = () => {
       const response = await apiClient.post(`/datasets/${datasetId}/quality-audit`);
 
       if (response.data.status === 'success') {
+        // Set states for audit processing
         setAuditStatus('processing');
-        setAuditRequestedAt(new Date().toISOString());
+        
+        // Use the timestamp from the server if available, or current time as fallback
+        const requestedTime = response.data.data?.requestedAt || new Date().toISOString();
+        setAuditRequestedAt(requestedTime);
         setAuditReport(null);
-        startTimeRef.current = new Date();
-
-        // Start polling
+        
+        // Start polling interval immediately
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current);
+        }
+        pollingIntervalRef.current = setInterval(() => {
+          fetchAuditStatus();
+        }, 1000); // Poll API every 1 second
+        
+        // Also fetch status once immediately
         fetchAuditStatus();
       }
     } catch (err) {
@@ -252,6 +241,13 @@ const DatasetDetailPage = () => {
       const response = await apiClient.delete(`/datasets/${datasetId}/quality-audit`);
 
       if (response.data.status === 'success') {
+        // Clear interval
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current);
+          pollingIntervalRef.current = null;
+        }
+        
+        // Reset all audit-related state
         setAuditStatus('not_run');
         setAuditRequestedAt(null);
         setAuditCompletedAt(null);
@@ -529,7 +525,7 @@ const DatasetDetailPage = () => {
           {auditStatus === 'processing' && (
             <DataQualityProgressIndicator
               status={auditStatus}
-              elapsedTimeSeconds={elapsedTimeSeconds}
+              requestedAt={auditRequestedAt}
             />
           )}
 

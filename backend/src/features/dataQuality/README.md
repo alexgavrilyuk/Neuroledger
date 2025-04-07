@@ -60,15 +60,21 @@ This feature slice provides functionality for running AI-enhanced data quality a
     *   Manages specific HTTP error responses based on service exceptions or status checks.
     *   Handles the immediate response and background initiation pattern for the worker endpoint.
 *   **`dataQuality.service.js`**:
-    *   `initiateQualityAudit`: Handles permission checks, context validation, dataset state updates, and Cloud Task creation.
-    *   `workerHandler`: Entry point for Cloud Task execution, delegates to `performFullAudit`, handles top-level errors during background processing by updating dataset status.
-    *   `performFullAudit`: Orchestrates the multi-step audit logic (programmatic -> AI interpret -> AI synthesize -> save).
-    *   `analyzeProgrammatically`: Reads CSV from GCS (`papaparse` stream), computes detailed column statistics (types, missing, cardinality, etc.) and identifies basic issues (ragged rows, high missing). Returns a detailed statistics object.
-    *   `performAiInterpretations`: Selects high-priority columns, calls `getColumnInsights` and `getOverallInsights`.
-    *   `getColumnInsights`: Constructs specific prompts for Claude (Haiku model) based on column type/issues, calls Claude API, parses JSON response.
-    *   `getOverallInsights`: Constructs summary prompt for Claude (Haiku model), calls Claude API, parses JSON response.
-    *   `generateAiFinalReport`: Constructs final synthesis prompt for Claude (Sonnet model), calls Claude API, parses potentially complex JSON response (handling markdown fences), adds metadata, provides fallback error structure if parsing fails.
-    *   `determineOverallStatus`: Calculates final `qualityStatus` (`ok`, `warning`, `error`) based on the `qualityScore` in the AI report.
+    *   Acts as the main orchestrator for the audit process.
+    *   `performFullAudit`: Orchestrates the multi-step audit logic by calling functions from `dataAnalysis`, `aiInterpretation`, and `reportGeneration`. Saves the final report and status to the `Dataset`.
+    *   Re-exports core functions from the specialized modules (`cloudTaskHandler`, `dataAnalysis`, `aiInterpretation`, `reportGeneration`) for use by the controller.
+*   **`cloudTaskHandler.js`**:
+    *   `initiateQualityAudit`: Handles permission checks, context validation, dataset state updates, and Cloud Task creation using `@google-cloud/tasks`.
+    *   `workerHandler`: Entry point for Cloud Task execution, delegates to `dataQualityService.performFullAudit`, handles top-level errors during background processing by updating dataset status.
+*   **`dataAnalysis.js`**:
+    *   `analyzeProgrammatically`: Reads CSV data from GCS using `papaparse` stream, computes detailed column statistics (types, missing, cardinality, etc.), and identifies basic issues (ragged rows, high missing). Returns a detailed statistics object.
+*   **`aiInterpretation.js`**:
+    *   `performAiInterpretations`: Selects high-priority columns based on programmatic analysis, calls `getColumnInsights` and `getOverallInsights`.
+    *   `getColumnInsights`: Constructs specific prompts for Claude (Haiku model) based on column type/issues, calls the Claude API via `shared/external_apis/claude.client.js`, parses the JSON response.
+    *   `getOverallInsights`: Constructs a summary prompt for Claude (Haiku model), calls the Claude API, parses the JSON response.
+*   **`reportGeneration.js`**:
+    *   `generateAiFinalReport`: Constructs the final synthesis prompt for Claude (Sonnet model), calls the Claude API, parses the potentially complex JSON response (handling markdown fences), adds metadata, and provides a fallback error structure if parsing fails.
+    *   `determineOverallStatus`: Calculates the final `qualityStatus` (`ok`, `warning`, `error`) based on the `qualityScore` within the generated AI report.
 *   **`dataQuality.routes.js`**:
     *   Defines the Express routes for both public-facing endpoints (mounted under `/datasets/:datasetId/`) and the internal worker endpoint (`/internal/quality-audit-worker`).
     *   Applies necessary middleware: `protect`, `requireActiveSubscription` for user routes; `validateCloudTaskToken` for the internal worker route.
