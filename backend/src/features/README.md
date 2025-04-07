@@ -1,30 +1,59 @@
-# Backend Features (`backend/src/features`)
+# Features Directory (`backend/src/features`)
 
-This directory houses the core business logic of the NeuroLedger backend, organized into distinct "feature slices" following the Vertical Slice Architecture (VSA) pattern.
+This directory implements the Vertical Slice Architecture pattern by organizing code around business features rather than technical layers.
 
-## Vertical Slice Architecture (VSA)
+## Available Features
 
-The goal of VSA here is to group all the code related to a specific feature (e.g., user authentication, dataset management) together within a dedicated subdirectory. This typically includes:
+### 1. Authentication (`auth/`)
+Handles user authentication via Firebase, session creation, and validation. See `auth/README.md` for details.
 
-*   **Routes:** Defines the HTTP API endpoints for the feature (`*.routes.js`).
-*   **Controllers:** Handles incoming requests, parses input, calls services, and formats responses (`*.controller.js`).
-*   **Services:** Contains the core business logic, orchestrates data access, and interacts with external APIs or other services (`*.service.js`).
-*   **Models:** Defines the database schema (e.g., Mongoose schemas) for the feature's data (`*.model.js`).
-*   **Validation:** Defines request validation rules (e.g., using Joi or express-validator) (`*.validation.js`).
+### 2. Chat (`chat/`)
+Implements persistent, contextual chat history with asynchronous AI response generation:
+- Chat sessions that persist across page refreshes
+- Full conversation history for contextual AI responses
+- Asynchronous processing using Cloud Tasks
+- Real-time updates via WebSockets
+- Support for private and team-based chat contexts
 
-This approach contrasts with traditional layered architectures (e.g., separate folders for all controllers, all services, etc.) and aims to improve modularity, cohesion, and maintainability, especially as the application grows. Developers working on a specific feature can primarily focus on the code within that feature's slice.
+See `chat/README.md` for complete implementation details.
 
-## Feature Slices
+### 3. Data Quality Audit (`dataQuality/`)
+Provides in-depth dataset analysis with AI interpretations. Uses Cloud Tasks for background processing. See `dataQuality/README.md` for details.
 
-The following feature slices are currently implemented:
+### 4. Dataset Management (`datasets/`)
+Handles dataset metadata, storage, access control, and data operations. See `datasets/README.md` for details.
 
-*   **`auth/`**: Handles user authentication, primarily focusing on Firebase token verification and session management.
-*   **`dataQuality/`**: Provides endpoints and potentially background processes related to analyzing and improving the quality of uploaded datasets.
-*   **`datasets/`**: Manages dataset metadata, handles file upload coordination (direct and proxy), controls access, and provides schema information.
-*   **`notifications/`**: Manages user notifications for various events within the application (e.g., team invites).
-*   **`prompts/`**: Handles interactions with the AI model (e.g., Claude) for generating insights or code based on user prompts and selected datasets. Includes prompt history management.
-*   **`subscriptions/`**: Manages user subscription status and plan selection (currently includes dummy logic).
-*   **`teams/`**: Manages team creation, membership, invitations, and team-based access control for resources like datasets.
-*   **`users/`**: Manages user profile information and settings.
+### 5. Notifications (`notifications/`)
+Manages user notifications and alerts. See `notifications/README.md` for details.
 
-Each subdirectory contains its own detailed `README.md` file explaining its specific functionality, internal structure, and interactions.
+### 6. Prompts (`prompts/`)
+Manages AI prompt handling and response generation using Claude API. See `prompts/README.md` for details.
+
+### 7. Subscriptions (`subscriptions/`)
+Handles subscription management and feature access control. See `subscriptions/README.md` for details.
+
+### 8. Teams (`teams/`)
+Manages team creation, membership, invitations, and permissions. See `teams/README.md` for details.
+
+### 9. Users (`users/`)
+Handles user profile, settings, and preference management. See `users/README.md` for details.
+
+## Feature Structure
+
+Each feature typically includes:
+
+- **Routes (`feature.routes.js`)**: Define API endpoints and middleware chains.
+- **Controllers (`feature.controller.js`)**: Handle HTTP requests/responses and call services.
+- **Services (`feature.service.js`)**: Implement business logic and database operations.
+- **Models (`feature.model.js`)**: Define Mongoose schemas and models.
+- **Middleware (`feature.middleware.js`)**: Feature-specific middleware (optional).
+- **README.md**: Documentation specific to the feature.
+
+## Cross-Feature Interactions
+
+Features interact primarily through:
+- Mongoose model references (e.g., Teams referencing Users)
+- Service function calls (when absolutely necessary)
+- Database queries (preferred over direct service dependencies)
+
+This structure maintains feature isolation while allowing necessary coordination.

@@ -1,5 +1,4 @@
 # frontend/README.md
-# ** UPDATED FILE - Mention Phase 4 **
 
 # NeuroLedger Frontend
 

@@ -80,6 +80,7 @@ graph TD
     *   Feature-specific middleware (e.g., `backend/src/features/teams/team.middleware.js`) handles role checks like `isTeamMember`, `isTeamAdmin`.
 *   **Features (`backend/src/features/`)**: Contains self-contained feature logic (controllers, services, models, routes). See `backend/src/features/README.md` and individual feature READMEs for details on:
     *   `auth`: Session creation/verification.
+    *   `chat`: Persistent chat history with contextual AI responses.
     *   `dataQuality`: Asynchronous dataset audits using Cloud Tasks.
     *   `datasets`: Metadata management, upload coordination (direct & proxy), access control.
     *   `notifications`: Creating and managing user notifications.
@@ -93,7 +94,10 @@ graph TD
     *   `external_apis`: Initialized clients for Firebase Admin, GCS, Claude. **Requires service account files in `backend/` root.**
     *   `utils`: Logging setup (`logger.js`).
 *   **Database Models:** Mongoose schemas are defined within their respective feature slices (e.g., `backend/src/features/users/user.model.js`, `backend/src/features/datasets/dataset.model.js`). Key models include `User`, `Dataset`, `Team`, `TeamMember`, `TeamInvite`, `Notification`, `PromptHistory`. Relationships are established via `mongoose.Schema.Types.ObjectId` refs.
-*   **Asynchronous Tasks:** The Data Quality Audit feature uses Google Cloud Tasks (`@google-cloud/tasks`) for long-running background processing, triggered via `POST /datasets/:id/quality-audit` and handled by an internal worker endpoint (`POST /internal/quality-audit-worker`). See `backend/src/features/dataQuality/README.md`.
+*   **Asynchronous Tasks:** The application uses Google Cloud Tasks (`@google-cloud/tasks`) for long-running background processing:
+    *   **Data Quality Audit:** Initiated via `POST /datasets/:id/quality-audit` and handled by `POST /internal/quality-audit-worker`.
+    *   **Chat AI Generation:** Initiated via `POST /chats/:sessionId/messages` and handled by `POST /internal/chat-ai-worker`.
+    *   See `backend/src/features/dataQuality/README.md` and `backend/src/features/chat/README.md` for implementation details.
 
 ## 4. Frontend Architecture (`frontend/`)
 
@@ -151,7 +155,7 @@ graph LR
     *   See `frontend/src/shared/layouts/README.md`.
 *   **State Management:**
     *   **Global:** React Context API for authentication (`AuthContext`) and theme (`ThemeContext`). Consumed via `useAuth` and `useTheme` hooks (`frontend/src/shared/hooks/`). See context and hook READMEs.
-    *   **Feature/Server State:** Often managed within feature-specific custom hooks (e.g., `useDatasets`, `useTeamInvites`, `useNotifications`) that handle API calls, loading, and error states. SWR or React Query could be alternatives for more complex caching/refetching needs.
+    *   **Feature/Server State:** Often managed within feature-specific custom hooks (e.g., `useDatasets`, `useTeamInvites`, `useChat`, `useNotifications`) that handle API calls, loading, and error states. SWR or React Query could be alternatives for more complex caching/refetching needs.
     *   **Local UI State:** Managed within components using `useState`, `useReducer`.
 *   **API Interaction (`frontend/src/shared/services/apiClient.js`):**
     *   An `axios` instance is configured with the base backend URL (`VITE_API_BASE_URL`).
@@ -166,6 +170,7 @@ graph LR
 *   **Features (`frontend/src/features/`)**: Contain feature-specific pages, components, and hooks. See `frontend/src/features/README.md` and individual feature READMEs for details on:
     *   `account_management`: Layout/navigation for account sections.
     *   `auth`: Login/Signup forms and pages.
+    *   `chat`: Persistent chat interface with history and real-time updates.
     *   `dashboard`: Main chat interface, prompt input, report display trigger.
     *   `dataQuality`: Components for displaying audit status and reports.
     *   `dataset_management`: Dataset upload, list, detail page, context editor.
@@ -297,6 +302,59 @@ sequenceDiagram
     FE->>BE_API: GET /datasets/{id}/quality-audit
     BE_API-->>FE: 200 { data: { report: ReportObject, ... } }
     FE->>FE: Renders DataQualityReportDisplay component
+```
+
+### Chat Flow (Persistent Sessions)
+
+```mermaid
+sequenceDiagram
+    participant FE_UI as Frontend UI
+    participant FE_Socket as Frontend Socket.IO
+    participant BE_API as Backend API
+    participant CloudTask as Google Cloud Tasks
+    participant BE_Worker as BE Worker Endpoint
+    participant BE_Socket as Backend Socket.IO
+    participant Claude as Anthropic Claude API
+
+    FE_UI->>BE_API: GET /chats (List chat sessions)
+    BE_API-->>FE_UI: 200 { data: [ChatSessions] }
+    
+    FE_UI->>BE_API: POST /chats (Create new chat)
+    BE_API-->>FE_UI: 201 { data: ChatSession }
+    
+    FE_UI->>BE_API: GET /chats/:sessionId/messages
+    BE_API-->>FE_UI: 200 { data: [Messages] }
+    
+    FE_UI->>BE_API: POST /chats/:sessionId/messages (Send message)
+    Note over BE_API: Creates user message + AI placeholder
+    Note over BE_API: Creates Cloud Task for AI processing
+    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage } }
+    
+    CloudTask->>BE_Worker: POST /internal/chat-ai-worker (with OIDC Token)
+    Note over BE_Worker: Validates token
+    BE_Worker-->>CloudTask: 200 OK (Acknowledge receipt)
+    
+    Note over BE_Worker: Builds context with chat history
+    BE_Worker->>BE_Socket: Emit 'chat:message:processing' event
+    BE_Socket->>FE_Socket: WebSocket event
+    FE_Socket->>FE_UI: Update UI (show loading)
+    
+    BE_Worker->>Claude: Create Message (With Chat History)
+    Claude-->>BE_Worker: Code Response
+    
+    Note over BE_Worker: Updates AI message in DB
+    BE_Worker->>BE_Socket: Emit 'chat:message:completed' event
+    BE_Socket->>FE_Socket: WebSocket event
+    FE_Socket->>FE_UI: Update UI (show completed message)
+    
+    Note over FE_UI: User now sends a follow-up message
+    FE_UI->>BE_API: POST /chats/:sessionId/messages (Follow-up)
+    Note over BE_API: Creates new user+AI messages
+    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage } }
+    
+    CloudTask->>BE_Worker: POST /internal/chat-ai-worker
+    Note over BE_Worker: Builds context WITH PREVIOUS MESSAGES
+    Note over Claude: AI response considers previous context
 ```
 
 ## 6. Environment & Configuration

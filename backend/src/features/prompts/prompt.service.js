@@ -243,6 +243,99 @@ const generateCode = async (userId, promptText, selectedDatasetIds) => {
     }
 };
 
+/**
+ * Generate code with chat history context
+ * @param {string} userId - User ID
+ * @param {string} promptText - Current user prompt
+ * @param {Array} selectedDatasetIds - Selected dataset IDs
+ * @param {Array} chatHistory - Array of previous messages with { role, content, timestamp }
+ * @returns {Promise<Object>} - Generated code response
+ */
+const generateWithHistory = async (userId, promptText, selectedDatasetIds, chatHistory = []) => {
+    if (!anthropic) {
+        logger.error("generateWithHistory called but Anthropic client is not initialized.");
+        throw new Error('AI assistant is currently unavailable.');
+    }
+
+    const startTime = Date.now();
+    logger.info(`Generating React CODE with history for user ${userId}, Prompt: "${promptText}", Datasets: [${selectedDatasetIds.join(', ')}], History: ${chatHistory.length} messages`);
+    
+    let generatedCode = null;
+    let contextUsed = '';
+    let userContextUsed = '';
+    let totalHistoryTokens = 0;
+
+    try {
+        // 1. Assemble Enhanced Context
+        logger.debug(`Assembling context for chat message`);
+        const { contextString, userContext } = await assembleContext(userId, selectedDatasetIds);
+        contextUsed = contextString;
+        userContextUsed = userContext;
+        logger.debug(`Context assembled successfully. Length: ${contextUsed.length}`);
+        logger.debug(`Business context available: ${userContextUsed ? 'Yes' : 'No'}`);
+        logger.debug(`Chat history available: ${chatHistory.length > 0 ? 'Yes' : 'No'}`);
+
+        // 2. Generate system prompt using the template, including chat history
+        const systemPrompt = generateSystemPrompt({
+            userContext: userContextUsed,
+            datasetContext: contextUsed,
+            promptText,
+            chatHistory
+        });
+        logger.debug(`System prompt with history generated. Length: ${systemPrompt.length}`);
+
+        const messages = [{ role: "user", content: "Generate the React component code based on the provided context, chat history, and user prompt." }];
+        const modelToUse = "claude-3-7-sonnet-20250219";
+        // Allow more tokens for potentially complex code generation
+        const apiOptions = { model: modelToUse, max_tokens: 16000, system: systemPrompt, messages, temperature: 0.2 };
+
+        // 3. Call Claude API
+        logger.debug(`Calling Claude API for CODE generation with model ${apiOptions.model}...`);
+        const claudeApiResponse = await anthropic.messages.create(apiOptions);
+        const rawResponse = claudeApiResponse.content?.[0]?.type === 'text' ? claudeApiResponse.content[0].text : null;
+        logger.debug(`Claude RAW CODE response received. Length: ${rawResponse?.length}`);
+
+        // 4. Extract code
+        if (rawResponse) {
+            // Attempt to remove markdown backticks if present
+            const codeRegex = /```(?:javascript|jsx)?\s*([\s\S]*?)\s*```/;
+            const match = rawResponse.match(codeRegex);
+            if (match && match[1]) {
+                generatedCode = match[1].trim();
+                logger.debug(`Extracted JS Code Block.`);
+            } else {
+                // Assume raw response is the code if no markdown
+                generatedCode = rawResponse.trim();
+                logger.debug(`Using raw response as code.`);
+            }
+            // Basic validation: does it look like a function?
+            if (!generatedCode.includes('function ReportComponent') && !generatedCode.includes('React.createElement')) {
+                logger.warn(`Generated code might be invalid (doesn't contain expected keywords).`);
+                // We'll still return the code, but log the warning
+            }
+
+            logger.debug(`--- START GENERATED CODE WITH HISTORY ---`);
+            console.log(generatedCode); // Log the final code string
+            logger.debug(`--- END GENERATED CODE ---`);
+        } else {
+            logger.error(`Unexpected or empty response format from Claude API:`, claudeApiResponse);
+            throw new Error('Unexpected response format from AI assistant.');
+        }
+
+        return {
+            aiGeneratedCode: generatedCode,
+            aiResponseText: null,
+            contextSent: systemPrompt,
+            durationMs: Date.now() - startTime,
+            claudeModelUsed: modelToUse
+        };
+    } catch (error) {
+        logger.error(`Error generating code with history: ${error.message}`);
+        throw error;
+    }
+};
+
 module.exports = {
     generateCode,
+    generateWithHistory
 };

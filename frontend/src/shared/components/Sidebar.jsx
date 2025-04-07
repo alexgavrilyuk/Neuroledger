@@ -3,13 +3,14 @@ import React, { useState, useEffect } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import {
   HomeIcon, Cog6ToothIcon, CircleStackIcon, UsersIcon, QuestionMarkCircleIcon,
-  UserCircleIcon, ChevronLeftIcon, ChevronRightIcon
+  UserCircleIcon, ChevronLeftIcon, ChevronRightIcon, ChatBubbleLeftRightIcon
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../hooks/useAuth';
 
 // Navigation configurations
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
+  { name: 'Chat', href: '/chat', icon: ChatBubbleLeftRightIcon },
 ];
 
 const accountNavigation = [

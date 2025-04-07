@@ -23,8 +23,15 @@ const validateCloudTaskToken = async (req, res, next) => {
   }
 
   try {
-    // Get expected audience (the URL of the worker endpoint)
-    const audience = `${config.serviceUrl || `https://${process.env.GOOGLE_CLOUD_PROJECT}.appspot.com`}/api/v1/internal/quality-audit-worker`;
+    // Dynamically determine the expected audience based on the request path
+    const requestPath = req.originalUrl; // e.g., /api/v1/internal/chat-ai-worker
+    const baseUrl = config.serviceUrl || `http://localhost:${config.port}`; // Use configured URL or localhost for dev
+    
+    // Ensure baseUrl doesn't have trailing slash
+    const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+    
+    const audience = `${cleanBaseUrl}${requestPath}`;
+    logger.debug(`Validating Cloud Task token for audience: ${audience}`);
 
     // Verify the token
     const ticket = await client.verifyIdToken({

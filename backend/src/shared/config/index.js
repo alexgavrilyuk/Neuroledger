@@ -30,6 +30,7 @@ module.exports = {
   projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID,
   cloudTasksLocation: process.env.CLOUD_TASKS_LOCATION || 'us-central1',
   qualityAuditQueueName: process.env.QUALITY_AUDIT_QUEUE || 'neuroledger-quality-audit-queue',
+  chatAiQueueName: process.env.CHAT_AI_QUEUE_NAME || 'neuroledger-chat-ai-queue',
   cloudTasksServiceAccount: process.env.CLOUD_TASKS_SERVICE_ACCOUNT,
   serviceUrl: process.env.SERVICE_URL,
 

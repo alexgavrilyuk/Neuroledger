@@ -47,6 +47,7 @@ const AppLayout = () => {
   const getPageTitle = () => {
     const path = location.pathname;
     if (path === '/' || path === '/dashboard') return 'Dashboard';
+    if (path === '/chat') return 'Chat';
     if (path.startsWith('/account/profile')) return 'Profile';
     if (path.startsWith('/account/datasets')) return 'Datasets';
     if (path.startsWith('/account/teams')) return 'Teams';
