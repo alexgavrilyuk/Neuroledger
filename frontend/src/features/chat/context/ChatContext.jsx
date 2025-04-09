@@ -1,6 +1,14 @@
 // frontend/src/features/chat/context/ChatContext.jsx
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getChatSessions, getChatMessages, sendChatMessage, createChatSession, deleteChatSession } from '../services/chat.api';
+import {
+  createChatSession as apiCreateChatSession,
+  getChatSessions as apiGetChatSessions,
+  getChatSession as apiGetChatSession,
+  updateChatSession as apiUpdateChatSession,
+  deleteChatSession as apiDeleteChatSession,
+  sendChatMessage as apiSendChatMessage,
+  getChatMessages as apiGetChatMessages,
+} from '../services/chat.api';
 import { useSocket } from '../hooks/useSocket';
 import logger from '../../../shared/utils/logger';
 
@@ -10,10 +18,14 @@ const ChatContext = createContext();
  * Provider component for chat state management
  */
 export const ChatProvider = ({ children }) => {
-  const [sessions, setSessions] = useState([]);
+  const [chatSessions, setChatSessions] = useState([]);
   const [currentSession, setCurrentSession] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [error, setError] = useState(null);
+  const [initialLoadComplete, setInitialLoadComplete] = useState(false);
   const { connectSocket, subscribeToEvents } = useSocket();
   
   // Connect to socket when component mounts
@@ -27,10 +39,10 @@ export const ChatProvider = ({ children }) => {
    * Load user's chat sessions
    */
   const loadSessions = useCallback(async () => {
-    setLoading(true);
+    setIsLoadingSessions(true);
     try {
-      const data = await getChatSessions();
-      setSessions(data);
+      const data = await apiGetChatSessions();
+      setChatSessions(data);
       // If there are sessions but no current session set, set the first one as current
       if (data.length > 0 && !currentSession) {
         setCurrentSession(data[0]);
@@ -38,7 +50,7 @@ export const ChatProvider = ({ children }) => {
     } catch (error) {
       console.error('Error loading chat sessions:', error);
     } finally {
-      setLoading(false);
+      setIsLoadingSessions(false);
     }
   }, [currentSession]);
   
@@ -48,14 +60,14 @@ export const ChatProvider = ({ children }) => {
   const loadMessages = useCallback(async (sessionId) => {
     if (!sessionId) return;
     
-    setLoading(true);
+    setIsLoadingMessages(true);
     try {
-      const data = await getChatMessages(sessionId);
+      const data = await apiGetChatMessages(sessionId);
       setMessages(data);
     } catch (error) {
       console.error('Error loading chat messages:', error);
     } finally {
-      setLoading(false);
+      setIsLoadingMessages(false);
     }
   }, []);
 
@@ -66,8 +78,8 @@ export const ChatProvider = ({ children }) => {
     if (!currentSession?._id) return null;
     
     try {
-      setLoading(true);
-      const result = await sendChatMessage(
+      setIsSendingMessage(true);
+      const result = await apiSendChatMessage(
         currentSession._id,
         promptText,
         selectedDatasetIds
@@ -80,7 +92,7 @@ export const ChatProvider = ({ children }) => {
       if (result.updatedSession) {
         setCurrentSession(result.updatedSession);
         // Also update the session in sessions list
-        setSessions(prev => prev.map(session =>
+        setChatSessions(prev => prev.map(session =>
           session._id === result.updatedSession._id ? result.updatedSession : session
         ));
       }
@@ -90,7 +102,7 @@ export const ChatProvider = ({ children }) => {
       console.error('Error sending message:', error);
       throw error;
     } finally {
-      setLoading(false);
+      setIsSendingMessage(false);
     }
   }, [currentSession]);
 
@@ -99,9 +111,9 @@ export const ChatProvider = ({ children }) => {
    */
   const createNewSession = useCallback(async (title = "New Chat", teamId = null) => {
     try {
-      setLoading(true);
-      const newSession = await createChatSession(title, teamId);
-      setSessions(prev => [newSession, ...prev]);
+      setIsLoadingSessions(true);
+      const newSession = await apiCreateChatSession(title, teamId);
+      setChatSessions(prev => [newSession, ...prev]);
       setCurrentSession(newSession);
       setMessages([]);
       return newSession;
@@ -109,35 +121,60 @@ export const ChatProvider = ({ children }) => {
       console.error('Error creating chat session:', error);
       return null;
     } finally {
-      setLoading(false);
+      setIsLoadingSessions(false);
     }
   }, []);
 
   /**
-   * Delete a chat session
+   * Update Chat Session Title
    */
-  const deleteSession = useCallback(async (sessionId) => {
+  const updateChatSessionTitle = useCallback(async (sessionId, newTitle) => {
+    setError(null);
     try {
-      setLoading(true);
-      await deleteChatSession(sessionId);
-      setSessions(prev => prev.filter(s => s._id !== sessionId));
-      
-      if (currentSession?._id === sessionId) {
-        // If we're deleting the current session, set the first available one as current
-        // or null if no sessions remain
-        const remainingSessions = sessions.filter(s => s._id !== sessionId);
-        setCurrentSession(remainingSessions.length > 0 ? remainingSessions[0] : null);
+      const updatedSession = await apiUpdateChatSession(sessionId, newTitle);
+      setChatSessions(prevSessions =>
+        prevSessions.map(session =>
+          session._id === sessionId ? { ...session, title: updatedSession.title } : session
+        )
+      );
+      if (currentSession && currentSession._id === sessionId) {
+        setCurrentSession(prev => ({ ...prev, title: updatedSession.title }));
+      }
+      return updatedSession;
+    } catch (err) {
+      console.error("Error updating chat session title:", err);
+      setError(err.message || 'Failed to update chat title.');
+      throw err;
+    }
+  }, [currentSession]);
+
+  /**
+   * Delete Chat Session
+   */
+  const deleteChatSession = useCallback(async (sessionId) => {
+    setError(null);
+    try {
+      await apiDeleteChatSession(sessionId);
+      setChatSessions(prevSessions =>
+        prevSessions.filter(session => session._id !== sessionId)
+      );
+      if (currentSession && currentSession._id === sessionId) {
+        setCurrentSession(null);
         setMessages([]);
       }
-      
-      return true;
-    } catch (error) {
-      console.error('Error deleting chat session:', error);
-      return false;
-    } finally {
-      setLoading(false);
+      setChatSessions(prevSessions => {
+        if (prevSessions.length === 0) {
+            setCurrentSession(null);
+            setMessages([]);
+        }
+        return prevSessions;
+       });
+    } catch (err) {
+      console.error("Error deleting chat session:", err);
+      setError(err.message || 'Failed to delete chat session.');
+      throw err;
     }
-  }, [sessions, currentSession]);
+  }, [currentSession]);
 
   // Set up socket listeners for real-time updates
   useEffect(() => {
@@ -198,16 +235,20 @@ export const ChatProvider = ({ children }) => {
   }, [currentSession, subscribeToEvents]);
   
   const contextValue = {
-    sessions,
+    chatSessions,
     currentSession,
     messages,
-    loading,
+    isLoadingSessions,
+    isLoadingMessages,
+    isSendingMessage,
+    error,
     loadSessions,
     loadMessages,
     setCurrentSession,
     sendMessage,
     createNewSession,
-    deleteSession
+    updateChatSessionTitle,
+    deleteChatSession,
   };
 
   return (

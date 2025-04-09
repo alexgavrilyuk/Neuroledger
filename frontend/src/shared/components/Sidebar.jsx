@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useChat } from '../../features/chat/context/ChatContext';
+import ChatSessionItem from '../../features/chat/components/ChatSessionItem';
 import {
   ChevronRightIcon,
   ChevronLeftIcon,
@@ -26,12 +27,12 @@ const Sidebar = ({ onCollapse }) => {
 
   // Get chat sessions and chat context functions
   const {
-    sessions,
+    chatSessions,
     currentSession,
     setCurrentSession,
     createNewSession,
     loadSessions,
-    loading: sessionsLoading
+    isLoadingSessions: sessionsLoading
   } = useChat();
 
   // Load sessions on component mount
@@ -153,13 +154,13 @@ const Sidebar = ({ onCollapse }) => {
               </button>
 
               {isSessionsOpen && (
-                <div className="space-y-0.5 max-h-64 overflow-y-auto custom-scrollbar rounded-lg border border-gray-200/60 dark:border-gray-700/40 bg-white dark:bg-gray-800/50 shadow-inner">
+                <ul className="space-y-0.5 max-h-64 overflow-y-auto custom-scrollbar rounded-lg border border-gray-200/60 dark:border-gray-700/40 bg-white dark:bg-gray-800/50 shadow-inner">
                   {sessionsLoading ? (
                     <div className="text-center py-4 text-sm text-gray-500 dark:text-gray-400">
                       <div className="inline-block animate-spin h-4 w-4 border-2 border-gray-300 dark:border-gray-600 border-t-blue-500 dark:border-t-blue-400 rounded-full mr-2"></div>
                       Loading sessions...
                     </div>
-                  ) : sessions.length === 0 ? (
+                  ) : chatSessions.length === 0 ? (
                     <div className="text-center py-6 px-2">
                       <div className="mb-2 mx-auto w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-700 flex items-center justify-center">
                         <ChatBubbleLeftRightIcon className="h-6 w-6 text-gray-400 dark:text-gray-500" />
@@ -168,38 +169,16 @@ const Sidebar = ({ onCollapse }) => {
                       <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Create a new chat to get started</p>
                     </div>
                   ) : (
-                    sessions.map((session, index) => (
-                      <button
+                    chatSessions.map((session) => (
+                      <ChatSessionItem
                         key={session._id}
+                        session={session}
+                        isActive={currentSession?._id === session._id}
                         onClick={() => setCurrentSession(session)}
-                        className={`w-full text-left p-2.5 text-sm rounded-md transition-all duration-200 ${
-                          currentSession?._id === session._id
-                            ? 'bg-blue-50 dark:bg-blue-900/20 shadow-sm'
-                            : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'
-                        } ${index !== 0 ? 'border-t border-gray-100 dark:border-gray-700/30' : ''}`}
-                      >
-                        <div className="flex items-center">
-                          <div className={`flex-shrink-0 mr-3 h-8 w-8 flex items-center justify-center rounded-md ${
-                            currentSession?._id === session._id
-                              ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400'
-                              : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
-                          }`}>
-                            <ChatBubbleLeftRightIcon className="h-4 w-4" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className={`font-medium truncate ${
-                              currentSession?._id === session._id
-                                ? 'text-blue-700 dark:text-blue-300'
-                                : 'text-gray-700 dark:text-gray-300'
-                            }`}>
-                              {session.title}
-                            </div>
-                          </div>
-                        </div>
-                      </button>
+                      />
                     ))
                   )}
-                </div>
+                </ul>
               )}
             </>
           )}
@@ -217,7 +196,7 @@ const Sidebar = ({ onCollapse }) => {
               <div className="w-full h-px bg-gray-200 dark:bg-gray-700 my-1"></div>
 
               {/* Simplified sessions list when collapsed */}
-              {sessions.slice(0, 3).map((session) => (
+              {chatSessions.slice(0, 3).map((session) => (
                 <button
                   key={session._id}
                   onClick={() => setCurrentSession(session)}
@@ -231,9 +210,9 @@ const Sidebar = ({ onCollapse }) => {
                   <ChatBubbleLeftRightIcon className="h-4 w-4" />
                 </button>
               ))}
-              {sessions.length > 3 && (
+              {chatSessions.length > 3 && (
                 <div className="text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 px-2 py-0.5 rounded-full">
-                  +{sessions.length - 3}
+                  +{chatSessions.length - 3}
                 </div>
               )}
             </div>

@@ -20,8 +20,8 @@ frontend/src/features/chat/
 │   ├── ChatDetail.jsx   # Displays messages for a selected session (rendered within Dashboard)
 │   ├── ChatInput.jsx    # Input component (rendered within Dashboard/potentially modified as PromptInput)
 │   ├── ChatMessage.jsx  # Renders a single message bubble
-│   ├── ChatSessionItem.jsx # Renders a session in the list (rendered within Sidebar)
-│   └── ChatSessionList.jsx # Container for session items (rendered within Sidebar)
+│   ├── ChatSessionItem.jsx # Renders a session in the list, including rename/delete controls (rendered within Sidebar)
+│   └── ChatSessionList.jsx # Container for session items (not currently used directly in main layout)
 ├── context/
 │   └── ChatContext.jsx   # Context provider for all chat state and actions
 ├── hooks/
