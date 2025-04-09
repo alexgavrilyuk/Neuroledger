@@ -1,12 +1,12 @@
 # Chat Feature
 
-This feature implements persistent, contextual chat history with asynchronous AI response generation.
+This feature implements persistent, contextual chat history with asynchronous AI response generation, now fully integrated with the Dashboard interface.
 
 ## Overview
 
 The chat feature allows users to:
 
-- Create and manage chat sessions
+- Create and manage chat sessions (now displayed in the Sidebar)
 - Send messages to a chat session
 - Receive AI-generated responses in real-time via WebSockets
 - View past conversations and their generated reports
@@ -16,92 +16,39 @@ The chat feature allows users to:
 
 ```
 frontend/src/features/chat/
-├── components/           # UI components
-│   ├── ChatDetail.jsx    # Displays messages for a selected chat session
-│   ├── ChatInput.jsx     # Input form for sending messages
-│   ├── ChatMessage.jsx   # Individual message display component
+├── components/          # Base UI components (mostly used within context now)
+│   ├── ChatDetail.jsx   # Used in legacy standalone chat (now integrated into Dashboard) 
+│   ├── ChatInput.jsx    # Base input component (Dashboard now uses PromptInput)
+│   ├── ChatMessage.jsx  # Message display component
 │   ├── ChatSessionItem.jsx # Individual session list item
-│   └── ChatSessionList.jsx # List of chat sessions
+│   └── ChatSessionList.jsx # List of chat sessions (now in Sidebar)
 ├── context/
 │   └── ChatContext.jsx   # Context provider for chat state management
 ├── hooks/
 │   └── useSocket.js      # Hook for WebSocket integration
 ├── services/
 │   └── chat.api.js       # API service for chat data fetching
-├── ChatPage.jsx          # Main chat page component
-├── index.js              # Feature exports
-└── README.md             # This file
+├── README.md             # This file
 ```
 
-## Installation
+## Integration with Dashboard
 
-Before using this feature, ensure you have the required dependencies:
+The chat feature has been merged into the Dashboard to provide a unified experience:
 
-```bash
-npm install socket.io-client date-fns react-syntax-highlighter --save
-```
+1. **Chat Sessions in Sidebar**:
+   - Chat sessions are now displayed in the Sidebar component
+   - Users can create new sessions and switch between them
+   - Sessions persist across page refreshes
 
-## Usage
+2. **ChatContext as Central State Manager**:
+   - `ChatContext` provides sessions, messages, and actions to the Dashboard
+   - Real-time updates with Socket.IO maintain message state
+   - Dataset context is established with the first message and maintained
 
-### Adding Chat to a Route
-
-```jsx
-// In your app's routes file
-import ChatPage from './features/chat';
-
-// Add the route
-{
-  path: '/chat',
-  element: <ChatPage />
-}
-```
-
-### Using Chat Components Individually
-
-```jsx
-import { ChatProvider, useChat } from './features/chat';
-import { ChatDetail, ChatInput } from './features/chat/components';
-
-// Wrap your component with the provider
-const MyChatComponent = () => {
-  return (
-    <ChatProvider>
-      <MyCustomLayout>
-        <ChatDetail />
-        <ChatInput />
-      </MyCustomLayout>
-    </ChatProvider>
-  );
-};
-```
-
-### Using the Chat Context Hook
-
-```jsx
-import { useChat } from './features/chat';
-
-const ChatInfo = () => {
-  const { sessions, currentSession, messages, sendMessage } = useChat();
-  
-  return (
-    <div>
-      <p>Active session: {currentSession?.title}</p>
-      <p>Total messages: {messages.length}</p>
-      <button onClick={() => sendMessage("Hello AI!")}>
-        Send Test Message
-      </button>
-    </div>
-  );
-};
-```
-
-## WebSocket Integration
-
-The chat feature uses Socket.IO for real-time communication with the backend. The WebSocket connection is automatically established when the chat context is initialized and subscribes to the following events:
-
-- `chat:message:processing` - When an AI message is being processed
-- `chat:message:completed` - When an AI message is complete
-- `chat:message:error` - When an error occurs during AI processing
+3. **Dataset Context Locking**:
+   - First message establishes dataset context for the entire session
+   - Dataset selection is locked for subsequent messages
+   - Users must create a new session to analyze different datasets
 
 ## API Integration
 
@@ -114,24 +61,37 @@ The feature makes the following API calls:
 - `GET /chats/:id/messages` - Get messages for a chat session
 - `POST /chats/:id/messages` - Send a message to a chat session
 
-## Customization
+## Socket.IO Events
 
-### Theming
+Real-time updates are provided by these Socket.IO events:
 
-The components use Tailwind CSS classes with dark mode support. They inherit from the main application theme.
-
-### DatasetSelector Integration
-
-The `ChatInput` component accepts a `datasetSelectEnabled` prop to show/hide the dataset selector:
-
-```jsx
-<ChatInput datasetSelectEnabled={false} />
-```
+- `chat:message:processing` - When an AI message is being processed
+- `chat:message:completed` - When an AI message is complete
+- `chat:message:error` - When an error occurs during AI processing
+- `chat:message:fetching_data` - When the AI message is retrieving data
 
 ## Dependencies
 
 - React
 - Socket.IO Client
 - date-fns (for timestamp formatting)
-- react-syntax-highlighter (for code display)
-- Tailwind CSS (for styling) 
+- Tailwind CSS (for styling)
+
+## Usage
+
+Rather than using standalone components, the Dashboard now directly consumes the ChatContext:
+
+```jsx
+import { useChat } from '../../features/chat/context/ChatContext';
+
+function DashboardPage() {
+  const { 
+    sessions, 
+    currentSession, 
+    messages, 
+    sendMessage,
+    loadMessages
+  } = useChat();
+  
+  // Use chat state and functions for UI
+}
