@@ -38,7 +38,8 @@ This feature slice represents the main authenticated area where users interact v
     *   `PromptInput.jsx`: Handles message input and dataset selection.
     *   `ProgressIndicator.jsx`: Shows processing status for AI responses.
 *   **`hooks/`**: 
-    *   `useChatHistory.js`: Legacy hook for message management (now primarily used by `useChat`).
+    *   `usePromptSubmit.js`: (Note: Based on analysis, this might be legacy or replaced by chat context logic. Requires review for potential removal.)
+    *   `useChatHistory.js`: (Note: Based on analysis, this might be legacy or replaced by chat context logic. Requires review for potential removal.)
 *   **`pages/`**: 
     *   `DashboardPage.jsx`: Main container component integrating all chat and report functionalities.
 *   **`README.md`**: This file.

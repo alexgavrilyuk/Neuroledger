@@ -21,20 +21,30 @@ Represents a persistent conversation thread owned by a user.
   userId: ObjectId, // References User
   teamId: ObjectId?, // Optional, references Team
   title: String,
+  associatedDatasetIds: [ObjectId], // IDs of datasets associated with this session (set on first message)
   createdAt: Date,
   updatedAt: Date
 }
 ```
 
 ### PromptHistory (Modified)
-Stores individual messages in a chat session, with enhanced fields:
+Stores individual messages in a chat session. Key fields for chat:
 
 ```javascript
 {
-  // Existing fields...
-  chatSessionId: ObjectId?, // References ChatSession
-  messageType: enum('user', 'ai_report', 'ai_error', 'system'),
-  // Other existing fields...
+  _id: ObjectId,
+  userId: ObjectId, // User who created message
+  chatSessionId: ObjectId, // References ChatSession
+  promptText: String?, // User's input (null/empty for AI)
+  messageType: enum('user', 'ai_report'), // Type of message
+  selectedDatasetIds: [ObjectId], // Datasets used as context for this specific message generation
+  aiGeneratedCode: String?, // Generated code (for reports)
+  aiResponseText: String?, // Generated text response (fallback)
+  reportDatasets: Array<{ name: string, content: string | null, error: string | null }>?, // Fetched dataset content for report rendering
+  status: enum('processing', 'generating_code', 'fetching_data', 'completed', 'error', 'error_generating', 'error_fetching_data'),
+  errorMessage: String?,
+  createdAt: Date
+  // Other fields like contextSent, durationMs, claudeModelUsed might exist for debugging
 }
 ```
 
@@ -60,7 +70,7 @@ Handles HTTP requests and responses for all chat endpoints.
 
 Contains business logic for chat sessions and messages:
 - Creating, reading, updating, and deleting chat sessions
-- Adding messages and triggering asynchronous AI processing
+- Adding messages: Creates user message & AI placeholder, queues task. **Associates dataset IDs with the session on the first message.**
 - Retrieving message history
 
 ### Task Handler (`chat.taskHandler.js`)
@@ -68,24 +78,30 @@ Contains business logic for chat sessions and messages:
 Processes AI response generation asynchronously:
 - Handles Cloud Tasks worker requests
 - Builds chat history context from previous messages
-- Calls the prompt service with context
-- Updates message status and content
-- Triggers WebSocket events on completion
+- Calls the prompt service with context (using session's associated datasets)
+- **Fetches actual dataset content from GCS based on session's associated dataset IDs.**
+- Updates AI message status and content (including `aiGeneratedCode`/`aiResponseText` and `reportDatasets`).
+- Triggers WebSocket events on status changes and completion.
 
 ## Workflow
 
-1. User creates a chat session
+1. User creates a chat session.
 2. User sends a message:
-   - Message saved to database
-   - AI response placeholder created
-   - Cloud Task queued for processing
-3. Cloud Task worker processes the message:
-   - Builds context from chat history
-   - Generates AI response using Claude
-   - Saves completed response to database
-   - Emits WebSocket event
-4. Frontend receives real-time update via WebSocket
-5. User can send follow-up messages that include context from previous exchanges
+   - User message saved to database.
+   - **If first message, provided `selectedDatasetIds` are saved to `ChatSession.associatedDatasetIds`.**
+   - AI response placeholder (`PromptHistory` record with `status='processing'`) created.
+   - Cloud Task queued for processing (payload includes `aiMessageId`, `chatSessionId`, and `sessionDatasetIds`).
+3. Cloud Task worker (`chat.taskHandler.js`) processes the message:
+   - Builds context from chat history.
+   - Updates AI message status to `generating_code`, emits `chat:message:processing` via WebSocket.
+   - Generates AI response (code/text) using Claude.
+   - Updates AI message status to `fetching_data`, emits `chat:message:fetching_data` via WebSocket.
+   - **Fetches content for `sessionDatasetIds` from GCS.**
+   - Saves completed response (`aiGeneratedCode`/`aiResponseText`) and fetched data (`reportDatasets`) to the AI `PromptHistory` record, updating status to `completed`.
+   - Emits `chat:message:completed` via WebSocket, **sending the entire updated AI `PromptHistory` object as the payload.**
+   - (If errors occur, updates status to `error...`, saves `errorMessage`, emits `chat:message:error`).
+4. Frontend receives real-time update via WebSocket and updates the specific message in the UI.
+5. User can send follow-up messages that include context from previous exchanges (using the session's locked `associatedDatasetIds`).
 
 ## Dependencies
 

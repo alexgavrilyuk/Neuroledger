@@ -155,7 +155,9 @@ graph LR
     *   See `frontend/src/shared/layouts/README.md`.
 *   **State Management:**
     *   **Global:** React Context API for authentication (`AuthContext`) and theme (`ThemeContext`). Consumed via `useAuth` and `useTheme` hooks (`frontend/src/shared/hooks/`). See context and hook READMEs.
-    *   **Feature/Server State:** Often managed within feature-specific custom hooks (e.g., `useDatasets`, `useTeamInvites`, `useChat`, `useNotifications`) that handle API calls, loading, and error states. SWR or React Query could be alternatives for more complex caching/refetching needs.
+    *   **Feature/Server State:**
+        *   **Chat:** Managed primarily via `ChatContext` (`frontend/src/features/chat/context/ChatContext.jsx`), consumed with the `useChat` hook. Handles chat sessions, message history, loading states, sending messages, and real-time updates via Socket.IO events (`chat:message:processing`, `chat:message:fetching_data`, `chat:message:completed`, `chat:message:error`). Uses `useSocket` (`frontend/src/features/chat/hooks/useSocket.js`) for connection management.
+        *   **Other Features:** Often managed within feature-specific custom hooks (e.g., `useDatasets`, `useTeamInvites`, `useNotifications`) that handle API calls, loading, and error states. SWR or React Query could be alternatives for more complex caching/refetching needs.
     *   **Local UI State:** Managed within components using `useState`, `useReducer`.
 *   **API Interaction (`frontend/src/shared/services/apiClient.js`):**
     *   An `axios` instance is configured with the base backend URL (`VITE_API_BASE_URL`).
@@ -170,8 +172,8 @@ graph LR
 *   **Features (`frontend/src/features/`)**: Contain feature-specific pages, components, and hooks. See `frontend/src/features/README.md` and individual feature READMEs for details on:
     *   `account_management`: Layout/navigation for account sections.
     *   `auth`: Login/Signup forms and pages.
-    *   `chat`: Persistent chat interface with history and real-time updates.
-    *   `dashboard`: Main chat interface, prompt input, report display trigger.
+    *   `chat`: Provides `ChatContext`, `useSocket` hook, and components like `ChatSessionList`, `ChatDetail`, `ChatMessage`, `ChatInput` for a potential standalone chat interface (if used outside the dashboard).
+    *   `dashboard`: Main application view after login. Integrates the chat functionality using `ChatContext`. Includes `ChatInterface` for displaying messages (`MessageBubble`) and `PromptInput` for user input and dataset selection (which becomes locked after the first message in a session). Triggers report display via modals.
     *   `dataQuality`: Components for displaying audit status and reports.
     *   `dataset_management`: Dataset upload, list, detail page, context editor.
     *   `notifications`: Notification bell and list display.
@@ -182,7 +184,7 @@ graph LR
 *   **Report Rendering (`frontend/src/features/report_display/`)**:
     *   Uses a **sandboxed iframe** approach for security when executing AI-generated code.
     *   `ReportViewer.jsx` creates an `<iframe>` with `sandbox="allow-scripts"`, loading `public/iframe-bootstrapper.html`.
-    *   Code and data are passed into the iframe using `postMessage`.
+    *   Code (`reportInfo.code`) and data (`reportInfo.datasets`) are passed into the iframe using `postMessage`. The data typically originates from the `reportDatasets` field of a completed AI `PromptHistory` message (received via API or WebSocket).
     *   `iframe-bootstrapper.html` loads React/libraries via CDN, executes the received code, renders the component within the iframe, and sends status back via `postMessage`.
     *   See `frontend/src/features/report_display/README.md`.
 
@@ -228,6 +230,8 @@ sequenceDiagram
 ```
 
 ### Prompt & Report Flow (Code Gen + Iframe)
+
+**Note:** This flow describes the **standalone prompt feature** (`POST /prompts`), distinct from the chat interaction flow. The report rendering part (iframe) is reused by the chat feature when an AI message contains report data.
 
 ```mermaid
 sequenceDiagram
@@ -308,53 +312,86 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant FE_UI as Frontend UI
-    participant FE_Socket as Frontend Socket.IO
+    participant FE_UI as Frontend UI (Dashboard/ChatPage)
+    participant FE_CTX as ChatContext
+    participant FE_Socket as Frontend Socket.IO Hook
     participant BE_API as Backend API
     participant CloudTask as Google Cloud Tasks
     participant BE_Worker as BE Worker Endpoint
     participant BE_Socket as Backend Socket.IO
     participant Claude as Anthropic Claude API
+    participant GCS as Google Cloud Storage
 
-    FE_UI->>BE_API: GET /chats (List chat sessions)
-    BE_API-->>FE_UI: 200 { data: [ChatSessions] }
-    
-    FE_UI->>BE_API: POST /chats (Create new chat)
-    BE_API-->>FE_UI: 201 { data: ChatSession }
-    
-    FE_UI->>BE_API: GET /chats/:sessionId/messages
-    BE_API-->>FE_UI: 200 { data: [Messages] }
-    
-    FE_UI->>BE_API: POST /chats/:sessionId/messages (Send message: promptText, selectedDatasetIds)
-    Note over BE_API: Creates user message + AI placeholder (PromptHistory)
-    Note over BE_API: Creates Cloud Task for AI processing
-    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage, updatedSession } }
-    
-    CloudTask->>BE_Worker: POST /internal/chat-ai-worker (with OIDC Token & payload)
-    Note over BE_Worker: Validates token
+    %% Session Handling (Simplified)
+    FE_UI->>FE_CTX: Load Sessions (uses GET /chats)
+    FE_CTX->>BE_API: GET /chats
+    BE_API-->>FE_CTX: 200 { data: [ChatSessions] }
+    FE_CTX->>FE_UI: Update sessions state
+
+    FE_UI->>FE_CTX: Create New Session (uses POST /chats)
+    FE_CTX->>BE_API: POST /chats
+    BE_API-->>FE_CTX: 201 { data: ChatSession }
+    FE_CTX->>FE_UI: Update sessions, set currentSession
+
+    FE_UI->>FE_CTX: Select Session
+    FE_CTX->>BE_API: GET /chats/:sessionId/messages
+    BE_API-->>FE_CTX: 200 { data: [Messages] }
+    FE_CTX->>FE_UI: Update messages state
+
+    %% Sending a Message
+    FE_UI->>FE_CTX: Send Message (promptText, selectedDatasetIds?)
+    Note over FE_CTX: Checks if first message in session.
+    Note over FE_CTX: selectedDatasetIds only sent if first message.
+    FE_CTX->>BE_API: POST /chats/:sessionId/messages (promptText, selectedDatasetIds if first)
+    Note over BE_API: Creates user message + AI placeholder (PromptHistory).
+    Note over BE_API: Associates selectedDatasetIds with Session if first message.
+    Note over BE_API: Creates Cloud Task for AI processing (passes sessionDatasetIds).
+    BE_API-->>FE_CTX: 202 { data: { userMessage, aiMessage, updatedSession } }
+    FE_CTX->>FE_UI: Adds user/placeholder messages, updates session state (with associatedDatasetIds if first).
+
+    %% Background AI Processing
+    CloudTask->>BE_Worker: POST /internal/chat-ai-worker (Payload: {..., aiMessageId, chatSessionId, sessionDatasetIds})
+    Note over BE_Worker: Validates token.
     BE_Worker-->>CloudTask: 200 OK (Acknowledge receipt)
-    
-    Note over BE_Worker: Builds context with chat history (using PromptHistory model)
-    BE_Worker->>BE_Socket: Emit 'chat:message:processing' event
+
+    Note over BE_Worker: Builds context with chat history (PromptHistory).
+    Note over BE_Worker: Updates AI message status to 'generating_code'.
+    BE_Worker->>BE_Socket: Emit 'chat:message:processing' event ({ messageId, sessionId })
     BE_Socket->>FE_Socket: WebSocket event
-    FE_Socket->>FE_UI: Update UI (show loading for specific aiMessageId)
-    
-    BE_Worker->>Claude: Create Message (With Chat History)
-    Claude-->>BE_Worker: Code Response
-    
-    Note over BE_Worker: Updates AI message (PromptHistory) in DB with code, status, etc.
-    BE_Worker->>BE_Socket: Emit 'chat:message:completed' event (with updated aiMessage)
+    FE_Socket->>FE_CTX: Update message state (show processing for aiMessageId).
+
+    BE_Worker->>Claude: Create Message (With Chat History, context uses sessionDatasetIds implicitly).
+    Claude-->>BE_Worker: Code/Text Response
+
+    Note over BE_Worker: Updates AI message status to 'fetching_data'.
+    BE_Worker->>BE_Socket: Emit 'chat:message:fetching_data' event ({ messageId, sessionId })
     BE_Socket->>FE_Socket: WebSocket event
-    FE_Socket->>FE_UI: Update UI (show completed message)
-    
-    Note over FE_UI: User now sends a follow-up message
-    FE_UI->>BE_API: POST /chats/:sessionId/messages (Follow-up)
-    Note over BE_API: Creates new user+AI messages
-    BE_API-->>FE_UI: 202 { data: { userMessage, aiMessage, updatedSession } }
-    
-    CloudTask->>BE_Worker: POST /internal/chat-ai-worker
-    Note over BE_Worker: Builds context WITH PREVIOUS MESSAGES from PromptHistory
-    Note over Claude: AI response considers previous context
+    FE_Socket->>FE_CTX: Update message state (show fetching data for aiMessageId).
+
+    BE_Worker->>GCS: Fetch content for sessionDatasetIds.
+    GCS-->>BE_Worker: Dataset content (or errors).
+
+    Note over BE_Worker: Updates AI message (PromptHistory) in DB with code, text, *reportDatasets*, status='completed'.
+    BE_Worker->>BE_Socket: Emit 'chat:message:completed' event (Payload: updated aiMessage object).
+    BE_Socket->>FE_Socket: WebSocket event
+    FE_Socket->>FE_CTX: Updates specific message in state with completed data.
+    FE_UI->>FE_UI: Renders completed message, potentially enabling 'View Report' button.
+
+    %% Error Handling Example
+    alt Processing Error
+        BE_Worker->>BE_Worker: Catches error
+        Note over BE_Worker: Updates AI message status to 'error', adds errorMessage.
+        BE_Worker->>BE_Socket: Emit 'chat:message:error' event ({ messageId, sessionId, error })
+        BE_Socket->>FE_Socket: WebSocket event
+        FE_Socket->>FE_CTX: Updates message state (show error).
+    end
+
+    %% Subsequent Message (Simplified - uses existing sessionDatasetIds)
+    FE_UI->>FE_CTX: Send Follow-up Message (promptText)
+    FE_CTX->>BE_API: POST /chats/:sessionId/messages (promptText)
+    Note over BE_API: Uses existing sessionDatasetIds for task payload.
+    BE_API-->>FE_CTX: 202 { data: { userMessage, aiMessage, updatedSession } }
+    Note over CloudTask: Processing continues as above, using session context.
 ```
 
 ## 6. Environment & Configuration

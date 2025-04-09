@@ -16,18 +16,20 @@ The chat feature allows users to:
 
 ```
 frontend/src/features/chat/
-├── components/          # Base UI components (mostly used within context now)
-│   ├── ChatDetail.jsx   # Used in legacy standalone chat (now integrated into Dashboard) 
-│   ├── ChatInput.jsx    # Base input component (Dashboard now uses PromptInput)
-│   ├── ChatMessage.jsx  # Message display component
-│   ├── ChatSessionItem.jsx # Individual session list item
-│   └── ChatSessionList.jsx # List of chat sessions (now in Sidebar)
+├── components/          # UI components for displaying chat elements
+│   ├── ChatDetail.jsx   # Displays messages for a selected session (rendered within Dashboard)
+│   ├── ChatInput.jsx    # Input component (rendered within Dashboard/potentially modified as PromptInput)
+│   ├── ChatMessage.jsx  # Renders a single message bubble
+│   ├── ChatSessionItem.jsx # Renders a session in the list (rendered within Sidebar)
+│   └── ChatSessionList.jsx # Container for session items (rendered within Sidebar)
 ├── context/
-│   └── ChatContext.jsx   # Context provider for chat state management
+│   └── ChatContext.jsx   # Context provider for all chat state and actions
 ├── hooks/
-│   └── useSocket.js      # Hook for WebSocket integration
+│   └── useSocket.js      # Hook for managing Socket.IO connection and events
 ├── services/
-│   └── chat.api.js       # API service for chat data fetching
+│   └── chat.api.js       # API service wrapper for chat endpoints
+├── ChatPage.jsx          # A potential standalone page structure (currently DashboardPage is primary)
+├── index.js              # Exports chat feature components/context
 ├── README.md             # This file
 ```
 

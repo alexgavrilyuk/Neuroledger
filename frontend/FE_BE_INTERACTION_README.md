@@ -355,12 +355,12 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400` (Invalid ID), `401`, `403`, `404` (Not found or inaccessible), `500`.
 
 *   **`POST /api/v1/chats/{sessionId}/messages`**
-    *   **Description:** Sends a user message, creates an AI message placeholder, and queues a background task (Cloud Task) for generating the AI response. Returns immediately.
+    *   **Description:** Sends a user message, creates an AI message placeholder, and queues a background task (Cloud Task) for generating the AI response. Returns immediately. **For the first message in a session, `selectedDatasetIds` must be provided; these IDs become associated with the session. For subsequent messages, `selectedDatasetIds` is ignored, and the backend uses the session's associated datasets.**
     *   **Auth:** Required (`protect`, `requireActiveSubscription`).
     *   **Request Params:** `sessionId` (MongoDB ObjectId).
-    *   **Request Body:** `{ "promptText": string, "selectedDatasetIds": string[] }` (`promptText` required).
-    *   **Success (202 Accepted):** `{ status: 'success', data: { userMessage: PromptHistory, aiMessage: PromptHistory, updatedSession: ChatSession } }` (Returns the created user message, the placeholder AI message, and the updated session).
-    *   **Errors:** `400` (Invalid ID, Missing promptText), `401`, `403`, `404` (Session not found or inaccessible), `500`.
+    *   **Request Body:** `{ "promptText": string, "selectedDatasetIds"?: string[] }` (`promptText` required, `selectedDatasetIds` required only for the first message).
+    *   **Success (202 Accepted):** `{ status: 'success', data: { userMessage: PromptHistory, aiMessage: PromptHistory, updatedSession: ChatSession } }` (Returns the created user message, the placeholder AI message, and the updated session which now includes `associatedDatasetIds` if it was the first message).
+    *   **Errors:** `400` (Invalid ID, Missing `promptText`, Missing `selectedDatasetIds` on first message), `401`, `403`, `404` (Session not found or inaccessible), `500`.
 
 *   **`GET /api/v1/chats/{sessionId}/messages`**
     *   **Description:** Gets messages (both user and AI) for a specific chat session, sorted by creation date ascending.
@@ -378,9 +378,9 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400` (Invalid IDs), `401`, `403`, `404` (Message/Session not found or inaccessible), `500`.
 
 *   **`POST /api/v1/internal/chat-ai-worker`**
-    *   **Description:** Internal worker endpoint invoked by Cloud Tasks to process AI message generation asynchronously. **Not for direct frontend use.**
+    *   **Description:** Internal worker endpoint invoked by Cloud Tasks to process AI message generation asynchronously. Fetches dataset content based on `sessionDatasetIds`, generates AI response, and updates the AI `PromptHistory` record. Emits socket events (`chat:message:processing`, `chat:message:fetching_data`, `chat:message:completed`, `chat:message:error`). **Not for direct frontend use.**
     *   **Auth:** Internal - Validated via Cloud Tasks OIDC Token (`validateCloudTaskToken` middleware).
-    *   **Request Body:** `{ "sessionId": string, "userId": string, "userMessageId": string, "aiMessageId": string }` (Payload from the task queue).
+    *   **Request Body:** `{ "sessionId": string, "userId": string, "userMessageId": string, "aiMessageId": string, "sessionDatasetIds": string[] }` (Payload from the task queue, including the dataset IDs associated with the session).
     *   **Success (200 OK):** `{ status: 'success', message: 'Task received' }` (Returned immediately, actual processing happens in background).
     *   **Errors:** `400` (Invalid payload), `401`/`403` (Invalid/Missing OIDC token).
 
@@ -586,9 +586,10 @@ interface ChatSession {
   userId: string; // User ObjectId
   teamId?: string | null; // Team ObjectId or null
   title: string; // User-defined or default title
+  associatedDatasetIds?: string[]; // Datasets used for context in this session (set by first message)
   createdAt: string; // ISO Date string
   lastActivityAt: string; // ISO Date string (updated on new message)
-  messageIds: string[]; // Array of PromptHistory ObjectIds
+  // Removed messageIds as frontend context manages message list
 }
 ```
 
@@ -599,20 +600,17 @@ interface PromptHistory {
   userId: string; // User ObjectId
   teamId?: string | null; // Team ObjectId or null
   chatSessionId?: string | null; // ChatSession ObjectId (null for standalone prompts)
-  promptText?: string; // User's input (null for AI response placeholder)
-  role: 'user' | 'assistant'; // Role of the message sender
-  selectedDatasetIds?: string[]; // Datasets used as context
-  contextSummary?: string; // Description of context used
-  systemPrompt?: string; // The prompt sent to the AI
-  aiGeneratedCode?: string; // The raw code/text response from AI
-  status: 'pending' | 'processing' | 'completed' | 'error'; // Status of AI generation
+  promptText?: string; // User's input (null/empty for AI message)
+  messageType: 'user' | 'ai_report'; // Type indicator
+  // Remove 'role', use messageType instead
+  selectedDatasetIds?: string[]; // Datasets used as context *for this specific message generation*
+  contextSent?: string; // (Optional) Backend debugging: actual text context sent to AI
+  // Remove systemPrompt, contextSummary, modelUsed, stopReason, tokenUsage - keep backend-side or simplify
+  aiGeneratedCode?: string; // The raw code response from AI (for reports)
+  aiResponseText?: string; // The raw text response from AI (if no code)
+  reportDatasets?: Array<{ name: string, content: string | null, error: string | null }>; // Fetched dataset content for rendering
+  status: 'processing' | 'generating_code' | 'fetching_data' | 'completed' | 'error' | 'error_generating' | 'error_fetching_data'; // Updated statuses
   errorMessage?: string; // Error message if status is 'error'
-  tokenUsage?: { // Claude API token usage
-    inputTokens: number;
-    outputTokens: number;
-  };
-  modelUsed?: string; // e.g., 'claude-3-haiku-20240307'
-  stopReason?: string; // e.g., 'end_turn'
   createdAt: string; // ISO Date string
 }
 ```
