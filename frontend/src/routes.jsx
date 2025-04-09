@@ -23,9 +23,6 @@ const DatasetDetailPage = lazy(() => import('./features/dataset_management/pages
 const AccountTeamsPage = lazy(() => import('./features/account_management/pages/AccountTeamsPage'));
 const TeamDetailsPage = lazy(() => import('./features/team_management/pages/TeamDetailsPage')); // NEW: Import the team details page
 const AccountSettingsPage = lazy(() => import('./features/account_management/pages/AccountSettingsPage'));
-// Lazy load Chat feature
-const ChatPage = lazy(() => import('./features/chat'));
-
 
 // --- Protected Route Component ---
 const ProtectedRoute = () => {
@@ -84,7 +81,6 @@ const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="/dashboard" replace /> },
           { path: 'dashboard', element: <DashboardPage /> },
-          { path: 'chat', element: <ChatPage /> },
           { path: 'select-plan', element: <SubscriptionPage /> },
           {
              path: 'account',

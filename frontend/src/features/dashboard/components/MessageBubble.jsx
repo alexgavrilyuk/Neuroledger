@@ -5,10 +5,16 @@ import Spinner from '../../../shared/ui/Spinner';
 import Button from '../../../shared/ui/Button';
 
 const MessageBubble = ({ message, onViewReport }) => {
-    const isUser = message.type === 'user';
-    const isError = message.isError || message.contentType === 'error';
-    const isLoading = message.isLoading;
-    const isReportAvailable = message.contentType === 'report_iframe_ready' && message.reportInfo?.code && message.reportInfo?.datasets;
+    // Determine message type
+    const isUser = message.messageType === 'user';
+    const isError = message.status === 'error' || message.status === 'error_generating' ||
+                    message.status === 'error_executing' || message.messageType === 'ai_error';
+    const isLoading = message.status === 'processing' || message.status === 'generating_code' ||
+                     message.status === 'fetching_data' || message.isLoading;
+    const isReportAvailable = (message.status === 'completed' && message.messageType === 'ai_report' &&
+                              message.aiGeneratedCode && message.reportDatasets) ||
+                              (message.contentType === 'report_iframe_ready' && message.reportInfo?.code &&
+                              message.reportInfo?.datasets);
 
     // Enhanced bubble styles with better visual separation
     const bubbleBaseStyle = `max-w-[80%] lg:max-w-[70%] rounded-xl px-4 py-3 text-sm shadow-soft-md dark:shadow-soft-dark-md break-words transition-all duration-200 animate-fadeIn`;
@@ -40,13 +46,24 @@ const MessageBubble = ({ message, onViewReport }) => {
                         color={isUser ? "text-white" : "text-gray-500 dark:text-gray-400"}
                         variant="circle"
                     />
-                    <span className="italic text-current opacity-80 font-medium">{message.content || "Processing..."}</span>
+                    <span className="italic text-current opacity-80 font-medium">
+                        {message.content || message.status === 'fetching_data'
+                            ? "Fetching data..."
+                            : message.status === 'generating_code'
+                                ? "Generating code..."
+                                : "Processing..."}
+                    </span>
                 </div>
             );
         }
 
         // Enhanced report available state with better buttons
         if (isReportAvailable) {
+            // Get the right report info based on message format
+            const reportInfo = message.contentType === 'report_iframe_ready'
+                ? message.reportInfo
+                : { code: message.aiGeneratedCode, datasets: message.reportDatasets };
+
             return (
                 <div className="space-y-3">
                     <p className="leading-relaxed">{message.content || "Report generated."}</p>
@@ -54,7 +71,7 @@ const MessageBubble = ({ message, onViewReport }) => {
                         <Button
                             variant="primary"
                             size="sm"
-                            onClick={() => onViewReport(message.reportInfo, message.quality)}
+                            onClick={() => onViewReport(reportInfo, message.quality)}
                             leftIcon={DocumentChartBarIcon}
                             className="shadow-soft-md dark:shadow-soft-dark-md transform hover:scale-102 active:scale-98"
                         >
@@ -65,11 +82,21 @@ const MessageBubble = ({ message, onViewReport }) => {
             );
         }
 
+        // Handle error content
+        if (isError) {
+            return (
+                <div className="text-red-600 dark:text-red-300 font-medium">
+                    <p>Error: {message.errorMessage || "An unexpected error occurred."}</p>
+                </div>
+            );
+        }
+
         // Enhanced text display with better line height and spacing
-        if (typeof message.content === 'string') {
+        const displayText = message.content || message.promptText || message.aiResponseText || "";
+        if (displayText) {
             return (
                 <div className="leading-relaxed">
-                    {message.content.split('\n').map((line, index, arr) => (
+                    {displayText.split('\n').map((line, index, arr) => (
                         <React.Fragment key={index}>
                             {line || (index > 0 && index < arr.length - 1 ? '\u00A0' : '')}
                             {index < arr.length - 1 && <br />}

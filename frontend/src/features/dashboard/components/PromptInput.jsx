@@ -11,7 +11,8 @@ import {
   MagnifyingGlassIcon,
   FolderIcon,
   TagIcon,
-  ArrowLeftIcon
+  ArrowLeftIcon,
+  LockClosedIcon
 } from '@heroicons/react/24/outline';
 import Spinner from '../../../shared/ui/Spinner';
 
@@ -21,7 +22,9 @@ const PromptInput = ({
     datasets = [],
     datasetsLoading,
     selectedDatasetIds,
-    setSelectedDatasetIds
+    setSelectedDatasetIds,
+    isFirstMessage = false,
+    isDatasetSelectionLocked = false
 }) => {
     const [promptText, setPromptText] = useState('');
     const [expanded, setExpanded] = useState(false);
@@ -102,6 +105,9 @@ const PromptInput = ({
     };
 
     const handleDatasetToggle = (datasetId) => {
+        // Don't allow changes if dataset selection is locked
+        if (isDatasetSelectionLocked) return;
+
         setSelectedDatasetIds(prev =>
             prev.includes(datasetId)
                 ? prev.filter(id => id !== datasetId)
@@ -110,6 +116,9 @@ const PromptInput = ({
     };
 
     const handleSelectAll = () => {
+        // Don't allow changes if dataset selection is locked
+        if (isDatasetSelectionLocked) return;
+
         if (filteredDatasets.length === 0) return;
 
         if (filteredDatasets.every(ds => selectedDatasetIds.includes(ds._id))) {
@@ -128,6 +137,9 @@ const PromptInput = ({
     };
 
     const clearAllSelections = () => {
+        // Don't allow changes if dataset selection is locked
+        if (isDatasetSelectionLocked) return;
+
         setSelectedDatasetIds([]);
     };
 
@@ -175,97 +187,109 @@ const PromptInput = ({
                     style={{ maxHeight: '400px' }}
                 >
                     {/* Header with Search */}
-                    <div className="p-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
-                        <div className="flex items-center justify-between mb-2">
-                            <h3 className="text-sm font-medium text-gray-900 dark:text-white">Select Datasets</h3>
-                            <button
-                                onClick={() => setExpanded(false)}
-                                className="p-1 rounded-full text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 dark:hover:text-gray-300"
-                            >
-                                <XMarkIcon className="h-5 w-5" />
-                            </button>
-                        </div>
+                    <div className="p-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 flex items-center justify-between">
+                        <div className="flex-grow">
+                            <h3 className="text-sm font-medium text-gray-900 dark:text-white mb-2">
+                                {isDatasetSelectionLocked ? 'Datasets used in this conversation' : 'Select Datasets'}
+                            </h3>
 
-                        {/* Search input */}
-                        <div className="relative">
-                            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                                <MagnifyingGlassIcon className="h-4 w-4 text-gray-400 dark:text-gray-500" />
-                            </div>
-                            <input
-                                type="text"
-                                value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
-                                placeholder="Search datasets..."
-                                className="w-full pl-10 pr-4 py-2 border-gray-300 dark:border-gray-600 focus:ring-blue-500 focus:border-blue-500 block rounded-md text-sm dark:bg-gray-700 dark:text-white"
-                            />
+                            {isDatasetSelectionLocked ? (
+                                <p className="text-xs flex items-center text-blue-600 dark:text-blue-400">
+                                    <LockClosedIcon className="h-3 w-3 mr-1" />
+                                    Dataset selection is locked for this conversation
+                                </p>
+                            ) : (
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                        <MagnifyingGlassIcon className="h-4 w-4 text-gray-400 dark:text-gray-500" />
+                                    </div>
+                                    <input
+                                        type="text"
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        placeholder="Search datasets..."
+                                        className="w-full pl-10 pr-4 py-2 border-gray-300 dark:border-gray-600 focus:ring-blue-500 focus:border-blue-500 block rounded-md text-sm dark:bg-gray-700 dark:text-white"
+                                    />
+                                </div>
+                            )}
                         </div>
+                        <button
+                            onClick={() => setExpanded(false)}
+                            className="p-1 rounded-full text-gray-400 hover:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 dark:hover:text-gray-300 ml-2"
+                        >
+                            <XMarkIcon className="h-5 w-5" />
+                        </button>
                     </div>
 
-                    {/* Filter tabs */}
-                    <div className="border-b border-gray-200 dark:border-gray-700 px-2 pt-2 flex overflow-x-auto no-scrollbar">
-                        <button
-                            onClick={() => setActiveFilter('all')}
-                            className={`px-3 py-2 text-sm font-medium rounded-t-lg mr-1 ${
-                                activeFilter === 'all'
-                                ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 border-b-2 border-blue-500'
-                                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50'
-                            }`}
-                        >
-                            All
-                        </button>
-                        <button
-                            onClick={() => setActiveFilter('personal')}
-                            className={`px-3 py-2 text-sm font-medium rounded-t-lg mr-1 flex items-center ${
-                                activeFilter === 'personal'
-                                ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 border-b-2 border-blue-500'
-                                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50'
-                            }`}
-                        >
-                            <CircleStackIcon className="h-4 w-4 mr-1" />
-                            Personal
-                        </button>
-                        {teamNames.map(team => (
+                    {/* Filter tabs - only show if not locked */}
+                    {!isDatasetSelectionLocked && (
+                        <div className="border-b border-gray-200 dark:border-gray-700 px-2 pt-2 flex overflow-x-auto no-scrollbar">
                             <button
-                                key={team}
-                                onClick={() => setActiveFilter(team)}
-                                className={`px-3 py-2 text-sm font-medium rounded-t-lg mr-1 flex items-center whitespace-nowrap ${
-                                    activeFilter === team
-                                    ? 'bg-white dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-500'
+                                onClick={() => setActiveFilter('all')}
+                                className={`px-3 py-2 text-sm font-medium rounded-t-lg mr-1 ${
+                                    activeFilter === 'all'
+                                    ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 border-b-2 border-blue-500'
                                     : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50'
                                 }`}
                             >
-                                <UserGroupIcon className="h-4 w-4 mr-1" />
-                                {team}
+                                All
                             </button>
-                        ))}
-                    </div>
-
-                    {/* Actions toolbar */}
-                    <div className="p-2 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gray-50/80 dark:bg-gray-800/50">
-                        <div className="flex items-center">
                             <button
-                                onClick={handleSelectAll}
-                                disabled={filteredDatasets.length === 0}
-                                className="text-xs py-1 px-2 rounded font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed mr-2"
+                                onClick={() => setActiveFilter('personal')}
+                                className={`px-3 py-2 text-sm font-medium rounded-t-lg mr-1 flex items-center ${
+                                    activeFilter === 'personal'
+                                    ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 border-b-2 border-blue-500'
+                                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50'
+                                }`}
                             >
-                                {filteredDatasets.length > 0 && filteredDatasets.every(ds => selectedDatasetIds.includes(ds._id))
-                                    ? 'Deselect All'
-                                    : 'Select All'
-                                }
+                                <CircleStackIcon className="h-4 w-4 mr-1" />
+                                Personal
                             </button>
-                            {selectedDatasetIds.length > 0 && (
+                            {teamNames.map(team => (
                                 <button
-                                    onClick={clearAllSelections}
-                                    className="text-xs py-1 px-2 rounded font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                                    key={team}
+                                    onClick={() => setActiveFilter(team)}
+                                    className={`px-3 py-2 text-sm font-medium rounded-t-lg mr-1 flex items-center whitespace-nowrap ${
+                                        activeFilter === team
+                                        ? 'bg-white dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-500'
+                                        : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50'
+                                    }`}
                                 >
-                                    Clear All
+                                    <UserGroupIcon className="h-4 w-4 mr-1" />
+                                    {team}
                                 </button>
-                            )}
+                            ))}
                         </div>
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
-                            {selectedDatasetIds.length} selected
-                        </span>
-                    </div>
+                    )}
+
+                    {/* Actions toolbar - only show if not locked */}
+                    {!isDatasetSelectionLocked && (
+                        <div className="p-2 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gray-50/80 dark:bg-gray-800/50">
+                            <div className="flex items-center">
+                                <button
+                                    onClick={handleSelectAll}
+                                    disabled={filteredDatasets.length === 0}
+                                    className="text-xs py-1 px-2 rounded font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed mr-2"
+                                >
+                                    {filteredDatasets.length > 0 && filteredDatasets.every(ds => selectedDatasetIds.includes(ds._id))
+                                        ? 'Deselect All'
+                                        : 'Select All'
+                                    }
+                                </button>
+                                {selectedDatasetIds.length > 0 && (
+                                    <button
+                                        onClick={clearAllSelections}
+                                        className="text-xs py-1 px-2 rounded font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20"
+                                    >
+                                        Clear All
+                                    </button>
+                                )}
+                            </div>
+                            <span className="text-xs text-gray-500 dark:text-gray-400">
+                                {selectedDatasetIds.length} selected
+                            </span>
+                        </div>
+                    )}
 
                     {/* Dataset List */}
                     <div className="overflow-y-auto" style={{ maxHeight: '250px' }}>
@@ -335,10 +359,12 @@ const PromptInput = ({
                                                 <div>
                                                     <button
                                                         onClick={() => handleDatasetToggle(dataset._id)}
+                                                        disabled={isDatasetSelectionLocked}
                                                         className={`h-6 w-6 flex items-center justify-center rounded-full
                                                             ${isSelected
                                                             ? 'bg-blue-500 text-white'
-                                                            : 'border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-transparent'}`}
+                                                            : 'border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-transparent'}
+                                                            ${isDatasetSelectionLocked ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
                                                     >
                                                         {isSelected && <CheckIcon className="h-4 w-4" />}
                                                     </button>
@@ -366,14 +392,23 @@ const PromptInput = ({
                                 >
                                     <CircleStackIcon className="h-3 w-3 mr-1" />
                                     {name}
-                                    <button
-                                        onClick={() => handleDatasetToggle(selectedDatasetIds[index])}
-                                        className="ml-1 h-4 w-4 rounded-full flex items-center justify-center hover:bg-blue-200 dark:hover:bg-blue-800"
-                                    >
-                                        <XMarkIcon className="h-3 w-3" />
-                                    </button>
+                                    {!isDatasetSelectionLocked && (
+                                        <button
+                                            onClick={() => handleDatasetToggle(selectedDatasetIds[index])}
+                                            className="ml-1 h-4 w-4 rounded-full flex items-center justify-center hover:bg-blue-200 dark:hover:bg-blue-800"
+                                        >
+                                            <XMarkIcon className="h-3 w-3" />
+                                        </button>
+                                    )}
                                 </span>
                             ))}
+
+                            {isDatasetSelectionLocked && (
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+                                    <LockClosedIcon className="h-3 w-3 mr-1" />
+                                    Locked for this conversation
+                                </span>
+                            )}
                         </div>
                     )}
 
@@ -384,16 +419,21 @@ const PromptInput = ({
                             <button
                                 type="button"
                                 onClick={() => setExpanded(!expanded)}
+                                disabled={isDatasetSelectionLocked && selectedDatasetIds.length > 0}
                                 className={`relative flex items-center justify-center h-10 w-10 ml-1 rounded-lg transition-colors ${
                                     selectedDatasetIds.length > 0
                                     ? 'text-blue-500 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20'
                                     : isFirstVisit
                                       ? 'text-blue-500 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 animate-pulse'
                                       : 'text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'
-                                }`}
-                                title="Click to select datasets"
+                                } ${isDatasetSelectionLocked && selectedDatasetIds.length > 0 ? 'opacity-70 cursor-not-allowed' : 'cursor-pointer'}`}
+                                title={isDatasetSelectionLocked ? "Dataset selection is locked" : "Click to select datasets"}
                             >
-                                <CircleStackIcon className="h-5 w-5" />
+                                {isDatasetSelectionLocked && selectedDatasetIds.length > 0 ? (
+                                    <LockClosedIcon className="h-5 w-5" />
+                                ) : (
+                                    <CircleStackIcon className="h-5 w-5" />
+                                )}
                                 {selectedCount > 0 && (
                                     <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-blue-500 text-[10px] font-medium text-white">
                                         {selectedCount}
@@ -407,7 +447,9 @@ const PromptInput = ({
                                 value={promptText}
                                 onChange={(e) => setPromptText(e.target.value)}
                                 placeholder={selectedDatasetIds.length > 0
-                                    ? "Ask about your selected data..."
+                                    ? isFirstMessage
+                                        ? "Ask your first question about the selected data..."
+                                        : "Continue your conversation..."
                                     : selectedDatasetIds.length === 0 && !isFirstVisit
                                       ? "Click the database icon to select datasets first"
                                       : "Step 1: Click the database icon to select datasets"}

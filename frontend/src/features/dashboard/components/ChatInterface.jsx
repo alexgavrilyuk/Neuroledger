@@ -4,7 +4,7 @@ import MessageBubble from './MessageBubble';
 import Spinner from '../../../shared/ui/Spinner';
 import { ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
 
-const ChatInterface = ({ messages = [], isLoading, onViewReport }) => {
+const ChatInterface = ({ messages = [], isLoading, onViewReport, currentSession }) => {
     const hasMessages = messages.length > 0;
 
     return (
@@ -12,9 +12,19 @@ const ChatInterface = ({ messages = [], isLoading, onViewReport }) => {
             {/* Empty state with subtle animation when no messages */}
             {!hasMessages && !isLoading && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400 dark:text-gray-500 animate-fadeIn">
-                    <ChatBubbleLeftRightIcon className="h-12 w-12 mb-3 opacity-40" />
-                    <p className="text-sm font-medium">Ask a question about your data to get started</p>
-                    <p className="text-xs mt-1.5">Select a dataset before sending your prompt</p>
+                    {currentSession ? (
+                        <>
+                            <ChatBubbleLeftRightIcon className="h-12 w-12 mb-3 opacity-40" />
+                            <p className="text-sm font-medium">Start your conversation about your data</p>
+                            <p className="text-xs mt-1.5">{currentSession.title}</p>
+                        </>
+                    ) : (
+                        <>
+                            <ChatBubbleLeftRightIcon className="h-12 w-12 mb-3 opacity-40" />
+                            <p className="text-sm font-medium">Select or create a chat session from the sidebar</p>
+                            <p className="text-xs mt-1.5">Each chat keeps context between messages</p>
+                        </>
+                    )}
                 </div>
             )}
 
@@ -22,7 +32,7 @@ const ChatInterface = ({ messages = [], isLoading, onViewReport }) => {
             <div className="space-y-6 py-2">
                 {messages.map((msg) => (
                     <div
-                        key={msg.id || `${msg.type}-${Date.now() * Math.random()}`}
+                        key={msg._id || msg.id || `${msg.messageType || msg.type}-${Date.now() * Math.random()}`}
                         className="transform transition-all duration-300 ease-out"
                     >
                         <MessageBubble
@@ -34,7 +44,7 @@ const ChatInterface = ({ messages = [], isLoading, onViewReport }) => {
             </div>
 
             {/* Enhanced loading indicator - shown only if the most recent message isn't already a loading placeholder */}
-            {isLoading && messages[messages.length - 1]?.isLoading !== true && (
+            {isLoading && messages.length > 0 && !messages[messages.length - 1]?.isLoading && messages[messages.length - 1]?.status !== 'processing' && (
                 <div className="flex justify-start items-center gap-x-3 py-3 pl-9 animate-fadeIn">
                     <div className="bg-gradient-to-br from-gray-100 to-gray-200 dark:from-gray-700 dark:to-gray-800 rounded-lg p-2.5 shadow-soft-sm dark:shadow-soft-dark-sm">
                         <Spinner
