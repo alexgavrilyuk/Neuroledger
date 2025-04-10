@@ -105,31 +105,34 @@ This document lays out the technical implementation plan to bring this vision to
 
 ## 4. Phase 2: Internal Data Extraction & Processing
 
-**Goal:** Enable the agent to generate and securely execute backend code to fetch and process data, feeding the results back into its reasoning loop.
+**Goal:** Enable the agent to generate and execute backend code using Node.js's `vm` module to fetch and process data, feeding the results back into its reasoning loop.
 
 **4.1. Backend Implementation (`backend/src`)**
 
 *   **New Service (`shared/services/codeExecution.service.js`):**
     *   Create `CodeExecutionService`.
     *   `executeSandboxedCode(code, datasetId, userId)`:
-        *   **Security First:**
-            *   **Fetch Data:** Securely get dataset content stream/path from GCS via `dataset.service.js` (check permissions via `userId`).
-            *   **Sandbox Choice (Choose ONE, prioritize security):**
-                1.  **`vm2` (If verified secure):** Use `vm2` library. Run `code` within a VM instance. Inject dataset content (as string/buffer or pre-parsed object) into the VM's context. Capture output (e.g., intercept `console.log` or use a specific return mechanism designed in the code-gen prompt). Set strict timeouts and memory limits. **Requires thorough research into `vm2`'s current security posture.**
-                2.  **`vm` (Standard Node module):** Use Node's built-in `vm` module. This requires **EXTREME CAUTION**. Run `code` with `vm.runInNewContext`. Carefully construct the context object, exposing *only* the dataset data and *minimal*, safe helper functions. **Do NOT expose `require`, `process`, or global objects.** Set strict timeouts. This is less secure than a well-maintained dedicated sandbox library or containerization.
-                3.  **Docker/MicroVMs (Most Secure, Most Complex):** Spin up an isolated container/microVM per execution. Pass data in, run code (e.g., Python script), capture stdout/stderr, retrieve results, tear down container. Requires infrastructure setup (Docker daemon access, container images).
-            *   **Return:** Return captured JSON output or a structured error object (including execution errors, timeouts).
+        *   **Data Fetching:** Securely get dataset content stream/path from GCS via `dataset.service.js` (check permissions via `userId`). Read the content into memory (e.g., as a string or buffer).
+        *   **Sandbox Implementation (Use Node.js `vm` Module):**
+            1.  Import Node.js's built-in `vm` module.
+            2.  **Prepare Context:** Create a `context` object for the sandbox. This object **MUST be minimal**. Inject only the fetched dataset content (e.g., `context.datasetContent = fileContentString;`) and potentially *very simple, safe* utility functions if absolutely necessary (e.g., basic JSON parsing). **CRITICAL: DO NOT expose `require`, `process`, `fs`, `child_process`, network modules, global objects, or any other potentially harmful Node.js APIs or environment variables into this context.**
+            3.  **Execute Code:** Use `vm.runInNewContext(code, context, { timeout: <SHORT_TIMEOUT_MS>, displayErrors: true })`. Set a strict, short timeout (e.g., 5000ms) to prevent runaway scripts.
+            4.  **Capture Output:** Instruct the LLM (in the code generation prompt - see below) to output its final result by calling a specific function injected into the context (e.g., `context.sendResult(jsonData)`), or by logging JSON to the console (`console.log(JSON.stringify(result))`). If using console logging, wrap the `vm.runInNewContext` call in code that temporarily overrides `console.log` within the execution scope to capture the output.
+            5.  **Error Handling:** Catch errors from `vm.runInNewContext` (including timeouts) and format them into a structured error object.
+        *   **Return:** Return the captured JSON output (from `sendResult` or captured log) or the structured error object.
 *   **Agent Service (`features/chat/agent.service.js`):**
     *   Add new Tool implementation functions:
-        *   `_generateDataExtractionCodeTool(datasetId, columnsNeeded, filters, analysisGoal)`: Calls a dedicated `prompt.service.js` function (`getLLMCodeGenerationResponse`) to generate backend-executable code (Node.js/Python).
+        *   `_generateDataExtractionCodeTool(datasetId, columnsNeeded, filters, analysisGoal)`: Calls `prompt.service.js -> getLLMCodeGenerationResponse` to generate **Node.js code compatible with the restricted `vm` environment**. Ensure the prompt specifies the available context (`datasetContent`, `sendResult` function or `console.log` expectation).
         *   `_executeBackendCodeTool(code, datasetId, userId)`: Calls the `codeExecution.service.js -> executeSandboxedCode`. Handles the returned data or error. **Crucially, summarize large data results before adding to `turnContext` to avoid exceeding LLM context limits.**
     *   Update `toolDispatcher` to route to these new functions.
 *   **LLM Prompting (`features/chat/system-prompt-template.js` & `prompt.service.js`):**
     *   **System Prompt:** Add `generate_data_extraction_code` and `execute_backend_code` to the tool descriptions. Explain their purpose and arguments clearly.
     *   **Reasoning Prompt:** Guide the LLM on how to use these tools sequentially (generate code -> execute code -> analyze result).
-    *   **Code Generation Prompt (`prompt.service.js -> getLLMCodeGenerationResponse`):** Create a new, specific prompt template focused *only* on generating data processing code. Instruct the LLM on input format (e.g., data passed as a variable `datasetContent`), required libraries (if using Node.js, limit to safe, built-in modules or pre-approved ones), and expected output format (e.g., `console.log(JSON.stringify(result))` for easy capture).
+    *   **Code Generation Prompt (`prompt.service.js -> getLLMCodeGenerationResponse`):** Create a specific prompt template focused *only* on generating data processing Node.js code for the `vm` sandbox.
+        *   **Crucially Instruct:** Tell the LLM it is running in a **highly restricted environment**. It **cannot** use `require` or access filesystem/network. It only has access to standard JavaScript built-ins and the provided `datasetContent` variable.
+        *   Specify the exact method for returning data (e.g., "Call `sendResult(yourJsonObject)` with the final JSON result" or "Output the final result using `console.log(JSON.stringify(yourJsonObject))`").
 *   **Dataset Service (`features/datasets/dataset.service.js`):**
-    *   Ensure a function exists to securely provide the raw content (stream or path) of a dataset given its ID and user permission check.
+    *   Ensure a function exists to securely provide the raw content (as a string or buffer) of a dataset given its ID and user permission check.
 
 **4.2. Frontend Implementation (`frontend/src`)**
 
@@ -170,13 +173,13 @@ This document lays out the technical implementation plan to bring this vision to
 
 ## 6. Phase 4: Refinement & Advanced Capabilities
 
-*   **Goal:** Enhance robustness, intelligence, and user experience.
+*   **Goal:** Enhance robustness, intelligence, and user experience. Address technical debt introduced for speed.
 *   **Areas:**
     *   **Error Handling:** Implement more sophisticated error recovery in the agent loop (e.g., retry tool, ask user for clarification if code fails).
     *   **Prompt Engineering:** Iteratively refine all prompts based on testing and user feedback. Use techniques like few-shot examples.
     *   **Context Management:** Improve summarization of chat history and tool results to stay within LLM limits.
     *   **Advanced Tools:** Add more complex analysis tools, external API integrations (e.g., financial data APIs).
-    *   **Security Hardening:** Re-evaluate and potentially upgrade the backend code execution sandbox.
+    *   **Security Hardening (Deferred from Phase 2):** **CRITICAL POST-MVP TASK:** Replace the `vm`-based code execution with a genuinely secure sandboxing solution (e.g., Docker containers, gVisor, Firecracker, or a well-maintained third-party library specifically designed for untrusted code execution). This is essential before any broader rollout.
     *   **Cost/Performance Monitoring:** Track token usage and execution times.
     *   **User Feedback:** Implement mechanisms for users to rate agent responses.
 
@@ -205,11 +208,12 @@ This document lays out the technical implementation plan to bring this vision to
 ## 9. Security Considerations
 
 *   **Backend Code Execution (`execute_backend_code`) is the HIGHEST RISK area.**
-    *   Thoroughly vet the chosen sandboxing solution (`vm2`, `vm`, Docker, etc.). Prioritize security over ease of implementation.
-    *   Strictly limit resources (CPU, memory, execution time).
-    *   Never expose sensitive environment variables, filesystem access (beyond the specific dataset), or network access to the sandboxed code.
-    *   Log execution attempts, successes, and failures diligently.
-*   **Prompt Injection:** Sanitize user input where possible, although the primary defense is robust LLM system prompts and careful parsing of LLM outputs (especially tool arguments).
+    *   **The chosen approach for Phase 2 uses Node.js's built-in `vm` module for speed of implementation.** This module is **NOT a true security sandbox** and is vulnerable if the context is not meticulously controlled.
+    *   **Strict adherence to the implementation details in Phase 2 (minimal context, no `require`/`process`/globals, strict timeouts) is mandatory** to mitigate immediate risks during initial development.
+    *   **Treat any code generated by the LLM as potentially malicious.**
+    *   **Deferral of Proper Sandboxing:** Recognize that using `vm` is a temporary measure. **Implementing a robust sandboxing mechanism (as outlined in Phase 4 - Security Hardening) is a non-negotiable requirement before considering this feature production-ready or exposing it widely.**
+    *   Log all code execution attempts, inputs, outputs, successes, and failures diligently.
+*   **Prompt Injection:** While context isolation in `vm` is the main focus, remain vigilant about potential prompt injection affecting LLM instructions or generated code. Sanitize inputs where feasible.
 *   **Data Access:** Ensure all tool implementations rigorously enforce user/team permissions before accessing datasets or schemas (`dataset.service.js` must handle this).
 
 This plan provides a detailed roadmap. Each step, especially involving security or LLM interaction, will require careful design, implementation, and thorough testing.
