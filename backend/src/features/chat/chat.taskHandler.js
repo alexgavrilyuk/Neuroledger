@@ -1,12 +1,12 @@
 const ChatSession = require('./chatSession.model');
-const PromptHistory = require('../prompts/prompt.model');
+const PromptHistory = require('./prompt.model');
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
 const Team = require('../teams/team.model');
 const TeamMember = require('../teams/team-member.model');
-const promptService = require('../prompts/prompt.service');
 const { emitToUser } = require('../../socket');
 const logger = require('../../shared/utils/logger');
+const promptService = require('./prompt.service');
 const { getBucket } = require('../../shared/external_apis/gcs.client'); // Import GCS client helper
 
 /**

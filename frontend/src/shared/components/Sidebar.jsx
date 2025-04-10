@@ -2,8 +2,8 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
-import { useChat } from '../../features/chat/context/ChatContext';
-import ChatSessionItem from '../../features/chat/components/ChatSessionItem';
+import { useChat } from '../../features/dashboard/context/ChatContext';
+import ChatSessionItem from '../../features/dashboard/components/ChatSessionItem';
 import {
   ChevronRightIcon,
   ChevronLeftIcon,

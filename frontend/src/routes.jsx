@@ -16,6 +16,7 @@ import SubscriptionPage from './features/subscription/pages/SubscriptionPage';
 
 // Lazy load feature pages
 const DashboardPage = lazy(() => import('./features/dashboard/pages/DashboardPage'));
+const ChatPage = lazy(() => import('./features/dashboard/pages/ChatPage'));
 // Lazy load Account pages
 const AccountProfilePage = lazy(() => import('./features/account_management/pages/AccountProfilePage'));
 const AccountDatasetsPage = lazy(() => import('./features/account_management/pages/AccountDatasetsPage'));
@@ -81,6 +82,7 @@ const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="/dashboard" replace /> },
           { path: 'dashboard', element: <DashboardPage /> },
+          { path: 'chat', element: <ChatPage /> },
           { path: 'select-plan', element: <SubscriptionPage /> },
           {
              path: 'account',

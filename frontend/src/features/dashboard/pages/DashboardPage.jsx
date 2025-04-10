@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import ChatInterface from '../components/ChatInterface';
 import PromptInput from '../components/PromptInput';
 import { useDatasets } from '../../dataset_management/hooks/useDatasets';
-import { useChat } from '../../chat/context/ChatContext';
+import { useChat } from '../context/ChatContext';
 import Modal from '../../../shared/ui/Modal';
 import ReportViewer from '../../report_display/components/ReportViewer';
 import logger from '../../../shared/utils/logger';

@@ -7,7 +7,7 @@ const Team = require('../teams/team.model');
 const TeamMember = require('../teams/team-member.model');
 const PromptHistory = require('./prompt.model');
 const logger = require('../../shared/utils/logger');
-const generateSystemPrompt = require('./system-prompt-template');
+const systemPromptTemplate = require('./system-prompt-template');
 
 // Enhanced context assembly function - now includes team context
 const assembleContext = async (userId, selectedDatasetIds) => {
@@ -144,7 +144,7 @@ const generateCode = async (userId, promptText, selectedDatasetIds) => {
         logger.debug(`Business context available: ${userContextUsed ? 'Yes' : 'No'}`);
 
         // 2. Generate system prompt using the template
-        const systemPrompt = generateSystemPrompt({
+        const systemPrompt = systemPromptTemplate({
             userContext: userContextUsed,
             datasetContext: contextUsed,
             promptText
@@ -276,7 +276,7 @@ const generateWithHistory = async (userId, promptText, selectedDatasetIds, chatH
         logger.debug(`Chat history available: ${chatHistory.length > 0 ? 'Yes' : 'No'}`);
 
         // 2. Generate system prompt using the template, including chat history
-        const systemPrompt = generateSystemPrompt({
+        const systemPrompt = systemPromptTemplate({
             userContext: userContextUsed,
             datasetContext: contextUsed,
             promptText,

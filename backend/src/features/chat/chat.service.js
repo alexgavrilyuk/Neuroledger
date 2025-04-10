@@ -1,5 +1,5 @@
 const ChatSession = require('./chatSession.model');
-const PromptHistory = require('../prompts/prompt.model');
+const PromptHistory = require('./prompt.model');
 const { createTask } = require('../../shared/services/cloudTasks.service');
 const config = require('../../shared/config');
 const logger = require('../../shared/utils/logger');

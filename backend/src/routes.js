@@ -1,10 +1,9 @@
 // backend/src/routes.js
-// ** UPDATED FILE - Added chat routes **
+// ** UPDATED FILE - Added chat routes, removed standalone prompt routes **
 const express = require('express');
 const authRoutes = require('./features/auth/auth.routes');
 const subscriptionRoutes = require('./features/subscriptions/subscription.routes');
 const datasetRoutes = require('./features/datasets/dataset.routes');
-const promptRoutes = require('./features/prompts/prompt.routes');
 const userRoutes = require('./features/users/user.routes');
 const teamRoutes = require('./features/teams/team.routes');
 const notificationRoutes = require('./features/notifications/notification.routes');
@@ -22,12 +21,11 @@ router.get('/', (req, res) => {
 router.use('/auth', authRoutes);
 router.use('/subscriptions', subscriptionRoutes);
 router.use('/datasets', datasetRoutes);
-router.use('/prompts', promptRoutes);
 router.use('/users', userRoutes);
 router.use('/teams', teamRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/', dataQualityRoutes); // Mount data quality routes (they include /datasets/...)
-router.use('/', chatRoutes); // Mount chat routes
+router.use('/', chatRoutes); // Mount chat routes (now includes prompts routes)
 router.use('/', dataQualityInternalRoutes); // Mount internal worker routes
 router.use('/', chatInternalRoutes); // Mount chat internal worker routes
 

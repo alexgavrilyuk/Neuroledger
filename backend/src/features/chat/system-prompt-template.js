@@ -69,4 +69,5 @@ SPECIAL INSTRUCTIONS FOR ITERATIVE DEVELOPMENT:
 Generate the React component code now.`;
 };
 
+// Export the template function directly
 module.exports = generateSystemPrompt;

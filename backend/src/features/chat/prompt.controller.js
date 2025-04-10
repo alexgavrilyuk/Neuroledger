@@ -1,7 +1,7 @@
 // ================================================================================
-// FILE: NeuroLedger/backend/src/features/prompts/prompt.controller.js
+// FILE: NeuroLedger/backend/src/features/chat/prompt.controller.js
 // ================================================================================
-// backend/src/features/prompts/prompt.controller.js
+// backend/src/features/chat/prompt.controller.js
 // ** CORRECT VERSION FOR IFRAME: Returns aiGeneratedCode **
 const promptService = require('./prompt.service');
 const logger = require('../../shared/utils/logger');

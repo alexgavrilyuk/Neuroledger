@@ -8,7 +8,7 @@ const {
   getChatMessages
 } = require('./chat.service');
 const { workerHandler } = require('./chat.taskHandler');
-const PromptHistory = require('../prompts/prompt.model');
+const PromptHistory = require('./prompt.model');
 const logger = require('../../shared/utils/logger');
 
 /**

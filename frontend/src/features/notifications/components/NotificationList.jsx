@@ -233,7 +233,20 @@ const NotificationList = ({ onClose }) => {
                         {notification.message}
                       </p>
                       <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                        {formatDistanceToNow(new Date(notification.createdAt), { addSuffix: true })}
+                        {(() => {
+                          try {
+                            if (notification.createdAt) {
+                              const date = new Date(notification.createdAt);
+                              if (!isNaN(date.getTime())) {
+                                return formatDistanceToNow(date, { addSuffix: true });
+                              }
+                            }
+                            return '';
+                          } catch (error) {
+                            console.error('Error formatting notification date:', error);
+                            return '';
+                          }
+                        })()}
                       </p>
 
                       {/* Team invite actions - only if needed */}
