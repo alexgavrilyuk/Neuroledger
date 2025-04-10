@@ -1,6 +1,6 @@
 // frontend/src/shared/components/Sidebar.jsx
 import React, { useState, useEffect } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useChat } from '../../features/dashboard/context/ChatContext';
 import ChatSessionItem from '../../features/dashboard/components/ChatSessionItem';
@@ -24,6 +24,7 @@ const Sidebar = ({ onCollapse }) => {
   const [isSessionsOpen, setIsSessionsOpen] = useState(true);
   const location = useLocation();
   const { user, actions } = useAuth();
+  const navigate = useNavigate();
 
   // Get chat sessions and chat context functions
   const {
@@ -174,7 +175,10 @@ const Sidebar = ({ onCollapse }) => {
                         key={session._id}
                         session={session}
                         isActive={currentSession?._id === session._id}
-                        onClick={() => setCurrentSession(session)}
+                        onClick={() => {
+                          setCurrentSession(session);
+                          navigate('/dashboard');
+                        }}
                       />
                     ))
                   )}
@@ -199,7 +203,10 @@ const Sidebar = ({ onCollapse }) => {
               {chatSessions.slice(0, 3).map((session) => (
                 <button
                   key={session._id}
-                  onClick={() => setCurrentSession(session)}
+                  onClick={() => {
+                    setCurrentSession(session);
+                    navigate('/dashboard');
+                  }}
                   className={`h-8 w-8 rounded-lg flex items-center justify-center transition-all duration-200 ${
                     currentSession?._id === session._id
                       ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 shadow-sm'
