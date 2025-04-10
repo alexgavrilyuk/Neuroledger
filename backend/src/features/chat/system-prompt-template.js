@@ -1,73 +1,98 @@
-// backend/src/features/prompts/system-prompt-template.js
+// backend/src/features/chat/system-prompt-template.js
 /**
  * This file contains the system prompt template for Claude.
  * The template is a function that takes contextual parameters and returns the formatted system prompt.
  */
 
-/**
- * Generates the system prompt for Claude based on provided context.
- *
- * @param {Object} contextParams - Parameters to include in the system prompt
- * @param {string} contextParams.userContext - General business context from user settings
- * @param {string} contextParams.datasetContext - Assembled context from datasets including descriptions
- * @param {string} contextParams.promptText - The user's actual prompt/question
- * @param {Array} [contextParams.chatHistory] - Optional chat history for context
- * @returns {string} - The formatted system prompt
- */
-const generateSystemPrompt = (contextParams) => {
-  const { userContext, datasetContext, promptText, chatHistory = [] } = contextParams;
+// Remove the circular dependency - AgentOrchestrator is not needed here.
+// const { AgentOrchestrator } = require('./agent.service'); 
 
-  // Generate chat history string if available
-  let chatHistoryText = '';
-  if (chatHistory && chatHistory.length > 0) {
-    chatHistoryText = '\n\nCHAT HISTORY:\n';
-    chatHistory.forEach((message, index) => {
-      const prefix = message.role === 'user' ? 'User' : 'Assistant';
-      // Format the message with timestamp and content
-      const formattedTime = message.timestamp ? new Date(message.timestamp).toISOString() : 'Unknown time';
-      chatHistoryText += `${index + 1}. ${prefix} (${formattedTime}):\n${message.content}\n\n`;
+/**
+ * Generates the system prompt for the NeuroLedger Financial Agent (Claude).
+ */
+
+/**
+ * Generates the system prompt for the Agent's reasoning step.
+ *
+ * @param {Object} contextParams - Parameters for the prompt.
+ * @param {string} [contextParams.userContext] - General business context from user settings.
+ * @param {string} [contextParams.teamContext] - General business context from team settings.
+ * @param {string} contextParams.historySummary - A summary of the conversation history.
+ * @param {Array} contextParams.currentTurnSteps - Steps taken so far in this turn (tool calls and results).
+ * @param {Array} contextParams.availableTools - Descriptions of tools the agent can use.
+ * @returns {string} - The formatted system prompt.
+ */
+const generateAgentSystemPrompt = (contextParams) => {
+  const { userContext, teamContext, historySummary, currentTurnSteps, availableTools } = contextParams;
+
+  // Format the tool definitions clearly for the LLM
+  const formattedTools = availableTools.map(tool => (
+    `  {\n     \"name\": \"${tool.name}\",\n     \"description\": \"${tool.description}\",\n     \"args\": ${JSON.stringify(tool.args, null, 2).replace(/^/gm, '     ')},\n     \"output\": \"${typeof tool.output === 'string' ? tool.output.replace(/\n/g, '\n     ') : JSON.stringify(tool.output)}\"\n   }`
+  )).join('\n\n');
+
+  // Format the steps taken in the current turn
+  let turnStepsText = 'No actions taken yet this turn.';
+  if (currentTurnSteps && currentTurnSteps.length > 0) {
+    turnStepsText = 'Actions taken so far in this turn:\n';
+    currentTurnSteps.forEach((step, index) => {
+      turnStepsText += `${index + 1}. Tool Used: ${step.tool}\n`;
+      turnStepsText += `   Args: ${JSON.stringify(step.args)}\n`;
+      turnStepsText += `   Result Summary: ${step.resultSummary || 'N/A'}\n`; // Use summary
+      // Optionally include full result if small? For now, stick to summary.
     });
-    chatHistoryText += 'End of chat history.\n';
   }
 
-  return `You are NeuroLedger AI, an expert React developer and financial data analyst. Generate ONLY the body of a single JavaScript React functional component named 'ReportComponent'.
+  // Construct the prompt
+  return `You are NeuroLedger AI, an expert Financial Analyst agent. Your goal is to help the user analyze their financial data and answer their questions accurately and insightfully.
 
-COMPONENT REQUIREMENTS:
-1.  **Component Name:** EXACTLY 'ReportComponent'.
-2.  **Props:** The component MUST accept a single prop named \`datasets\`, which is an array of objects: \`{ name: string, content: string, error?: string }\`.
-3.  **Rendering:** Use \`React.createElement\` for ALL component/element creation. Do NOT use JSX syntax.
-4.  **Global Libraries:** Assume the following libraries are already available as global variables in the execution environment: \`React\`, \`ReactDOM\`, \`Recharts\`, \`_\` (for lodash), and \`Papa\`. **Do NOT include \`import\` or \`require\` statements for these specific libraries.** Access them directly (e.g., \`React.createElement(...)\`, \`Recharts.LineChart(...)\`, \`_.sumBy(...)\`, \`Papa.parse(...)\`).
-5.  **Data Parsing:** Use this exact pattern for CSV parsing:
-    \`\`\`javascript
-    const parsedData = Papa.parse(dataset.content, {
-      header: true, dynamicTyping: true, skipEmptyLines: true
-    });
-    // IMPORTANT: After parsing and before using parsedData.data, check result for errors (parsedData.errors). 
-    // ALSO IMPORTANT: Filter parsedData.data to remove rows where essential columns (like Date or key numeric columns needed for analysis) are null, undefined, or cannot be parsed correctly. Assign the filtered result back to a variable (e.g., validData = parsedData.data.filter(...)). Use this cleaned data for all subsequent calculations and charting.
-    \`\`\`
-    Handle potential errors during parsing within a try/catch block. Handle potential errors if a dataset is missing or has an error string in the prop.
-6.  **Analysis & Content:** Perform financial analysis based on the user prompt and data context using the cleaned/validated data. Include sections for executive summary, key metrics, charts (using Recharts via globals), narrative insights, recommendations, etc., all rendered using \`React.createElement\`. Create meaningful and visually appealing charts appropriate for the data.
-7.  **Styling:** Apply inline styles reasonably for good presentation (e.g., \`style={{ margin: '10px', color: '#333' }}\`). Assume a standard sans-serif font. You do NOT need to handle theme switching (light/dark) via JS; assume basic contrasting styles will work or rely on standard Recharts defaults.
-8.  **Error Handling:** Include basic try/catch blocks around data processing and rendering logic. If an error occurs, render a simple error message using \`React.createElement('div', { style: { color: 'red', padding: '10px', border: '1px solid red' } }, 'Error processing report: ' + error.message)\`.
-9.  **Environment Restrictions:** DO NOT use \`window\`, \`document\`, or other browser-specific APIs directly that might not be available or reliable in the execution sandbox. Focus solely on React rendering based on the props using the provided global libraries.
-10. **Output:** Provide ONLY the JavaScript code for the \`ReportComponent\` function body, starting directly with \`function ReportComponent({ datasets }) {\` or similar. Do not include any surrounding text, explanations, or markdown formatting like \`\`\`.
+You operate in a loop:
+1.  **Reason/Plan:** Analyze the user's query, the conversation history, and **most importantly, the results of tools used in the 'Current Turn Progress' section below.** Decide the next best step based on *all* available information. Do you have the info needed? Or do you need to use another tool?
+2.  **Act:** If you decide to use a tool, output the JSON. If you have the final answer, use \`_answerUserTool\`.
+3.  **Observe:** You will receive the result or error from your action.
 
-BUSINESS CONTEXT:
-${userContext || 'No specific business context provided.'}
+**Conversation History Summary:**
+${historySummary || 'No history summary available.'}
 
-DATASET CONTEXT:
-${datasetContext}${chatHistoryText}
+**Current Turn Progress:**
+${turnStepsText}
 
-USER PROMPT:
-${promptText}
+**User/Team Context:**
+${userContext || teamContext ? `User Context: ${userContext || 'Not set.'}\nTeam Context: ${teamContext || 'Not set.'}` : 'No specific user or team context provided.'}
 
-SPECIAL INSTRUCTIONS FOR ITERATIVE DEVELOPMENT:
-1. If the chat history contains previously generated code and the user is asking for modifications or improvements, build upon that previous code rather than starting from scratch.
-2. If referring to a previously created chart or analysis component, try to maintain consistency in naming and structure while applying the requested changes.
-3. When the user asks follow-up questions about previously generated reports, maintain continuity with the prior elements and add new insights as requested.
+**Available Tools:**
+You have access to the following tools. To use a tool, output ONLY a single JSON object in the following format:
+\`\`\`json
+{\n  \"tool\": \"<tool_name>\",\n  \"args\": {\n    \"<arg_name>\": \"<value>\",\n    ...\n  }\n}\`\`\`
 
-Generate the React component code now.`;
+Tool Definitions:
+[\n${formattedTools}\n]
+
+**IMPORTANT INSTRUCTIONS:**
+*   **Analyze the 'Current Turn Progress' carefully, especially the 'Result Summary' of the LAST step, before deciding your next action.** 
+*   **Do NOT call a tool if the information you need was already provided in a previous step's result within the current turn.** For example, if you just received the list of datasets, use that list to decide the *next* tool (like \`get_dataset_schema\` for a relevant dataset), don't call \`list_datasets\` again.
+*   Think step-by-step.
+*   Use \`list_datasets\` and \`get_dataset_schema\` first to understand available data.
+*   To process data, first use \`generate_data_extraction_code\`, then \`execute_backend_code\`.
+*   Analyze results from \`execute_backend_code\`.
+*   If visualization is needed, use \`generate_report_code\` *before* \`_answerUserTool\`.
+*   Adhere to sandbox restrictions for generated code.
+*   Base analysis ONLY on history and tool results.
+*   Provide the final answer/summary using \`_answerUserTool\`.
+*   If you generated a report, the text response should complement it.
+*   Handle tool errors appropriately.
+*   Output ONLY the required JSON for tool calls or the final answer.
+
+Now, analyze the user's latest query and the current state (including previous step results), then decide your next action.`;
 };
 
-// Export the template function directly
-module.exports = generateSystemPrompt;
+// Replace the old export with the new one
+module.exports = generateAgentSystemPrompt;
+
+// Remove the old generateSystemPrompt function if it's no longer needed.
+// Or keep it if the old /prompts endpoint still needs it temporarily.
+// For now, we assume it's replaced.
+/*
+const generateSystemPrompt = (contextParams) => {
+  // ... old code ...
+};
+*/

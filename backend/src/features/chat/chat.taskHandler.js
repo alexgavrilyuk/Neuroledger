@@ -1,191 +1,161 @@
 const ChatSession = require('./chatSession.model');
 const PromptHistory = require('./prompt.model');
-const User = require('../users/user.model');
-const Dataset = require('../datasets/dataset.model');
-const Team = require('../teams/team.model');
-const TeamMember = require('../teams/team-member.model');
-const { emitToUser } = require('../../socket');
+// User model might still be needed if we add user context to agent later
+// const User = require('../users/user.model');
+// Dataset model no longer needed directly here
+// const Dataset = require('../datasets/dataset.model');
+// Team models no longer needed directly here
+// const Team = require('../teams/team.model');
+// const TeamMember = require('../teams/team-member.model');
+// Rename emitToUser to match actual usage in socket.handler.js (if different)
+// TODO: Verify correct import/usage of socket emitter
+const { getIO } = require('../../socket');
 const logger = require('../../shared/utils/logger');
-const promptService = require('./prompt.service');
-const { getBucket } = require('../../shared/external_apis/gcs.client'); // Import GCS client helper
-
-/**
- * Fetches content for given dataset IDs from GCS.
- */
-const fetchDatasetContent = async (datasetIds) => {
-  if (!datasetIds || datasetIds.length === 0) {
-    return [];
-  }
-  logger.debug(`Fetching content for datasets: ${datasetIds.join(', ')}`);
-  const bucket = getBucket();
-  const datasets = await Dataset.find({ _id: { $in: datasetIds } }).select('name gcsPath').lean();
-  const results = [];
-
-  for (const ds of datasets) {
-    if (!ds.gcsPath) {
-      results.push({ name: ds.name, content: null, error: 'Dataset GCS path missing' });
-      continue;
-    }
-    try {
-      const file = bucket.file(ds.gcsPath);
-      const [exists] = await file.exists();
-      if (!exists) {
-        throw new Error(`File not found at path: ${ds.gcsPath}`);
-      }
-      // Download the entire file content
-      const [buffer] = await file.download();
-      results.push({ name: ds.name, content: buffer.toString('utf8'), error: null });
-      logger.debug(`Successfully fetched content for ${ds.name}`);
-    } catch (fetchErr) {
-      logger.error(`Failed to fetch content for dataset ${ds.name} (${ds._id}):`, fetchErr);
-      results.push({ name: ds.name, content: null, error: fetchErr.message || 'Failed to fetch content' });
-    }
-  }
-  return results;
-};
+// Remove promptService import if no longer directly used
+// const promptService = require('./prompt.service');
+// Remove GCS client import
+// const { getBucket } = require('../../shared/external_apis/gcs.client');
+const { AgentOrchestrator } = require('./agent.service'); // Import AgentOrchestrator
 
 /**
  * Handles the worker request from Cloud Tasks for chat AI response generation
+ * using the AgentOrchestrator.
  * @param {Object} payload - Task payload with IDs and context
  * @returns {Promise<void>}
  */
 const workerHandler = async (payload) => {
-  logger.info(`Chat AI worker started with payload: ${JSON.stringify(payload)}`);
+  let userId, chatSessionId, aiMessageId; // Define vars here for catch block scope
+  const io = getIO(); // Get socket instance for final emissions
 
   try {
+    logger.info(`Chat Agent worker started with payload: ${JSON.stringify(payload)}`);
     // Extract payload data
-    // Use the sessionDatasetIds field passed from addMessage
-    const { userId, userMessageId, aiMessageId, chatSessionId, sessionDatasetIds } = payload;
+    // sessionDatasetIds is still needed by the agent if we decide to pass it initially
+    // but the agent loop itself will decide if/when to fetch content via tools.
+    ({ userId, userMessageId, aiMessageId, chatSessionId, sessionDatasetIds } = payload);
 
     // Validate payload
-    if (!userId || !userMessageId || !aiMessageId || !chatSessionId || !sessionDatasetIds) {
-      throw new Error('Invalid payload: missing required IDs or sessionDatasetIds');
+    if (!userId || !userMessageId || !aiMessageId || !chatSessionId) {
+      // sessionDatasetIds might be empty/null legitimately after first message
+      throw new Error('Invalid payload: missing required IDs');
     }
 
     // Fetch the user's message to get the prompt text
-    const userMessage = await PromptHistory.findById(userMessageId);
+    const userMessage = await PromptHistory.findById(userMessageId).lean(); // Use lean for read-only
     if (!userMessage || userMessage.userId.toString() !== userId) {
       throw new Error('User message not found or unauthorized');
     }
-
-    // Fetch the AI message to update its status
-    const aiMessage = await PromptHistory.findById(aiMessageId);
-    if (!aiMessage || aiMessage.userId.toString() !== userId) {
-      throw new Error('AI message not found or unauthorized');
+    if (!userMessage.promptText) {
+        // Should not happen based on controller logic, but good to check
+        throw new Error('User message is missing promptText');
     }
 
-    // Fetch the chat session
-    const chatSession = await ChatSession.findById(chatSessionId);
+    // Fetch the chat session to get teamId if applicable
+    const chatSession = await ChatSession.findById(chatSessionId).lean(); // Use lean
     if (!chatSession || chatSession.userId.toString() !== userId) {
+      // TODO: Add team member access check here if applicable
       throw new Error('Chat session not found or unauthorized');
     }
 
-    // Get all previous messages in this chat session to build context
-    const previousMessages = await PromptHistory.find({
-      chatSessionId,
-      createdAt: { $lt: userMessage.createdAt }
-    }).sort({ createdAt: 1 });
-
-    // Format previous messages for context
-    const chatHistory = previousMessages.map(msg => {
-      if (msg.messageType === 'user') {
-        return {
-          role: 'user',
-          content: msg.promptText,
-          timestamp: msg.createdAt
-        };
-      } else if (msg.messageType === 'ai_report') {
-        return {
-          role: 'assistant',
-          content: msg.aiGeneratedCode || msg.aiResponseText,
-          timestamp: msg.createdAt
-        };
-      }
-      return null;
-    }).filter(Boolean); // Remove any null entries
-
-    // Update AI message status to processing
-    aiMessage.status = 'generating_code';
-    await aiMessage.save();
-
-    // Emit event that processing has started
-    emitToUser(userId, 'chat:message:processing', {
-      messageId: aiMessageId,
-      sessionId: chatSessionId
-    });
-
-    // Generate AI response using the existing prompt service with the additional chat history
-    // Pass sessionDatasetIds received from the task payload
-    const response = await promptService.generateWithHistory(userId, userMessage.promptText, sessionDatasetIds, chatHistory);
-
-    // Fetch dataset content *after* generating code
-    aiMessage.status = 'fetching_data'; 
-    await aiMessage.save();
-    emitToUser(userId, 'chat:message:fetching_data', { messageId: aiMessageId, sessionId: chatSessionId }); // Optional: finer-grained status update
-
-    let fetchedDatasets = [];
-    try {
-        fetchedDatasets = await fetchDatasetContent(sessionDatasetIds);
-        const fetchErrors = fetchedDatasets.filter(d => d.error).map(d => `${d.name}: ${d.error}`);
-        if (fetchErrors.length > 0) {
-            logger.warn(`Some datasets failed to fetch for report rendering: ${fetchErrors.join(', ')}`);
-            // Decide if this is a fatal error or just include partial data
-        }
-    } catch (dataFetchError) {
-        logger.error(`Critical error fetching dataset content for report: ${dataFetchError.message}`);
-        throw new Error(`Failed to retrieve dataset content: ${dataFetchError.message}`); // Make it a fatal error for this message
+    // Fetch the placeholder AI message record (we need the object to potentially update in catch block)
+    // Note: AgentOrchestrator will handle the main updates inside runAgentLoop
+    let aiMessageRecord = await PromptHistory.findById(aiMessageId);
+    if (!aiMessageRecord || aiMessageRecord.userId.toString() !== userId) {
+        throw new Error('AI placeholder message not found or unauthorized');
     }
 
-    // Update the AI message with generated code AND fetched data
-    aiMessage.aiGeneratedCode = response.aiGeneratedCode;
-    aiMessage.aiResponseText = response.aiResponseText; // In case code fails, maybe text response
-    aiMessage.reportDatasets = fetchedDatasets; // Save fetched data
-    aiMessage.contextSent = response.contextSent;
-    aiMessage.durationMs = response.durationMs;
-    aiMessage.claudeModelUsed = response.claudeModelUsed;
-    aiMessage.status = 'completed';
-    await aiMessage.save();
+    // --- Start Agent Orchestration --- 
+    const agentOrchestrator = new AgentOrchestrator(
+        userId,
+        chatSession.teamId || null, // Pass teamId from session
+        chatSessionId,
+        aiMessageId
+    );
 
-    // Update chat session updatedAt
-    chatSession.updatedAt = new Date();
-    await chatSession.save();
+    // The agent loop handles internal state updates (DB) and agent:* websocket events
+    const agentResult = await agentOrchestrator.runAgentLoop(userMessage.promptText);
 
-    // <<<--- ADD LOGGING HERE --- >>>
-    logger.debug(`Emitting completed message with reportDatasets: ${JSON.stringify(aiMessage.reportDatasets)}`);
-    
-    // Emit event that processing is complete with the updated message (including reportDatasets)
-    emitToUser(userId, 'chat:message:completed', {
-      message: aiMessage, // Send the whole updated message object
-      sessionId: chatSessionId
-    });
+    // --- Agent Loop Finished --- 
 
-    logger.info(`Successfully generated AI response and fetched data for chat message: ${aiMessageId}`);
+    // Fetch the final state of the AI message record after the agent loop
+    const finalAiMessage = await PromptHistory.findById(aiMessageId).lean();
+    if (!finalAiMessage) {
+        // This shouldn't happen if the loop updated it, but handle defensively
+        throw new Error('Failed to retrieve final AI message state after agent loop.');
+    }
+
+    if (agentResult.status === 'completed') {
+        logger.info(`Agent loop completed successfully for message ${aiMessageId}. Emitting final update.`);
+        // Update chat session lastActivityAt (previously updatedAt)
+        await ChatSession.findByIdAndUpdate(chatSessionId, { lastActivityAt: new Date() });
+
+        // Emit the final completed event with the full message object
+        if (io) {
+             io.to(`user:${userId}`).emit('chat:message:completed', {
+                 message: finalAiMessage, // Send the whole updated message object
+                 sessionId: chatSessionId
+             });
+        } else {
+             logger.warn('Socket.io instance not available, cannot emit chat:message:completed');
+        }
+
+    } else { // agentResult.status === 'error'
+        logger.warn(`Agent loop finished with error for message ${aiMessageId}: ${agentResult.error}. Emitting final error update.`);
+        // The agent loop already updated the DB record status to 'error'
+        if (io) {
+            // TODO: Emit to specific user/room if implemented
+            io.to(`user:${userId}`).emit('chat:message:error', {
+                messageId: aiMessageId,
+                sessionId: chatSessionId,
+                error: agentResult.error || finalAiMessage.errorMessage || 'Agent processing failed'
+            });
+        } else {
+             logger.warn('Socket.io instance not available, cannot emit chat:message:error');
+        }
+    }
+
+    // --- Remove Old Logic --- 
+    // Remove fetching chatHistory - Agent will handle context
+    // Remove direct status updates (generating_code, fetching_data)
+    // Remove direct calls to promptService.generateWithHistory
+    // Remove fetchDatasetContent call
+    // Remove direct updates to aiMessage fields (aiGeneratedCode, reportDatasets etc.)
+    // Remove direct emission of chat:message:processing/fetching_data/completed
+
   } catch (error) {
-    logger.error(`Chat AI worker failed: ${error.message}`);
+    logger.error(`Chat Agent worker failed outside agent loop: ${error.message}`, { error, payload });
 
-    // Update AI message status to error if possible
+    // Attempt to update AI message status to error if possible and if not already done by agent loop
     try {
-      if (payload?.aiMessageId && payload?.userId) {
-        const aiMessage = await PromptHistory.findById(payload.aiMessageId);
-        if (aiMessage) {
-          aiMessage.status = aiMessage.status === 'fetching_data' ? 'error_fetching_data' : 'error_generating'; // Set more specific error
-          aiMessage.errorMessage = error.message;
-          await aiMessage.save();
+      if (aiMessageId && userId) {
+        // Fetch the record again to check current status
+        const currentAiMessage = await PromptHistory.findById(aiMessageId);
+        if (currentAiMessage && currentAiMessage.status !== 'error') {
+          currentAiMessage.status = 'error'; // Generic error status
+          currentAiMessage.errorMessage = `Worker failed: ${error.message}`;
+          await currentAiMessage.save();
+          logger.info(`Updated AI message ${aiMessageId} status to error due to worker failure outside agent loop.`);
 
-          // Emit error event
-          emitToUser(payload.userId, 'chat:message:error', {
-            messageId: payload.aiMessageId,
-            sessionId: payload.chatSessionId,
-            error: error.message
-          });
-
-          logger.info(`Updated AI message ${payload.aiMessageId} status to error due to worker failure`);
+          // Emit final error event if not already emitted by agent loop error path
+          if (io) {
+                // TODO: Emit to specific user/room if implemented
+                io.to(`user:${userId}`).emit('chat:message:error', {
+                    messageId: aiMessageId,
+                    sessionId: chatSessionId,
+                    error: currentAiMessage.errorMessage
+                });
+          } else {
+             logger.warn('Socket.io instance not available, cannot emit final chat:message:error from outer catch block');
+          }
+        } else if (currentAiMessage) {
+             logger.info(`AI message ${aiMessageId} status was already 'error'. No update needed.`);
         }
       }
     } catch (updateError) {
-      logger.error(`Failed to update AI message status after worker failure: ${updateError.message}`);
+      logger.error(`Failed to update AI message status after outer worker failure: ${updateError.message}`);
     }
 
+    // Rethrow the error so Cloud Tasks knows the job failed
     throw error;
   }
 };

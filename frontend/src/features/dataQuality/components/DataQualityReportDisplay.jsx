@@ -66,6 +66,12 @@ const DataQualityReportDisplay = ({ reportData, onResetAudit, isResetting }) => 
 
   // Determine color for priority badges
   const getPriorityColor = (priority) => {
+    // Add check for non-string priority
+    if (typeof priority !== 'string' || !priority) {
+        // Return default gray color if priority is undefined, null, or not a string
+        return 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-300';
+    }
+    // Proceed with existing logic if priority is a valid string
     switch (priority.toLowerCase()) {
       case 'high':
         return 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300';

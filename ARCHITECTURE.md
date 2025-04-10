@@ -1,13 +1,13 @@
 # NeuroLedger Application Architecture
 
-**Last Updated:** April 7, 2024
+**Last Updated:** (Current Date)
 
 ## 1. Overview
 
-NeuroLedger is a web application designed for AI-powered financial analysis. It comprises a React frontend and a Node.js/Express backend, interacting via a RESTful API. The architecture emphasizes modularity through a Vertical Slice Architecture (VSA) pattern implemented in both the frontend and backend codebases.
+NeuroLedger is a web application designed for AI-powered financial analysis. It comprises a React frontend and a Node.js/Express backend, interacting via a RESTful API and WebSockets. The architecture emphasizes modularity through a Vertical Slice Architecture (VSA) pattern implemented in both the frontend and backend codebases.
 
-*   **Frontend:** React (using Vite), Tailwind CSS, React Router, Axios, Firebase JS SDK.
-*   **Backend:** Node.js, Express, MongoDB (with Mongoose), Firebase Admin SDK, Google Cloud Storage (GCS), Google Cloud Tasks, Anthropic Claude API Client.
+*   **Frontend:** React (using Vite), Tailwind CSS, React Router, Axios, Firebase JS SDK, Socket.IO Client.
+*   **Backend:** Node.js, Express, MongoDB (with Mongoose), Firebase Admin SDK, Google Cloud Storage (GCS), Google Cloud Tasks, Anthropic Claude API Client, Socket.IO Server.
 *   **Core Pattern:** Vertical Slice Architecture (VSA).
 
 ## 2. High-Level Structure
@@ -17,11 +17,13 @@ The project is divided into two main packages:
 *   **`frontend/`**: Contains the React single-page application (SPA). See `frontend/README.md` for setup and structure details.
 *   **`backend/`**: Contains the Node.js/Express API server. See `backend/README.md` for setup and structure details.
 
-Interaction between these two parts is defined by the API contract documented in `frontend/FE_BE_INTERACTION_README.md`.
+Interaction between these two parts is defined by the API contract (`frontend/FE_BE_INTERACTION_README.md`) and WebSocket events (defined in `AI-Improvement-Plan.md` and implemented in `backend/src/features/chat/agent.service.js`).
 
 ## 3. Backend Architecture (`backend/`)
 
-The backend follows a VSA pattern, organizing code by feature slices rather than technical layers.
+The backend follows a VSA pattern, organizing code by feature slices rather than technical layers. The `chat` feature now includes an `agent.service.js` for orchestration.
+
+Agent service now includes report generation and history summarization capabilities.
 
 ```mermaid
 graph TD
@@ -30,12 +32,27 @@ graph TD
     C -- CORS, JSON, Logging --> D{Auth Middleware};
     D -- /api/v1/** --> E{Subscription Middleware};
     E -- /api/v1/** --> F(Feature Router);
-    F -- /api/v1/featureX --> G[Feature X Controller];
-    G --> H(Feature X Service);
-    H --> I{Database (MongoDB)};
-    H --> J(External APIs);
-    H --> F;  // Response back up chain
-    G --> F;
+    F -- /api/v1/chat --> G_Chat[chat.controller];
+    subgraph Feature Slice (./src/features/chat)
+        G_Chat --> H_Chat(chat.service); // For session mgmt
+        H_Chat --> I{Database (MongoDB)};
+        H_Chat --> T(Cloud Tasks);
+        G_Chat --> TaskHandler(chat.taskHandler) // Entry point for worker
+        TaskHandler --> Agent(agent.service)
+        Agent -- uses --> PS(prompt.service);
+        Agent -- uses --> DS(dataset.service);
+        Agent -- uses --> CES(codeExecution.service);
+        Agent --> I; // Updates PromptHistory (with text & report code)
+        PS --> Claude(External APIs - Claude); // For reasoning, code gen, report gen
+        CES -- uses --> DS;
+        CES -- runs code --> Sandbox(vm Module);
+        Agent --> WS(Socket.IO Emitter);
+    end
+    I --> H_Chat;
+    T --> BE_Worker(POST /internal/chat-ai-worker);
+    BE_Worker --> TaskHandler;
+    H_Chat --> F;
+    G_Chat --> F;
     F --> E;
     E --> D;
     D --> C;
@@ -48,20 +65,22 @@ graph TD
         E
     end
 
-    subgraph Feature Slice (e.g., ./src/features/datasets)
-        G
-        H
-    end
-
-    subgraph Shared Infrastructure (./src/shared)
+    subgraph Shared Infrastructure (./src/shared, ./src)
         I
-        J
+        Claude
+        T
+        WS
+        DS
+        CES
         L(Error Handler)
     end
 
     %% Error Flow
-    G -- Error --> L;
-    H -- Error --> L;
+    G_Chat -- Error --> L;
+    H_Chat -- Error --> L;
+    TaskHandler -- Error --> L;
+    Agent -- Error --> L;
+    CES -- Error --> Agent; // Execution errors reported back
     F -- Error --> L;
     E -- Error --> L;
     D -- Error --> L;
@@ -69,34 +88,25 @@ graph TD
     L --> B;
 ```
 
-*   **Entry Point:** `backend/src/server.js` initializes the database connection (`./shared/db/connection.js`) and starts the Express server defined in `app.js`.
-*   **Application Core (`backend/src/app.js`):** Configures the Express app instance, applies global middleware (CORS, JSON parsing, request logging), mounts the main API router (`./routes.js`) under `/api/v1`, and sets up the global error handler (`./shared/middleware/error.handler.js`). See `backend/src/README.md`.
-*   **Routing (`backend/src/routes.js`):** Aggregates and mounts routers from individual feature slices onto specific sub-paths (e.g., `/auth`, `/datasets`, `/teams`).
-*   **Middleware (`backend/src/shared/middleware/`)**:
-    *   `auth.middleware.js` (`protect`): Verifies Firebase ID token, attaches `req.user`. See `README.md`.
-    *   `subscription.guard.js` (`requireActiveSubscription`): Checks `req.user` for active subscription status. See `README.md`.
-    *   `cloudTask.middleware.js` (`validateCloudTaskToken`): Validates OIDC tokens for requests from Cloud Tasks. See `README.md`.
-    *   `error.handler.js`: Global error handling. See `README.md`.
-    *   Feature-specific middleware (e.g., `backend/src/features/teams/team.middleware.js`) handles role checks like `isTeamMember`, `isTeamAdmin`.
-*   **Features (`backend/src/features/`)**: Contains self-contained feature logic (controllers, services, models, routes). See `backend/src/features/README.md` and individual feature READMEs for details on:
-    *   `auth`: Session creation/verification.
-    *   `chat`: Persistent chat history with contextual AI responses and code generation.
-    *   `dataQuality`: Asynchronous dataset audits using Cloud Tasks.
-    *   `datasets`: Metadata management, upload coordination (direct & proxy), access control.
-    *   `notifications`: Creating and managing user notifications.
+*   **Entry Point:** `backend/src/server.js` initializes DB, Socket.IO (`./src/socket.js`), and Express server (`app.js`).
+*   **Application Core (`backend/src/app.js`):** Configures Express, middleware, API router (`./routes.js`), error handler.
+*   **Routing (`backend/src/routes.js`):** Mounts feature routers.
+*   **Middleware (`backend/src/shared/middleware/`)**: Includes `auth`, `subscription`, `cloudTask`, `error` handlers.
+*   **Features (`backend/src/features/`)**: Contains feature logic.
+    *   `auth`: Session management.
+    *   `chat`: Handles persistent chat sessions. `agent.service.js` orchestrates reasoning and tool use (data awareness, code gen/exec, report gen). **Includes logic (`_prepareChatHistory`) to trigger history summarization via `prompt.service.js`**. `prompt.service.js` now includes `summarizeChatHistory` function.
+    *   `dataQuality`: Async dataset audits.
+    *   `datasets`: Metadata management, **provides raw data fetching (`getRawDatasetContent`) for code execution**. Used by agent tools.
+    *   `notifications`: User notifications.
     *   `subscriptions`: Dummy subscription management.
-    *   `teams`: Team creation, membership, invites, settings.
-    *   `users`: User profile and settings management.
-*   **Shared Modules (`backend/src/shared/`)**: Provides common infrastructure. See `backend/src/shared/README.md` and subdirectory READMEs for details on:
-    *   `config`: Environment variable loading and validation.
-    *   `db`: MongoDB connection setup.
-    *   `external_apis`: Initialized clients for Firebase Admin, GCS, Claude. **Requires service account files in `backend/` root.**
-    *   `utils`: Logging setup (`logger.js`).
-*   **Database Models:** Mongoose schemas are defined within their respective feature slices (e.g., `backend/src/features/users/user.model.js`, `backend/src/features/datasets/dataset.model.js`). Key models include `User`, `Dataset`, `Team`, `TeamMember`, `TeamInvite`, `Notification`, `PromptHistory`. Relationships are established via `mongoose.Schema.Types.ObjectId` refs.
-*   **Asynchronous Tasks:** The application uses Google Cloud Tasks (`@google-cloud/tasks`) for long-running background processing:
-    *   **Data Quality Audit:** Initiated via `POST /datasets/:id/quality-audit` and handled by `POST /internal/quality-audit-worker`.
-    *   **Chat AI Generation:** Initiated via `POST /chats/:sessionId/messages` and handled by `POST /internal/chat-ai-worker`.
-    *   See `backend/src/features/dataQuality/README.md` and `backend/src/features/chat/README.md` for implementation details.
+    *   `teams`: Team management.
+    *   `users`: User profile management.
+*   **Shared Modules (`backend/src/shared/`)**: Common infrastructure.
+    *   `services`: **Now includes `codeExecution.service.js` implementing the sandboxed `vm` execution.**
+    *   (Other shared: config, db, external_apis, utils - no change)
+*   **Socket.IO (`backend/src/socket.js`):** Initializes Socket.IO server, handles connection auth, provides `getIO()` and `emitToUser()`. Used by `agent.service.js` to emit real-time agent status updates.
+*   **Database Models:** Mongoose schemas (e.g., `User`, `Dataset`, `Team`, `ChatSession`, `PromptHistory`). `PromptHistory` now stores `aiGeneratedCode` (React report code).
+*   **Asynchronous Tasks:** Google Cloud Tasks triggers `POST /internal/chat-ai-worker`, which is handled by `chat.taskHandler.js` to initiate the `AgentOrchestrator`.
 
 ## 4. Frontend Architecture (`frontend/`)
 
@@ -111,15 +121,23 @@ graph LR
     B --> F(State Management);
     F -- Global --> G[Context API (Auth, Theme)];
     F -- Local --> H[Component State (useState)];
-    F -- Feature --> I[Custom Hooks (useFeatureX)];
+    F -- Feature --> I[Custom Hooks/Context (e.g., ChatContext)];
+    I --> ReportModal(ReportViewerModal) // Context renders modal
     B --> J{API Calls};
     J --> K(apiClient - Axios);
     K -- Request Interceptor --> L(Add Auth Token);
     L --> M[Backend API];
     M --> K;
     K -- Response Interceptor --> J;
-    J --> F; %% Update State
-    J --> B; %% Update UI
+    J --> F; 
+    J --> B; 
+
+    subgraph Real-time Updates
+       BE_Socket[Backend Socket.IO] -- agent:* / chat:message:* events --> FE_Socket(Frontend Socket Hook);
+       FE_Socket --> I; %% ChatContext updates state
+       I --> B; %% Trigger UI re-render
+       I -- controls --> ReportModal; // Context controls modal visibility/data
+    end
 
     subgraph Core Structure (./src)
         C
@@ -155,7 +173,7 @@ graph LR
 *   **State Management:**
     *   **Global:** React Context API for authentication (`AuthContext`) and theme (`ThemeContext`). Consumed via `useAuth` and `useTheme` hooks (`frontend/src/shared/hooks/`). See context and hook READMEs.
     *   **Feature/Server State:**
-        *   **Chat:** Managed primarily via `ChatContext` (`frontend/src/features/dashboard/context/ChatContext.jsx`), consumed with the `useChat` hook. Handles chat sessions, message history, loading states, sending messages, and real-time updates via Socket.IO events (`chat:message:processing`, `chat:message:fetching_data`, `chat:message:completed`, `chat:message:error`). Uses `useSocket` (`frontend/src/features/dashboard/hooks/useSocket.js`) for connection management.
+        *   **Chat:** Managed via `ChatContext` and `useChat` hook. Handles sessions, messages, loading states. **Crucially, now uses `useSocket` hook to listen for new `agent:*` events (`agent:thinking`, `agent:using_tool`, `agent:tool_result`, `agent:error`) in addition to the final `chat:message:completed` and `chat:message:error` events. Updates message-specific status based on these events.**
         *   **Other Features:** Often managed within feature-specific custom hooks (e.g., `useDatasets`, `useTeamInvites`, `useNotifications`) that handle API calls, loading, and error states. SWR or React Query could be alternatives for more complex caching/refetching needs.
     *   **Local UI State:** Managed within components using `useState`, `useReducer`.
 *   **API Interaction (`frontend/src/shared/services/apiClient.js`):**
@@ -306,90 +324,75 @@ sequenceDiagram
     FE->>FE: Renders DataQualityReportDisplay component
 ```
 
-### Chat Flow (Persistent Sessions)
+### Chat Flow (Agent Architecture - Phase 3 + Refinements)
 
 ```mermaid
 sequenceDiagram
-    participant FE_UI as Frontend UI (Dashboard/ChatPage)
+    participant FE_UI as Frontend UI
     participant FE_CTX as ChatContext
-    participant FE_Socket as Frontend Socket.IO Hook
+    participant FE_Socket as Frontend Socket Hook
     participant BE_API as Backend API
     participant CloudTask as Google Cloud Tasks
-    participant BE_Worker as BE Worker Endpoint
+    participant BE_Worker as Worker (chat.taskHandler)
+    participant Agent as AgentOrchestrator
+    participant PromptSvc as prompt.service
+    participant CodeExecSvc as codeExecution.service
+    participant DatasetSvc as dataset.service
     participant BE_Socket as Backend Socket.IO
-    participant Claude as Anthropic Claude API
-    participant GCS as Google Cloud Storage
+    participant LLM as Anthropic Claude API
+    participant Sandbox as VM Sandbox
+    participant ReportModal as ReportViewerModal (FE)
 
-    %% Session Handling (Simplified)
-    FE_UI->>FE_CTX: Load Sessions (uses GET /chats)
-    FE_CTX->>BE_API: GET /chats
-    BE_API-->>FE_CTX: 200 { data: [ChatSessions] }
-    FE_CTX->>FE_UI: Update sessions state
+    %% Sending Message (Same)
+    FE_UI->>FE_CTX: Send Message...
+    FE_CTX->>BE_API: POST /chats/:sessionId/messages...
+    BE_API-->>FE_CTX: 202 Accepted...
+    FE_CTX->>FE_UI: Add placeholders...
 
-    FE_UI->>FE_CTX: Create New Session (uses POST /chats)
-    FE_CTX->>BE_API: POST /chats
-    BE_API-->>FE_CTX: 201 { data: ChatSession }
-    FE_CTX->>FE_UI: Update sessions, set currentSession
+    %% Background Agent Processing
+    CloudTask->>BE_Worker: POST /internal/chat-ai-worker...
+    BE_Worker->>Agent: Instantiate & runAgentLoop...
+    Agent->>BE_Socket: Emit 'agent:thinking'...
+    BE_Socket-->>FE_Socket: event...
+    FE_Socket->>FE_CTX: Update state...
 
-    FE_UI->>FE_CTX: Select Session
-    FE_CTX->>BE_API: GET /chats/:sessionId/messages
-    BE_API-->>FE_CTX: 200 { data: [Messages] }
-    FE_CTX->>FE_UI: Update messages state
+    loop Agent Reasoning Cycle
+        Note over Agent: Fetch history, potentially summarize via PromptSvc->LLM
+        Agent->>PromptSvc: getLLMReasoningResponse(context_with_summary)
+        PromptSvc->>LLM: Call Claude API (Reasoning)
+        LLM-->>PromptSvc: Response (e.g., request generate_code)
+        PromptSvc-->>Agent: LLM Response
 
-    %% Sending a Message
-    FE_UI->>FE_CTX: Send Message (promptText, selectedDatasetIds?)
-    Note over FE_CTX: Checks if first message in session.
-    Note over FE_CTX: selectedDatasetIds only sent if first message.
-    FE_CTX->>BE_API: POST /chats/:sessionId/messages (promptText, selectedDatasetIds if first)
-    Note over BE_API: Creates user message + AI placeholder (PromptHistory).
-    Note over BE_API: Associates selectedDatasetIds with Session if first message.
-    Note over BE_API: Creates Cloud Task for AI processing (passes sessionDatasetIds).
-    BE_API-->>FE_CTX: 202 { data: { userMessage, aiMessage, updatedSession } }
-    FE_CTX->>FE_UI: Adds user/placeholder messages, updates session state (with associatedDatasetIds if first).
+        alt Tools (Data Fetch/Exec/Report Gen)
+            Agent->>BE_Socket: Emit agent:using_tool / agent:tool_result ...
 
-    %% Background AI Processing
-    CloudTask->>BE_Worker: POST /internal/chat-ai-worker (Payload: {..., aiMessageId, chatSessionId, sessionDatasetIds})
-    Note over BE_Worker: Validates token.
-    BE_Worker-->>CloudTask: 200 OK (Acknowledge receipt)
-
-    Note over BE_Worker: Builds context with chat history (PromptHistory).
-    Note over BE_Worker: Updates AI message status to 'generating_code'.
-    BE_Worker->>BE_Socket: Emit 'chat:message:processing' event ({ messageId, sessionId })
-    BE_Socket->>FE_Socket: WebSocket event
-    FE_Socket->>FE_CTX: Update message state (show processing for aiMessageId).
-
-    BE_Worker->>Claude: Create Message (With Chat History, context uses sessionDatasetIds implicitly).
-    Claude-->>BE_Worker: Code/Text Response
-
-    Note over BE_Worker: Updates AI message status to 'fetching_data'.
-    BE_Worker->>BE_Socket: Emit 'chat:message:fetching_data' event ({ messageId, sessionId })
-    BE_Socket->>FE_Socket: WebSocket event
-    FE_Socket->>FE_CTX: Update message state (show fetching data for aiMessageId).
-
-    BE_Worker->>GCS: Fetch content for sessionDatasetIds.
-    GCS-->>BE_Worker: Dataset content (or errors).
-
-    Note over BE_Worker: Updates AI message (PromptHistory) in DB with code, text, *reportDatasets*, status='completed'.
-    BE_Worker->>BE_Socket: Emit 'chat:message:completed' event (Payload: updated aiMessage object).
-    BE_Socket->>FE_Socket: WebSocket event
-    FE_Socket->>FE_CTX: Updates specific message in state with completed data.
-    FE_UI->>FE_UI: Renders completed message, potentially enabling 'View Report' button.
-
-    %% Error Handling Example
-    alt Processing Error
-        BE_Worker->>BE_Worker: Catches error
-        Note over BE_Worker: Updates AI message status to 'error', adds errorMessage.
-        BE_Worker->>BE_Socket: Emit 'chat:message:error' event ({ messageId, sessionId, error })
-        BE_Socket->>FE_Socket: WebSocket event
-        FE_Socket->>FE_CTX: Updates message state (show error).
+        else Final Answer ('_answerUserTool')
+            Note over Agent: Extract final answer text. Break Loop.
+        end
     end
 
-    %% Subsequent Message (Simplified - uses existing sessionDatasetIds)
-    FE_UI->>FE_CTX: Send Follow-up Message (promptText)
-    FE_CTX->>BE_API: POST /chats/:sessionId/messages (promptText)
-    Note over BE_API: Uses existing sessionDatasetIds for task payload.
-    BE_API-->>FE_CTX: 202 { data: { userMessage, aiMessage, updatedSession } }
-    Note over CloudTask: Processing continues as above, using session context.
+    alt Agent Loop Completed Successfully
+        Note over Agent: Update PromptHistory (status='completed', aiResponseText, *aiGeneratedCode*)
+        Agent-->>BE_Worker: Return { status: 'completed', ... }
+        BE_Worker->>BE_Socket: Emit 'chat:message:completed' { message: finalAiMessage ... }
+        BE_Socket-->>FE_Socket: event...
+        FE_Socket->>FE_CTX: Update message state (inc. aiGeneratedCode)
+        FE_UI->>FE_UI: Render final message + "View Report" button if code exists
+
+        opt User Clicks "View Report"
+            FE_UI->>FE_CTX: openReportModal({ code, datasets })
+            FE_CTX->>ReportModal: Set isOpen=true, reportInfo={...}
+            ReportModal->>ReportModal: Render ReportViewer iframe...
+        end
+
+    else Agent Loop Error or Timeout
+        Note over Agent: Update PromptHistory (status='error', etc.)
+        Agent->>BE_Socket: Emit 'agent:error'...
+        Agent-->>BE_Worker: Return { status: 'error', ... }
+        BE_Worker->>BE_Socket: Emit 'chat:message:error'...
+        BE_Socket-->>FE_Socket: event...
+        FE_Socket->>FE_CTX: Update message state...
+    end
 ```
 
 ## 6. Environment & Configuration

@@ -217,3 +217,56 @@ This document lays out the technical implementation plan to bring this vision to
 *   **Data Access:** Ensure all tool implementations rigorously enforce user/team permissions before accessing datasets or schemas (`dataset.service.js` must handle this).
 
 This plan provides a detailed roadmap. Each step, especially involving security or LLM interaction, will require careful design, implementation, and thorough testing.
+
+## 10. Implementation Status & Next Steps (As of Current Date)
+
+**Progress Summary:**
+
+*   **Phase 1 (Agent Foundation & Data Awareness): COMPLETE**
+    *   Backend agent orchestration loop (`agent.service.js`) established.
+    *   Basic data awareness tools (`list_datasets`, `get_dataset_schema`) implemented.
+    *   Agent-specific system prompts created.
+    *   Task handler (`chat.taskHandler.js`) refactored to use the agent service.
+    *   Agent status WebSocket events (`agent:thinking`, `agent:using_tool`, etc.) implemented.
+    *   Frontend `ChatContext` and `MessageBubble` updated to listen for and display agent statuses.
+*   **Phase 2 (Internal Data Extraction & Processing): COMPLETE**
+    *   Code execution service (`codeExecution.service.js`) created using Node.js `vm` (with noted security caveats).
+    *   Dataset service updated to provide raw content (`getRawDatasetContent`).
+    *   Agent service enhanced with `generate_data_extraction_code` and `execute_backend_code` tools.
+    *   Prompt service updated with sandboxed code generation capability (`generateSandboxedCode`).
+    *   System prompts updated to include instructions for code generation/execution tools.
+    *   Frontend `MessageBubble` updated with status text/icons for new tools.
+*   **Phase 3 (Frontend Visualization & Reporting): COMPLETE**
+    *   Agent service enhanced with `generate_report_code` tool.
+    *   Prompt service updated with report code generation capability (`generateReportCode`).
+    *   System prompts updated to guide report generation.
+    *   Frontend `ChatContext` updated to manage report modal state.
+    *   Frontend `MessageBubble` updated to display "View Report" button conditionally.
+    *   Frontend `ReportViewer` integrated into a modal launched from the chat interface.
+*   **Phase 4 (Refinement & Advanced Capabilities): PARTIALLY IMPLEMENTED**
+    *   **Error Handling:** Basic tool retry logic added to `agent.service.js`. Fallback responses for max iterations/unexpected errors implemented.
+    *   **Context Management:** Basic history summarization logic added (`_prepareChatHistory` calling `promptService.summarizeChatHistory`) when history length exceeds a threshold.
+
+**Immediate Next Steps / Priorities:**
+
+1.  **Security Hardening (CRITICAL):**
+    *   **Replace `vm` Sandbox:** Design and implement a truly secure sandboxing solution for `execute_backend_code`. Options include:
+        *   **Docker Containers:** Spin up ephemeral Docker containers to execute the code. Provides strong isolation but higher overhead.
+        *   **MicroVMs (Firecracker):** Lighter weight than full VMs, good isolation. More complex setup.
+        *   **gVisor:** Application kernel providing container isolation without full virtualization.
+        *   **Third-Party Libraries:** Evaluate maintained libraries specifically designed for untrusted code execution (e.g., `isolated-vm` - investigate its current status and security posture).
+    *   **Resource Limiting:** Ensure the chosen solution enforces strict limits on CPU time, memory usage, and network access.
+2.  **Testing & Prompt Engineering:**
+    *   Conduct thorough testing of the agent's reasoning, tool usage, code generation, and error handling across various scenarios and datasets.
+    *   Iteratively refine all system prompts (`agent reasoning`, `sandboxed code gen`, `report code gen`, `summarization`) based on observed performance, failures, and desired output quality. Use few-shot examples where helpful.
+3.  **Advanced Context Management:**
+    *   Implement more sophisticated history summarization, potentially using a dedicated LLM call or more intelligent context window management techniques.
+    *   Improve summarization of tool results, especially for large data returned from code execution.
+
+**Future Refinements (Post-Security Hardening):**
+
+*   **Advanced Error Recovery:** Enable the agent LLM to analyze tool errors and potentially retry with modified arguments or ask the user for clarification.
+*   **Advanced Tools:** Implement integrations with external financial data APIs or add more complex built-in analysis functions as tools.
+*   **Cost/Performance Monitoring:** Implement tracking for LLM token usage per turn/session and tool execution times.
+*   **User Feedback Mechanism:** Add UI elements for users to rate agent responses (thumbs up/down) and provide qualitative feedback to inform prompt tuning and identify issues.
+*   **UI/UX Polish:** Refine the display of agent statuses, error messages, and report viewing experience based on user testing.

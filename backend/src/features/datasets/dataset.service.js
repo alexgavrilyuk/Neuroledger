@@ -303,11 +303,97 @@ const deleteDatasetById = async (datasetId, userId) => {
     }
 };
 
+/**
+ * Securely retrieves the raw content of a dataset file from GCS.
+ * Performs access checks to ensure the user can access the dataset (owner or team member).
+ * 
+ * @param {string} datasetId - The MongoDB ObjectId of the dataset.
+ * @param {string} userId - The MongoDB ObjectId of the user requesting access.
+ * @returns {Promise<string>} - The raw file content as a UTF-8 string.
+ * @throws {Error} - If dataset not found, access denied, or GCS fetch fails.
+ */
+const getRawDatasetContent = async (datasetId, userId) => {
+    logger.debug(`Attempting to fetch raw content for dataset ${datasetId} by user ${userId}`);
+    
+    // 1. Find Dataset Metadata and Perform Access Check
+    const dataset = await Dataset.findById(datasetId).lean();
+
+    if (!dataset) {
+        logger.warn(`Dataset not found: ${datasetId}`);
+        throw new Error('Dataset not found.');
+    }
+
+    let hasAccess = false;
+    // Check if user is the owner
+    if (dataset.ownerId.toString() === userId.toString()) {
+        hasAccess = true;
+    }
+    // If not owner, check if it's a team dataset and user is a member
+    else if (dataset.teamId) {
+        const teamMember = await TeamMember.findOne({ teamId: dataset.teamId, userId }).lean();
+        if (teamMember) {
+            hasAccess = true;
+        }
+    }
+
+    if (!hasAccess) {
+        logger.warn(`User ${userId} access denied for dataset ${datasetId}.`);
+        throw new Error('Access denied to this dataset.');
+    }
+
+    if (!dataset.gcsPath) {
+         logger.error(`Dataset ${datasetId} is missing GCS path.`);
+         throw new Error('Dataset file path is missing.');
+    }
+
+    // 2. Fetch from GCS
+    try {
+        const bucket = getBucket();
+        const file = bucket.file(dataset.gcsPath);
+        const [exists] = await file.exists();
+        if (!exists) {
+            logger.error(`GCS file not found for dataset ${datasetId} at path: ${dataset.gcsPath}`);
+            throw new Error(`Dataset file not found at path: ${dataset.gcsPath}`);
+        }
+
+        // Download the entire file content
+        // Consider adding size limits or streaming for very large files in the future
+        const [buffer] = await file.download();
+        const content = buffer.toString('utf8');
+        logger.info(`Successfully fetched raw content for dataset ${datasetId} (Size: ${Buffer.byteLength(content, 'utf8')} bytes)`);
+        return content;
+
+    } catch (fetchErr) {
+        logger.error(`Failed to fetch GCS content for dataset ${datasetId} (Path: ${dataset.gcsPath}): ${fetchErr.message}`, { fetchErr });
+        throw new Error(`Failed to retrieve dataset content: ${fetchErr.message}`);
+    }
+};
+
 module.exports = {
     generateUploadUrl,
     createDatasetMetadata,
     listDatasetsByUser,
+    listAccessibleDatasets: listDatasetsByUser,
+    getDatasetSchema: async (datasetId, userId) => {
+        const dataset = await Dataset.findById(datasetId).select('schemaInfo columnDescriptions description ownerId teamId').lean();
+         if (!dataset) throw new Error('Dataset not found');
+        // Access Check (owner or team member)
+        let hasAccess = false;
+        if (dataset.ownerId.toString() === userId.toString()) {
+            hasAccess = true;
+        } else if (dataset.teamId) {
+            const teamMember = await TeamMember.findOne({ teamId: dataset.teamId, userId }).lean();
+            if (teamMember) hasAccess = true;
+        }
+        if (!hasAccess) throw new Error('Access denied');
+        return {
+            schemaInfo: dataset.schemaInfo || [],
+            columnDescriptions: dataset.columnDescriptions || {},
+            description: dataset.description || ''
+        };
+    },
     parseHeadersFromGCS,
     getSignedUrlForDataset,
-    deleteDatasetById
+    deleteDatasetById,
+    getRawDatasetContent
 };

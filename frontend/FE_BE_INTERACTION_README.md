@@ -317,7 +317,7 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ---
 
-### Feature: Chat
+### Feature: Chat (Agent Architecture - Phase 3 + Refinements)
 
 *   **`POST /api/v1/chats`**
     *   **Description:** Creates a new chat session for the authenticated user.
@@ -356,7 +356,7 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400` (Invalid ID), `401`, `403`, `404` (Not found or inaccessible), `500`.
 
 *   **`POST /api/v1/chats/{sessionId}/messages`**
-    *   **Description:** Sends a user message, creates an AI message placeholder, and queues a background task (Cloud Task) for generating the AI response. Returns immediately. **For the first message in a session, `selectedDatasetIds` must be provided; these IDs become associated with the session. For subsequent messages, `selectedDatasetIds` is ignored, and the backend uses the session's associated datasets.**
+    *   **Description:** Sends a user message... Agent now attempts to **summarize long chat histories** and uses tools...
     *   **Auth:** Required (`protect`, `requireActiveSubscription`).
     *   **Request Params:** `sessionId` (MongoDB ObjectId).
     *   **Request Body:** `{ "promptText": string, "selectedDatasetIds"?: string[] }` (`promptText` required, `selectedDatasetIds` required only for the first message).
@@ -364,7 +364,7 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400` (Invalid ID, Missing `promptText`, Missing `selectedDatasetIds` on first message), `401`, `403`, `404` (Session not found or inaccessible), `500`.
 
 *   **`GET /api/v1/chats/{sessionId}/messages`**
-    *   **Description:** Gets messages (both user and AI) for a specific chat session, sorted by creation date ascending.
+    *   **Description:** Gets messages (user messages and final AI agent responses). **AI responses may include generated React code (`aiGeneratedCode`) for visualization.**
     *   **Auth:** Required (`protect`, `requireActiveSubscription`).
     *   **Request Params:** `sessionId` (MongoDB ObjectId).
     *   **Query Params:** `limit` (number, default 50), `skip` (number, default 0).
@@ -379,7 +379,7 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400` (Invalid IDs), `401`, `403`, `404` (Message/Session not found or inaccessible), `500`.
 
 *   **`POST /api/v1/internal/chat-ai-worker`**
-    *   **Description:** Internal worker endpoint invoked by Cloud Tasks to process AI message generation asynchronously. Fetches dataset content based on `sessionDatasetIds`, generates AI response, and updates the AI `PromptHistory` record. Emits socket events (`chat:message:processing`, `chat:message:fetching_data`, `chat:message:completed`, `chat:message:error`). **Not for direct frontend use.**
+    *   **Description:** Internal worker endpoint invoking the Agent Orchestrator. Agent now performs **history summarization** and has access to report generation tools.
     *   **Auth:** Internal - Validated via Cloud Tasks OIDC Token (`validateCloudTaskToken` middleware).
     *   **Request Body:** `{ "sessionId": string, "userId": string, "userMessageId": string, "aiMessageId": string, "sessionDatasetIds": string[] }` (Payload from the task queue, including the dataset IDs associated with the session).
     *   **Success (200 OK):** `{ status: 'success', message: 'Task received' }` (Returned immediately, actual processing happens in background).
@@ -420,7 +420,7 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ## 5. Key Data Models (Typescript Interfaces)
 
-*(Note: These interfaces represent the shape of data exchanged via the API. Backend models may have additional methods or virtuals.)*
+*(Note: These interfaces represent the shape of data exchanged via the API/WebSockets. Backend models may have additional methods or virtuals.)*
 
 ### SubscriptionInfo (Part of User)
 ```typescript
@@ -589,34 +589,64 @@ interface ChatSession {
   title: string; // User-defined or default title
   associatedDatasetIds?: string[]; // Datasets used for context in this session (set by first message)
   createdAt: string; // ISO Date string
-  lastActivityAt: string; // ISO Date string (updated on new message)
-  // Removed messageIds as frontend context manages message list
+  lastActivityAt: string; // ISO Date string (updated on new message or agent completion)
 }
 ```
 
-### PromptHistory (Used for Chat Messages & Standalone Prompts)
+### PromptHistory (Chat Message - User or AI Agent Response)
 ```typescript
 interface PromptHistory {
   _id: string;
-  userId: string; // User ObjectId
-  teamId?: string | null; // Team ObjectId or null
-  chatSessionId?: string | null; // ChatSession ObjectId (null for standalone prompts)
-  promptText?: string; // User's input (null/empty for AI message)
-  messageType: 'user' | 'ai_report'; // Type indicator
-  // Remove 'role', use messageType instead
-  selectedDatasetIds?: string[]; // Datasets used as context *for this specific message generation*
-  contextSent?: string; // (Optional) Backend debugging: actual text context sent to AI
-  // Remove systemPrompt, contextSummary, modelUsed, stopReason, tokenUsage - keep backend-side or simplify
-  aiGeneratedCode?: string; // The raw code response from AI (for reports)
-  aiResponseText?: string; // The raw text response from AI (if no code)
-  reportDatasets?: Array<{ name: string, content: string | null, error: string | null }>; // Fetched dataset content for rendering
-  status: 'processing' | 'generating_code' | 'fetching_data' | 'completed' | 'error' | 'error_generating' | 'error_fetching_data'; // Updated statuses
-  errorMessage?: string; // Error message if status is 'error'
+  userId: string; 
+  teamId?: string | null;
+  chatSessionId: string; 
+  promptText?: string; 
+  messageType: 'user' | 'ai_report';
+  aiResponseText?: string; // Final textual response/summary from the agent
+  aiGeneratedCode?: string; // <<< Contains generated React code if a report was created
+  status: 'processing' | 'completed' | 'error';
+  errorMessage?: string;
+  agentSteps?: Array<{ 
+      tool: string; // Includes Phase 3: generate_report_code
+      args: object;
+      resultSummary: string;
+  }>;
   createdAt: string; // ISO Date string
+  // reportDatasets field might be populated by the task handler or agent if needed for rendering
+  reportDatasets?: Array<{ name: string, content: string | null, error: string | null }>; 
 }
 ```
 
-## 6. Dataset File Upload Flow
+## 6. WebSocket Events (Chat Feature - Agent Architecture)
+
+The following events are emitted by the backend (`agent.service.js` or `chat.taskHandler.js`) to the specific user's room (`user:<userId>`) during AI message processing.
+
+*   **`agent:thinking`**
+    *   **Payload:** `{ messageId: string, sessionId: string }`
+    *   **Description:** Emitted when the agent starts processing a user message and begins its reasoning loop.
+    *   **Frontend Action:** Display a "Thinking..." status for the corresponding AI message placeholder.
+*   **`agent:using_tool`**
+    *   **Payload:** `{ messageId: string, sessionId: string, toolName: string, args: object }`
+    *   **Description:** Emitted before the agent executes a tool (e.g., `list_datasets`, `get_dataset_schema`, **`generate_data_extraction_code`**, **`execute_backend_code`**).
+    *   **Frontend Action:** Update the AI message status to indicate which tool is being used (e.g., "Accessing dataset list...", "Getting schema for 'Dataset X'...").
+*   **`agent:tool_result`**
+    *   **Payload:** `{ messageId: string, sessionId: string, toolName: string, resultSummary: string }`
+    *   **Description:** Emitted after a tool execution completes (successfully or with an error). `resultSummary` contains a brief summary or error message.
+    *   **Frontend Action:** Optionally update the status (e.g., revert to "Thinking..." or show a brief success/error indicator) before the next agent step or final response.
+*   **`agent:error`**
+    *   **Payload:** `{ messageId: string, sessionId: string, error: string }`
+    *   **Description:** Emitted if a significant error occurs within the agent's main loop (outside of a specific tool error, which is reported via `agent:tool_result`).
+    *   **Frontend Action:** Display an error status for the AI message. This often precedes the final `chat:message:error` event.
+*   **`chat:message:completed`**
+    *   **Payload:** `{ message: PromptHistory, sessionId: string }`
+    *   **Description:** Emitted by the task handler after the agent loop successfully finishes. The `message` object is the final `PromptHistory` record, containing `aiResponseText` and `agentSteps`.
+    *   **Frontend Action:** Replace the AI message placeholder with the final content and status.
+*   **`chat:message:error`**
+    *   **Payload:** `{ messageId: string, sessionId: string, error: string }`
+    *   **Description:** Emitted by the task handler if the agent loop fails or an error occurs after the loop.
+    *   **Frontend Action:** Update the corresponding AI message to display a final error state.
+
+## 7. Dataset File Upload Flow
 
 ### Dataset Upload - Proxy Method (Recommended)
 1.  Frontend creates `FormData` with the `file` and optional `teamId`.
