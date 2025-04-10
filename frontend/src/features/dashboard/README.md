@@ -4,7 +4,7 @@
 
 This feature slice represents the main authenticated area where users interact via a chat interface. It handles rendering AI-generated React reports within a **sandboxed `<iframe>`** and manages persistent chat sessions.
 
-### Core Flow (Merged Dashboard & Chat)
+### Core Flow
 
 1.  **Routing & Layout:** `/dashboard` route renders `DashboardPage` within `AppLayout`, with chat sessions displayed in the `Sidebar`.
 2.  **Page (`pages/DashboardPage.jsx`):**
@@ -37,17 +37,26 @@ This feature slice represents the main authenticated area where users interact v
     *   `MessageBubble.jsx`: Renders individual user and AI messages with appropriate styling.
     *   `PromptInput.jsx`: Handles message input and dataset selection.
     *   `ProgressIndicator.jsx`: Shows processing status for AI responses.
+    *   `ChatSessionItem.jsx`: Displays a single chat session in the sidebar list.
+    *   `ChatSessionList.jsx`: Renders a list of chat sessions with create/select functionality.
+    *   `ChatMessage.jsx`: Displays a message with appropriate styling and actions.
+    *   `ChatDetail.jsx`: Renders the main chat area with messages and input.
+    *   `ChatInput.jsx`: Provides text input area with dataset selection for chat.
+*   **`context/`**:
+    *   `ChatContext.jsx`: Provides state management for chat sessions and messages.
 *   **`hooks/`**: 
-    *   `usePromptSubmit.js`: (Note: Based on analysis, this might be legacy or replaced by chat context logic. Requires review for potential removal.)
-    *   `useChatHistory.js`: (Note: Based on analysis, this might be legacy or replaced by chat context logic. Requires review for potential removal.)
+    *   `useSocket.js`: Manages Socket.IO connections for real-time updates.
+    *   `usePromptSubmit.js`: Handles submitting prompts and processing AI responses (legacy but still used).
+    *   `useChatHistory.js`: Manages chat message history (legacy but still used).
+*   **`services/`**:
+    *   `chat.api.js`: API client functions for chat operations.
 *   **`pages/`**: 
     *   `DashboardPage.jsx`: Main container component integrating all chat and report functionalities.
+    *   `ChatPage.jsx`: Standalone chat page for dedicated chat interface.
 *   **`README.md`**: This file.
 
 ### Dependencies
 
-*   `features/chat/context/ChatContext`: Provides chat sessions, messages, and message operations.
-*   `features/chat/hooks/useSocket`: Manages Socket.IO connections for real-time updates.
 *   `features/report_display/components/ReportViewer`: Renders reports in a sandboxed iframe.
 *   `features/dataset_management/hooks/useDatasets`: Fetches available datasets.
 *   `shared/components/Sidebar`: Contains chat session list and navigation.
@@ -55,9 +64,20 @@ This feature slice represents the main authenticated area where users interact v
 
 ### State Management
 
-*   `useChat` hook manages sessions, messages, and API interactions.
-*   `DashboardPage` manages report modal visibility and the `reportInfo` to pass to the modal.
-*   `ReportViewer` manages the iframe loading and internal status states.
+*   **Primary State Management:** 
+    *   `ChatContext` provides the main state management via the `useChat` hook.
+    *   Manages sessions, messages, and API interactions.
+    *   Handles WebSocket event subscriptions for real-time updates.
+
+*   **Component-Level State:**
+    *   `DashboardPage` manages report modal visibility and reportInfo.
+    *   `ChatSessionItem` manages session editing/deletion UI state.
+    *   `PromptInput` handles input field state and dataset selection.
+    *   `ReportViewer` manages iframe loading and status states.
+    
+*   **Legacy Hooks (Still Used):**
+    *   `usePromptSubmit` manages the prompt submission process and data processing for reports.
+    *   `useChatHistory` provides utility functions for chat history operations.
 
 ### User Interface
 

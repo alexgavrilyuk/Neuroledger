@@ -1,5 +1,5 @@
 # FE_BE_INTERACTION_README.md
-# ** UPDATED FILE - Added Dataset Deletion, Proxy Upload, and Team Access for Datasets **
+# ** UPDATED FILE - Dataset Deletion, Proxy Upload, Team Access, and Chat/Prompt Integration **
 
 # NeuroLedger: Frontend / Backend API Interaction
 
@@ -313,6 +313,7 @@ This document defines the contract for communication between the NeuroLedger fro
         }
         ```
     *   **Other Errors:** `400` (Bad request), `401`, `403` (Subscription inactive).
+    *   **Note:** This endpoint is implemented in the Chat feature's routes.
 
 ---
 

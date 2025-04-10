@@ -80,11 +80,10 @@ graph TD
     *   Feature-specific middleware (e.g., `backend/src/features/teams/team.middleware.js`) handles role checks like `isTeamMember`, `isTeamAdmin`.
 *   **Features (`backend/src/features/`)**: Contains self-contained feature logic (controllers, services, models, routes). See `backend/src/features/README.md` and individual feature READMEs for details on:
     *   `auth`: Session creation/verification.
-    *   `chat`: Persistent chat history with contextual AI responses.
+    *   `chat`: Persistent chat history with contextual AI responses and code generation.
     *   `dataQuality`: Asynchronous dataset audits using Cloud Tasks.
     *   `datasets`: Metadata management, upload coordination (direct & proxy), access control.
     *   `notifications`: Creating and managing user notifications.
-    *   `prompts`: AI interaction (Claude) for code generation.
     *   `subscriptions`: Dummy subscription management.
     *   `teams`: Team creation, membership, invites, settings.
     *   `users`: User profile and settings management.
@@ -156,7 +155,7 @@ graph LR
 *   **State Management:**
     *   **Global:** React Context API for authentication (`AuthContext`) and theme (`ThemeContext`). Consumed via `useAuth` and `useTheme` hooks (`frontend/src/shared/hooks/`). See context and hook READMEs.
     *   **Feature/Server State:**
-        *   **Chat:** Managed primarily via `ChatContext` (`frontend/src/features/chat/context/ChatContext.jsx`), consumed with the `useChat` hook. Handles chat sessions, message history, loading states, sending messages, and real-time updates via Socket.IO events (`chat:message:processing`, `chat:message:fetching_data`, `chat:message:completed`, `chat:message:error`). Uses `useSocket` (`frontend/src/features/chat/hooks/useSocket.js`) for connection management.
+        *   **Chat:** Managed primarily via `ChatContext` (`frontend/src/features/dashboard/context/ChatContext.jsx`), consumed with the `useChat` hook. Handles chat sessions, message history, loading states, sending messages, and real-time updates via Socket.IO events (`chat:message:processing`, `chat:message:fetching_data`, `chat:message:completed`, `chat:message:error`). Uses `useSocket` (`frontend/src/features/dashboard/hooks/useSocket.js`) for connection management.
         *   **Other Features:** Often managed within feature-specific custom hooks (e.g., `useDatasets`, `useTeamInvites`, `useNotifications`) that handle API calls, loading, and error states. SWR or React Query could be alternatives for more complex caching/refetching needs.
     *   **Local UI State:** Managed within components using `useState`, `useReducer`.
 *   **API Interaction (`frontend/src/shared/services/apiClient.js`):**
@@ -172,8 +171,7 @@ graph LR
 *   **Features (`frontend/src/features/`)**: Contain feature-specific pages, components, and hooks. See `frontend/src/features/README.md` and individual feature READMEs for details on:
     *   `account_management`: Layout/navigation for account sections.
     *   `auth`: Login/Signup forms and pages.
-    *   `chat`: Provides `ChatContext`, `useSocket` hook, and components like `ChatSessionList`, `ChatDetail`, `ChatMessage`, `ChatInput` for a potential standalone chat interface (if used outside the dashboard).
-    *   `dashboard`: Main application view after login. Integrates the chat functionality using `ChatContext`. Includes `ChatInterface` for displaying messages (`MessageBubble`) and `PromptInput` for user input and dataset selection (which becomes locked after the first message in a session). Triggers report display via modals.
+    *   `dashboard`: Main application view after login. Includes both standalone `ChatPage` and the integrated chat functionality in `DashboardPage`. The dashboard provides `ChatContext`, `useSocket` hook, and components for displaying messages, managing chat sessions, and enabling dataset-powered AI analysis. The `ChatInterface` displays messages while `PromptInput` handles user input and dataset selection (which becomes locked after the first message in a session). Triggers report display via modals.
     *   `dataQuality`: Components for displaying audit status and reports.
     *   `dataset_management`: Dataset upload, list, detail page, context editor.
     *   `notifications`: Notification bell and list display.
