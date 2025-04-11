@@ -209,10 +209,13 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     **TASK:**
     Write a Node.js script that:
     1.  Takes the \`inputData\` array of objects.
-    2.  Performs the analysis using \`inputData\` to achieve the goal: "${analysisGoal}"
-    3.  Constructs a result object that **STRICTLY ADHERES** to the REQUIRED OUTPUT STRUCTURE specified below. Include all keys, even if the value is null, 0, or an empty array, unless it is truly optional (like fields within anomalies). **Use explicit key-value pairs; DO NOT use shorthand property names.**
-    4.  Calls \`sendResult(result)\` with the structured result object.
-    5.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
+    2.  **Includes robust date parsing:** Create a helper function (e.g., \`parseDateRobustly\`) that attempts to parse date strings. If the input is empty, null, or cannot be parsed into a valid Date object (even after trying common formats like YYYY-MM-DD, MM/DD/YYYY), the helper function MUST return \`null\`. DO NOT default to the epoch date (1970).
+    3.  Processes \`inputData\`: Map over \`inputData\`, use the robust date parser, and parse numeric values carefully. 
+    4.  **Filters invalid data:** After mapping, filter the processed data array to include ONLY rows where the parsed date is NOT \`null\`.
+    5.  Performs the analysis using the filtered data to achieve the goal: "${analysisGoal}"
+    6.  Constructs a result object that **STRICTLY ADHERES** to the REQUIRED OUTPUT STRUCTURE specified below. Include all keys, even if the value is null, 0, or an empty array, unless it is truly optional (like fields within anomalies). Use explicit key-value pairs; DO NOT use shorthand property names.
+    7.  Calls \`sendResult(result)\` with the structured result object.
+    8.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
 
     **REQUIRED OUTPUT STRUCTURE (for the object passed to sendResult):**
     ${requiredOutputStructure}
