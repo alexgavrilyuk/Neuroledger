@@ -1,5 +1,6 @@
 // frontend/src/features/dashboard/components/MessageBubble.jsx
 import React, { useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
 // Import Heroicons separately
 import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid'; 
 // Import React Icons (Font Awesome) separately
@@ -117,7 +118,9 @@ const MessageBubble = ({ message, onViewReport }) => {
         if (isReportAvailable) {
             return (
                 <div className="space-y-3">
-                    <p className="leading-relaxed">{message.aiResponseText || "Report generated."}</p>
+                    <div className="prose prose-sm dark:prose-invert max-w-none">
+                        <ReactMarkdown>{message.aiResponseText || "Report generated."}</ReactMarkdown>
+                    </div>
                     <div className="flex items-center mt-2">
                         <Button
                             variant="primary"
@@ -149,16 +152,26 @@ const MessageBubble = ({ message, onViewReport }) => {
         // --- Handle Regular Text Content (User or Completed AI) --- 
         const displayText = message.promptText || message.aiResponseText || "";
         if (displayText) {
-            return (
-                <div className="leading-relaxed">
-                    {displayText.split('\n').map((line, index, arr) => (
-                        <React.Fragment key={index}>
-                            {line || (index > 0 && index < arr.length - 1 ? '\u00A0' : '')}
-                            {index < arr.length - 1 && <br />}
-                        </React.Fragment>
-                    ))}
-                </div>
-            );
+            if (isUser) {
+                // Keep plain text rendering for user messages
+                return (
+                    <div className="leading-relaxed">
+                        {displayText.split('\n').map((line, index, arr) => (
+                            <React.Fragment key={index}>
+                                {line || (index > 0 && index < arr.length - 1 ? '\u00A0' : '')}
+                                {index < arr.length - 1 && <br />}
+                            </React.Fragment>
+                        ))}
+                    </div>
+                );
+            } else {
+                // Use ReactMarkdown for AI messages
+                return (
+                    <div className="prose prose-sm dark:prose-invert max-w-none">
+                        <ReactMarkdown>{displayText}</ReactMarkdown>
+                    </div>
+                );
+            }
         }
 
         // Fallback
