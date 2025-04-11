@@ -363,17 +363,17 @@ class AgentOrchestrator {
                  return { status: 'error', error: 'Agent loop finished without final answer' };
             }
 
-            // 5. Finalize: Update the PromptHistory record
+            // 5. Finalize: Update the PromptHistory record with the potentially corrected answer
             await this._updatePromptHistoryRecord(
                 'completed',
-                this.turnContext.finalAnswer,
+                this.turnContext.finalAnswer, // Use the original LLM final answer
                 null, // No error message
                 this.turnContext.generatedReportCode // Pass generated code
             );
             logger.info(`[Agent Loop ${this.sessionId}] Completed successfully.`);
             return { 
                 status: 'completed', 
-                aiResponseText: this.turnContext.finalAnswer, 
+                aiResponseText: this.turnContext.finalAnswer, // Return original LLM final answer
                 // Optionally return code here too? Task handler re-fetches anyway.
                 // aiGeneratedCode: this.turnContext.generatedReportCode 
             };
@@ -447,6 +447,7 @@ class AgentOrchestrator {
             availableTools: this._getToolDefinitions(),
             userContext: this.turnContext.userContext, // User settings context
             teamContext: this.turnContext.teamContext, // Team settings context
+            analysisResult: this.turnContext.intermediateResults.analysisResult || null,
         };
         logger.debug('[Agent Loop] Prepared LLM Context', { stepsCount: context.currentTurnSteps.length, historyLength: this.turnContext.chatHistoryForSummarization.length });
         return context;
@@ -903,51 +904,65 @@ class AgentOrchestrator {
         }
     }
 
-    /** Tool: Generate Report Code */
+    /** Tool: Generate React Report Code */
     async _generateReportCodeTool(args) {
-        const { analysis_summary, analysis_result } = args;
         logger.info(`Executing tool: generate_report_code`);
-        if (!analysis_summary || typeof analysis_summary !== 'string') {
-            return { error: 'Missing or invalid argument: analysis_summary (string) is required' };
-        }
-        if (!analysis_result || typeof analysis_result !== 'object' || analysis_result === null) {
-            return { error: 'Missing or invalid argument: analysis_result (object) is required' };
-        }
-        try {
-            const result = await promptService.generateReportCode({
-                analysisSummary: analysis_summary,
-                dataJson: analysis_result
-            });
-             // ---- ADD DEBUG LOG ----
-            console.log('[Agent Tool _generateReportCodeTool] Raw Generated React Code:', result?.react_code); // Log raw code
-             // ---- END DEBUG LOG ----
+        // --- ROBUSTNESS FIX: Force use of actual analysis result from context --- 
+        const actualAnalysisResult = this.turnContext.intermediateResults.analysisResult;
+        const analysisSummaryArg = args?.analysis_summary;
 
-            // ---- ADD CLEANING STEP ----
+        if (!actualAnalysisResult) {
+            logger.error('_generateReportCodeTool called, but no actual analysis result found in context.');
+            return { error: 'Cannot generate report: Analysis results are missing.' };
+        }
+        if (!analysisSummaryArg || typeof analysisSummaryArg !== 'string') {
+             logger.warn('_generateReportCodeTool called without a valid analysis_summary argument from LLM. Using generic summary.');
+            // Provide a default/generic summary if LLM fails to provide one
+            // analysisSummaryArg = 'Analysis of the provided dataset.'; 
+            // OR return error if summary is deemed critical
+            return { error: 'Cannot generate report: Analysis summary is missing or invalid.' };
+        }
+
+        // Use the ACTUAL result from context, ignore args.analysis_result from LLM
+        const reportArgs = {
+            analysisSummary: analysisSummaryArg, 
+            dataJson: actualAnalysisResult // Force the correct data!
+        };
+
+        // Call the prompt service with the CORRECT, verified data
+        // The promptService.generateReportCode function itself returns { react_code: ... } or throws an error
+        try {
+            const result = await promptService.generateReportCode(reportArgs);
+            
+            // Log and clean the generated code here before returning and storing
             let cleanedCode = result?.react_code;
             if (cleanedCode && typeof cleanedCode === 'string') {
-                // Regex to match optional ```json, ```javascript, or ``` fences
+                console.log('[Agent Tool _generateReportCodeTool] Raw Generated React Code:', cleanedCode); 
                 const codeFenceRegex = /^```(?:javascript|js|json)?\s*([\s\S]*?)\s*```$/m;
                 const match = cleanedCode.match(codeFenceRegex);
                 if (match && match[1]) {
-                    cleanedCode = match[1].trim(); // Extract content inside fences
+                    cleanedCode = match[1].trim();
                     console.log('[Agent Tool _generateReportCodeTool] Cleaned React Code (fences removed):', cleanedCode);
                 } else {
-                    // If no fences found, trim whitespace just in case
                     cleanedCode = cleanedCode.trim();
                 }
+            } else {
+                logger.warn('_generateReportCodeTool received no code from promptService.');
+                cleanedCode = null; // Ensure it's null if no code
             }
-            // ---- END CLEANING STEP ----
 
-            // Store the CLEANED code internally
+            // Store the CLEANED code internally for the final DB update
             this.turnContext.generatedReportCode = cleanedCode;
-            return { result: { react_code: cleanedCode } }; // Return cleaned code
+            // Return the cleaned code for the step result summary etc.
+            return { result: { react_code: cleanedCode } }; 
+
         } catch (error) {
-            logger.error(`_generateReportCodeTool failed: ${error.message}`, { error });
-            return { error: `Failed to generate report code: ${error.message}` };
+             logger.error(`_generateReportCodeTool failed during promptService call: ${error.message}`, { error });
+             return { error: `Failed to generate report code: ${error.message}` };
         }
     }
 
-     /** Tool: Answer User Signal */
+    /** Tool: Answer User Signal */
     async _answerUserTool(args) {
        logger.info(`Executing tool: _answerUserTool`);
         const { textResponse } = args;
@@ -955,8 +970,10 @@ class AgentOrchestrator {
             // This validation is technically redundant due to parsing logic, but good practice
             return { error: 'Missing or empty required argument: textResponse for _answerUserTool' };
         }
+        // This tool doesn't *do* anything other than signal the end
+        // The actual textResponse is handled when the agent loop breaks
         return { result: { message: 'Answer signal processed.'} };
     }
 }
 
-module.exports = { AgentOrchestrator }; 
+module.exports = { AgentOrchestrator };

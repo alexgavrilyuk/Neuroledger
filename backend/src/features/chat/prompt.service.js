@@ -81,7 +81,8 @@ const getLLMReasoningResponse = async (agentContext) => {
             teamContext,         // Pass Team AI context
             historySummary,      // Pass history summary
             currentTurnSteps,    // Pass steps taken this turn
-            availableTools       // Pass tool definitions
+            availableTools,      // Pass tool definitions
+            analysisResult: agentContext.analysisResult // <<< EXPLICITLY PASS ANALYSIS RESULT
         });
         logger.debug(`Agent System Prompt generated. Length: ${systemPrompt.length}`);
 
@@ -93,14 +94,18 @@ const getLLMReasoningResponse = async (agentContext) => {
             { role: "user", content: originalQuery } // The user's latest query
         ];
 
-        const modelToUse = "claude-3-7-sonnet-20250219"; // Use a powerful model for reasoning
+        const modelToUse = "claude-3-7-sonnet-20250219"; // Use Opus specifically for the main reasoning step
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 14096, // Max output tokens (tool call JSON or final answer)
+            max_tokens: 14096, // Max output tokens (tool call JSON or final answer) - Opus has larger context but keep output reasonable
             system: systemPrompt,
             messages,
             temperature: 0.1 // Lower temperature for more predictable tool usage
         };
+
+        // --- ADDED: Log the full system prompt being sent --- 
+        logger.debug(`[Agent Reasoning] Full System Prompt being sent to ${apiOptions.model}:\n------ START SYSTEM PROMPT ------\n${systemPrompt}\n------ END SYSTEM PROMPT ------`);
+        // --- END ADDED LOG --- 
 
         // 3. Call Claude API
         logger.debug(`Calling Claude API for Agent Reasoning with model ${apiOptions.model}...`);
@@ -225,11 +230,11 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     *   The code MUST operate directly on the \`inputData\` variable. DO NOT include any CSV parsing logic.
     *   The object passed to \`sendResult()\` MUST match the REQUIRED OUTPUT STRUCTURE exactly.`;
 
+    // Define modelToUse outside the try block to ensure it's accessible in catch
+    const modelToUse = "claude-3-7-sonnet-20250219"; // Using Sonnet as specified
+
     try {
         const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the goal and schema, ensuring the output strictly matches the required structure."}];
-        
-        // ---- DEFINE modelToUse HERE ----
-        const modelToUse = "claude-3-7-sonnet-20250219"; // Using Sonnet as specified
         
         const apiOptions = {
             model: modelToUse,
@@ -264,7 +269,7 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
 
     } catch (error) {
         // Use the same variable name as defined in the try block for error logging
-        const errorModel = modelToUse || "[model variable undefined]"; 
+        const errorModel = modelToUse;
         logger.error(`Error during analysis code generation API call with model ${errorModel}: ${error.message}`, error);
         throw new Error(`AI failed to generate analysis code: ${error.message}`);
     }
