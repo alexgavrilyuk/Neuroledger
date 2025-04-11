@@ -1,5 +1,5 @@
 // frontend/src/features/dashboard/components/MessageBubble.jsx
-import React from 'react';
+import React, { useEffect } from 'react';
 // Import Heroicons separately
 import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid'; 
 // Import React Icons (Font Awesome) separately
@@ -7,6 +7,8 @@ import { FaCircleNotch, FaExclamationTriangle, FaList, FaSearch, FaCode, FaPlayC
 import Spinner from '../../../shared/ui/Spinner';
 import Button from '../../../shared/ui/Button';
 import { useChat } from '../context/ChatContext'; 
+// Import logger
+import logger from '../../../shared/utils/logger';
 
 
 // Define tool display map here as it's used within this component
@@ -21,6 +23,12 @@ const toolDisplayMap = {
 
 const MessageBubble = ({ message, onViewReport }) => {
     const { agentMessageStatuses, AGENT_STATUS } = useChat();
+
+    // ---- ADD DEBUG LOG for Render ----
+    useEffect(() => {
+        console.log('[MessageBubble Render - Direct Log] Message ID:', message._id, 'Data:', JSON.stringify(message));
+    }, [message]);
+    // ---- END DEBUG LOG ----
 
     // Determine message type and base status
     const isUser = message.messageType === 'user';
@@ -114,8 +122,20 @@ const MessageBubble = ({ message, onViewReport }) => {
                         <Button
                             variant="primary"
                             size="sm"
-                            // Call the passed onViewReport prop
-                            onClick={() => onViewReport({ code: message.aiGeneratedCode, datasets: message.reportDatasets || [] })}
+                            onClick={() => {
+                                // ---- ADD DEBUG LOG for Click ----
+                                console.log('[MessageBubble Click - Direct Log] onViewReport clicked for Message ID:', message._id, 
+                                    'Has Code:', !!message.aiGeneratedCode, 
+                                    // Log the existence of the NEW data field
+                                    'Has Analysis Data:', !!message.reportAnalysisData 
+                                );
+                                // ---- END DEBUG LOG ----
+                                // Pass the analysis data instead of reportDatasets
+                                onViewReport({ 
+                                    code: message.aiGeneratedCode, 
+                                    analysisData: message.reportAnalysisData || {} // Use analysisData, provide default empty object
+                                }); 
+                            }}
                             leftIcon={DocumentChartBarIcon}
                             className="shadow-soft-md dark:shadow-soft-dark-md transform hover:scale-102 active:scale-98"
                         >

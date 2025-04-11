@@ -265,11 +265,23 @@ const getChatMessages = async (sessionId, userId, limit = 50, skip = 0) => {
     }
     
     // Get messages for this session, sorted by creation date
+    // Explicitly select fields, including aiGeneratedCode and reportAnalysisData
     const messages = await PromptHistory.find({ chatSessionId: sessionId })
+      .select('+aiGeneratedCode +reportAnalysisData') // Ensure both fields are included
       .sort({ createdAt: 1 })
       .skip(skip)
-      .limit(limit);
+      .limit(limit)
+      .lean(); // Use lean() for performance if not modifying docs
       
+    // ---- ADD DEBUG LOG ----
+    logger.debug(`[Chat Service] Fetched ${messages.length} messages for session ${sessionId}. Checking for aiGeneratedCode...`);
+    messages.forEach((msg, index) => {
+        if (msg.messageType === 'ai_report') { // Check only AI messages
+            logger.debug(`[Chat Service] Message ${index} (ID: ${msg._id}): hasCode: ${!!msg.aiGeneratedCode}, codeLength: ${msg.aiGeneratedCode?.length}`);
+        }
+    });
+    // ---- END DEBUG LOG ----
+
     return messages;
   } catch (error) {
     logger.error(`Failed to get chat messages: ${error.message}`);

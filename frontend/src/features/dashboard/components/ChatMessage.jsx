@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { FiCopy, FiCheckCircle } from 'react-icons/fi';
 import { FaCircleNotch, FaMicrochip, FaExclamationTriangle, FaList, FaSearch, FaCode, FaPlayCircle } from 'react-icons/fa';
 import { PiChartBarDuotone } from 'react-icons/pi';
 import { formatRelative } from 'date-fns';
 import { useChat } from '../context/ChatContext';
+import logger from '../../../shared/utils/logger';
 
 /**
  * Maps agent tool names to user-friendly text and icons.
@@ -26,6 +27,18 @@ const toolDisplayMap = {
 const ChatMessage = ({ message, onViewReport }) => {
   const [copied, setCopied] = useState(false);
   const { agentMessageStatuses, AGENT_STATUS } = useChat();
+  
+  // Log the message prop when the component renders using console.log directly
+  useEffect(() => {
+    // USE console.log FOR MAXIMUM RELIABILITY
+    console.log('[ChatMessage Render - Direct Log] Message ID:', message._id, 'Data:', JSON.stringify(message));
+    /* logger.debug(`[ChatMessage Render] Message ID: ${message._id}`, {
+      type: message.messageType,
+      status: message.status,
+      hasCode: !!message.aiGeneratedCode,
+      codeLength: message.aiGeneratedCode?.length,
+    }); */
+  }, [message]); // Re-run log if the message prop changes identity
   
   // Format timestamp to a readable date/time with safety check
   let timestamp = '';
@@ -174,10 +187,18 @@ const ChatMessage = ({ message, onViewReport }) => {
         {/* View Report button - Show if completed AI message has generated code */}
         {hasReportCode && (
           <button
-            onClick={() => onViewReport({
-              code: message.aiGeneratedCode,
-              datasets: message.reportDatasets || []
-            })}
+            onClick={() => {
+                // USE console.log FOR MAXIMUM RELIABILITY
+                console.log('[ChatMessage Click - Direct Log] onViewReport clicked for Message ID:', message._id, 'Has Code:', !!message.aiGeneratedCode);
+                /* logger.debug(`[ChatMessage Click] onViewReport clicked for Message ID: ${message._id}`, {
+                    hasCode: !!message.aiGeneratedCode,
+                    codeLength: message.aiGeneratedCode?.length,
+                }); */
+                onViewReport({
+                    code: message.aiGeneratedCode,
+                    datasets: message.reportDatasets || []
+                });
+            }}
             className="flex items-center gap-1 text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 px-2 py-1.5 rounded hover:bg-blue-50 dark:hover:bg-blue-900/20"
           >
             <PiChartBarDuotone />

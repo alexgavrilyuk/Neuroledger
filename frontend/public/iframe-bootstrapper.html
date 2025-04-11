@@ -86,7 +86,7 @@
 
         // Global state within the iframe
         let receivedCode = null;
-        let receivedDatasets = null;
+        let receivedReportData = null;
         let themeName = 'light'; // Default theme
         let librariesLoaded = false;
         let dataAndCodeReceived = false;
@@ -134,7 +134,7 @@
                  if (!reportRoot) { console.error('%c[Iframe RENDER]%c ERROR: report-root element not found!', "color: red; font-weight: bold;", "color: red;"); return; }
                  if (scriptLoadErrors.length > 0) { console.error('%c[Iframe RENDER]%c Cannot render due to library load errors.', "color: red; font-weight: bold;", "color: red;"); return; }
                  if (!librariesLoaded) { console.log('%c[Iframe RENDER]%c Libraries not ready for render.', "color: purple; font-weight: bold;", "color: purple;"); return; }
-                 if (!dataAndCodeReceived || !receivedCode || !receivedDatasets) { console.log('%c[Iframe RENDER]%c Code or data not received/ready for render.', "color: purple; font-weight: bold;", "color: purple;"); return; }
+                 if (!dataAndCodeReceived || !receivedCode || !receivedReportData) { console.log('%c[Iframe RENDER]%c Code or data not received/ready for render.', "color: purple; font-weight: bold;", "color: purple;"); return; }
 
                  renderAttempted = true;
                  console.log('%c[Iframe RENDER]%c Prerequisites met. Attempting to execute AI component code...', "color: purple; font-weight: bold;", "color: purple;");
@@ -189,9 +189,9 @@
 
                          console.log('%c[Iframe RENDER]%c Preparing to render with ReactDOM.createRoot().render()...', "color: purple; font-weight: bold;", "color: purple;");
                          const root = window.ReactDOM.createRoot(reportRoot); // Use createRoot for React 18+
-                         // Pass the received datasets as a prop named 'datasets'
-                         console.log('%c[Iframe RENDER]%c Rendering with datasets:', "color: purple; font-weight: bold;", "color: purple;", JSON.stringify(receivedDatasets, null, 2)); // Log the data being passed
-                         root.render(window.React.createElement(ReportComponent, { datasets: receivedDatasets }));
+                         // Pass the received datasets as a prop named 'reportData'
+                         console.log('%c[Iframe RENDER]%c Rendering with reportData:', "color: purple; font-weight: bold;", "color: purple;", JSON.stringify(receivedReportData, null, 2));
+                         root.render(window.React.createElement(ReportComponent, { reportData: receivedReportData }));
                          console.log('%c[Iframe RENDER]%c React component render initiated successfully.', "color: purple; font-weight: bold;", "color: purple;");
 
                          // Send success message back to parent
@@ -239,9 +239,9 @@
                     console.log('%c[Iframe MSG]%c Full payload content:', "color: blue; font-weight: bold;", "color: blue;", JSON.stringify(payload, null, 2));
                     
                     receivedCode = payload?.code;
-                    receivedDatasets = payload?.datasets;
-                    // Basic validation
-                    if (receivedCode && typeof receivedCode === 'string' && Array.isArray(receivedDatasets)) {
+                    receivedReportData = payload?.reportData;
+                    // Basic validation - check code is string and reportData is a non-null OBJECT
+                    if (receivedCode && typeof receivedCode === 'string' && typeof receivedReportData === 'object' && receivedReportData !== null) {
                         dataAndCodeReceived = true;
                         console.log('%c[Iframe MSG]%c Data and code stored successfully.', "color: blue; font-weight: bold;", "color: blue;");
                         // Attempt render only if libraries are also ready

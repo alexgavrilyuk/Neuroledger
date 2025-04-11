@@ -9,6 +9,10 @@ import Spinner from '../../../shared/ui/Spinner';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 
 const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
+    // ---- ADD DEBUG LOG ----
+    console.log('[ReportViewer START] Rendering/Mounting. Initial reportInfo:', reportInfo);
+    // ---- END DEBUG LOG ----
+
     const iframeRef = useRef(null);
     const [iframeStatus, setIframeStatus] = useState('init'); // init, loading_html, ready_for_libs, ready_for_data, sending_data, rendering, rendered, error
     const [iframeError, setIframeError] = useState(null);
@@ -22,6 +26,9 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
 
     // Handle iframe onLoad event - get reference to its window
     const handleIframeLoad = useCallback(() => {
+        // ---- ADD DEBUG LOG ----
+        console.log('[ReportViewer Callback] handleIframeLoad executing.');
+        // ---- END DEBUG LOG ----
         logger.debug('ReportViewer: Iframe onLoad event fired.');
         const contentWin = iframeRef.current?.contentWindow;
         if (contentWin) {
@@ -41,6 +48,10 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
     // --- CORRECTED sendDataAndCodeToIframe ---
     // Sends the actual code and data to the iframe via postMessage
     const sendDataAndCodeToIframe = useCallback(() => {
+        // ---- ADD DEBUG LOG ----
+        // Log expecting analysisData in reportInfo
+        console.log('[ReportViewer Callback] sendDataAndCodeToIframe executing. Report Info:', reportInfo);
+        // ---- END DEBUG LOG ----
         logger.info("ReportViewer: Attempting to send data and code to iframe.");
         if (!iframeContentWindow) {
             logger.error("ReportViewer: Cannot send message, iframe contentWindow not available.");
@@ -48,10 +59,11 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
             setIframeError('Iframe communication channel lost.');
             return;
         }
-        if (!reportInfo || !reportInfo.code || !reportInfo.datasets) {
-            logger.error("ReportViewer: Cannot send message, missing code or datasets in reportInfo.", reportInfo);
+        // Modify this check to only require code
+        if (!reportInfo || !reportInfo.code) {
+            logger.error("ReportViewer: Cannot send message, missing code in reportInfo.", reportInfo);
             setIframeStatus('error');
-            setIframeError('Missing report code or data.');
+            setIframeError('Missing report code.');
             return;
         }
 
@@ -63,7 +75,8 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
                     type: 'loadDataAndCode',
                     payload: {
                         code: reportInfo.code, // Send the actual code string
-                        datasets: reportInfo.datasets, // Send the array of { name, content, error }
+                        // Send analysisData as reportData
+                        reportData: reportInfo.analysisData || {}, // Use analysisData, provide default empty object
                     },
                 },
                 targetOrigin // Use the defined targetOrigin
@@ -81,6 +94,9 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
 
     // Effect to handle messages *from* the iframe
     useEffect(() => {
+        // ---- ADD DEBUG LOG ----
+        console.log('[ReportViewer Effect] Setting up message listener.');
+        // ---- END DEBUG LOG ----
         const handleIframeMessage = (event) => {
             // Security: Check if the message is from the expected origin OR a null origin from the specific iframe window we know
              const isExpectedOrigin = event.origin === targetOrigin && targetOrigin !== '*'; // Don't check if target is '*'
@@ -95,6 +111,9 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
 
              if (type === 'iframeReady') {
                  logger.info('ReportViewer: Received iframeReady signal.');
+                 // ---- ADD DEBUG LOG ----
+                 console.log('[ReportViewer Effect] Received iframeReady message from iframe.');
+                 // ---- END DEBUG LOG ----
                  setIframeStatus('ready_for_data'); // Now ready for data AND code
                  setIsIframeReadyForData(true); // Set the flag
              } else if (type === 'iframeReportStatus') {
@@ -112,17 +131,29 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
         };
         window.addEventListener('message', handleIframeMessage);
         // Cleanup listener
-        return () => window.removeEventListener('message', handleIframeMessage);
+        return () => {
+             // ---- ADD DEBUG LOG ----
+             console.log('[ReportViewer Effect] Cleaning up message listener.');
+             // ---- END DEBUG LOG ----
+            window.removeEventListener('message', handleIframeMessage);
+        };
         // DEPENDENCIES: targetOrigin needed for check, iframeContentWindow needed for source check
     }, [targetOrigin, iframeContentWindow]);
 
     // Effect to *call* sendDataAndCodeToIframe when conditions are met
     useEffect(() => {
+        // ---- ADD DEBUG LOG ----
+        // Log check, still based on reportInfo.code
+        console.log(`[ReportViewer Effect] Send data check. Status: ${iframeStatus}, ReadyFlag: ${isIframeReadyForData}, HasCode: ${!!reportInfo?.code}, HasWindow: ${!!iframeContentWindow}`);
+        // ---- END DEBUG LOG ----
         logger.debug(`ReportViewer: Send data effect triggered. Status: ${iframeStatus}, ReadyFlag: ${isIframeReadyForData}, HasCode: ${!!reportInfo?.code}, HasWindowInState: ${!!iframeContentWindow}`);
 
-        // Check if iframe has signaled it's ready AND we have the code/data AND we have the window reference
-        if (iframeStatus === 'ready_for_data' && isIframeReadyForData && reportInfo?.code && reportInfo?.datasets && iframeContentWindow) {
-            logger.info("ReportViewer: Conditions met, setting status to 'sending_data' and calling send function.");
+        // Check if iframe has signaled it's ready AND we have the code AND we have the window reference
+        if (iframeStatus === 'ready_for_data' && isIframeReadyForData && reportInfo?.code && iframeContentWindow) {
+             // ---- ADD DEBUG LOG ----
+             console.log('[ReportViewer Effect] Conditions met for sending data.');
+             // ---- END DEBUG LOG ----
+            logger.info("ReportViewer: Conditions met (code received, iframe ready), setting status to 'sending_data' and calling send function.");
             setIframeStatus('sending_data');
             // Use setTimeout to ensure the call happens in the next event loop tick, just after state update
              const timeoutId = setTimeout(() => {
@@ -131,7 +162,7 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
              }, 0); // 0ms delay is usually sufficient
              return () => clearTimeout(timeoutId); // Cleanup timeout if component unmounts or deps change
         }
-        // DEPENDENCIES: Watch all conditions needed to trigger the send
+        // DEPENDENCIES: Watch all conditions needed to trigger the send (excluding datasets check)
     }, [iframeStatus, isIframeReadyForData, reportInfo, iframeContentWindow, sendDataAndCodeToIframe]);
 
     // Effect to send theme updates to the iframe
@@ -153,14 +184,24 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
 
      // Effect to reset status when new reportInfo comes in
      useEffect(() => {
-         if (reportInfo) {
-            logger.debug("ReportViewer: reportInfo changed/provided, resetting iframe state and triggering reload.");
+         // ---- ADD DEBUG LOG ----
+         // Log check, still based on reportInfo (which now contains analysisData)
+         console.log('[ReportViewer Effect] reportInfo changed effect triggered. reportInfo:', reportInfo);
+         // ---- END DEBUG LOG ----
+         if (reportInfo && reportInfo.code) { // Check for code existence specifically
+            logger.debug("ReportViewer: reportInfo changed/provided with code, resetting iframe state and triggering reload.");
+             // ---- ADD DEBUG LOG ----
+             console.log('[ReportViewer Effect] Resetting state due to new/changed reportInfo.');
+             // ---- END DEBUG LOG ----
             setIframeStatus('loading_html'); // Start the status cycle again
             setIframeError(null);
             setIsIframeReadyForData(false);
             setIframeContentWindow(null); // Clear old window reference
             // Force iframe reload by changing key or src slightly (if needed, usually key is enough)
          } else {
+             // ---- ADD DEBUG LOG ----
+             console.log('[ReportViewer Effect] Clearing state due to null reportInfo.');
+             // ---- END DEBUG LOG ----
              // Clear state if reportInfo becomes null (e.g., modal closed and reset)
              setIframeStatus('init');
              setIframeError(null);

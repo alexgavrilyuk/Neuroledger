@@ -207,11 +207,19 @@ export const ChatProvider = ({ children }) => {
   const openReportModal = useCallback((data) => {
     if (data && data.code) {
       logger.info('Opening report modal.');
+      // ---- ADD DEBUG LOG ----
+      logger.debug('Report data received by openReportModal:', { 
+        hasCode: !!data.code, 
+        codeLength: data.code?.length, 
+        hasDatasets: !!data.datasets, 
+        datasetsLength: data.datasets?.length 
+      });
+      // ---- END DEBUG LOG ----
       // Ensure datasets is always an array, even if null/undefined initially
       setReportModalData({ code: data.code, datasets: data.datasets || [] });
       setIsReportModalOpen(true);
     } else {
-      logger.error('Attempted to open report modal without code.');
+      logger.error('Attempted to open report modal without code or data object.', data);
       // Optionally, show a user-facing error notification here
     }
   }, []);
@@ -279,6 +287,20 @@ export const ChatProvider = ({ children }) => {
           'chat:message:completed': (data) => {
             if (data.sessionId !== currentSession?._id) return;
             logger.debug(`[WS Received] chat:message:completed - Message ID: ${data.message?._id}`);
+            
+            // ---- ADD DEBUG LOG ----
+            if (data.message) {
+                logger.debug('[Chat Context] Received completed message data via socket:', { 
+                    messageId: data.message._id, 
+                    status: data.message.status, 
+                    hasCode: !!data.message.aiGeneratedCode, 
+                    codeLength: data.message.aiGeneratedCode?.length 
+                });
+            } else {
+                logger.warn('[Chat Context] Received chat:message:completed event without message data.', data);
+            }
+            // ---- END DEBUG LOG ----
+            
             setMessages(prev =>
               prev.map(msg =>
                 msg._id === data.message._id ? data.message : msg
@@ -372,6 +394,9 @@ export const ChatProvider = ({ children }) => {
         {isReportModalOpen && reportModalData.code && (
           <div className="mt-4 h-[70vh] overflow-y-auto"> {/* Add fixed height and scroll */}
              <ReportViewer
+               // ---- ADD KEY ----
+               key={reportModalData.code} // Force re-mount when code changes
+               // ---- END KEY ----
                // Pass code and datasets via a single prop if ReportViewer expects that,
                // or individually. Adjust based on ReportViewer's actual props.
                // Assuming it takes separate props based on architecture doc examples:

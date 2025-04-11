@@ -96,7 +96,7 @@ const getLLMReasoningResponse = async (agentContext) => {
         const modelToUse = "claude-3-7-sonnet-20250219"; // Use a powerful model for reasoning
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 4096, // Max output tokens (tool call JSON or final answer)
+            max_tokens: 14096, // Max output tokens (tool call JSON or final answer)
             system: systemPrompt,
             messages,
             temperature: 0.1 // Lower temperature for more predictable tool usage
@@ -144,9 +144,48 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     }
 
     const startTime = Date.now();
-    logger.info(`Generating analysis Node.js code for goal: \"${analysisGoal.substring(0, 100)}...\"`);
+    logger.info('Generating analysis Node.js code for goal: \"%s...\"', analysisGoal.substring(0, 50));
 
     // Construct the system prompt for ANALYSIS code generation
+    // ADDED: Explicit output structure definition
+    const requiredOutputStructure = `{
+      summary: {
+        dataRange: { start: string | null, end: string | null, totalDays: number | null },
+        overview: { totalIncome: number, totalExpenses: number, netProfit: number, profitMargin: number }
+      },
+      incomeVsExpenses: {
+        overall: { totalIncome: number, totalExpenses: number, netProfit: number },
+        monthly: [{ period: string, income: number, expenses: number, netProfit: number, profitMargin: number }],
+        quarterly: [{ period: string, income: number, expenses: number, netProfit: number, profitMargin: number }],
+        yearly: [{ period: string, income: number, expenses: number, netProfit: number, profitMargin: number }]
+      },
+      budgetPerformance: {
+        overall: { actualIncome: number, budgetedIncome: number, incomeVariance: number, incomeVariancePercentage: number, actualExpenses: number, budgetedExpenses: number, expensesVariance: number, expensesVariancePercentage: number },
+        monthly: [{ period: string, actualIncome: number, budgetedIncome: number, incomeVariance: number, incomeVariancePercentage: number, actualExpenses: number, budgetedExpenses: number, expensesVariance: number, expensesVariancePercentage: number }],
+        quarterly: [{ period: string, actualIncome: number, budgetedIncome: number, incomeVariance: number, incomeVariancePercentage: number, actualExpenses: number, budgetedExpenses: number, expensesVariance: number, expensesVariancePercentage: number }]
+      },
+      expenseBreakdown: {
+        overall: [{ category: string, amount: number, percentage: number }],
+        monthly: [{ period: string, totalExpenses: number, categories: [{ category: string, amount: number, percentage: number }] }],
+        quarterly: [{ period: string, totalExpenses: number, categories: [{ category: string, amount: number, percentage: number }] }]
+      },
+      trends: {
+        income: { monthly: [{ period: string, value: number }] },
+        expenses: { monthly: [{ period: string, value: number }] },
+        netProfit: { monthly: [{ period: string, value: number }] }
+      },
+      kpis: {
+        profitability: { netProfit: number, profitMargin: number, returnOnExpense: number },
+        budgetPerformance: { incomePerformance: number, expensePerformance: number, overallBudgetVariance: number },
+        expenseRatio: { topExpenseCategories: [{ category: string, percentage: number }], expenseToIncomeRatio: number }
+      },
+      anomalies: {
+        income: [{ period: string, value: number, average?: number, deviation?: number, type?: string, description?: string }],
+        expenses: [{ period: string, value: number, average?: number, deviation?: number, type?: string, description?: string }],
+        categories: [{ category: string, period: string, value: number, average?: number, deviation?: number, type?: string, description?: string }]
+      }
+    }`;
+
     const analysisCodeGenSystemPrompt = `You are an expert Node.js developer writing analysis code for a VERY RESTRICTED sandbox (Node.js vm.runInNewContext).
 
     CONTEXT IN SANDBOX:
@@ -160,7 +199,7 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     *   NO Node.js globals (process, Buffer, fs, etc.).
     *   NO \`async/await\`.
     *   MUST use the provided \`inputData\` variable directly.
-    *   MUST call \`sendResult(data)\` exactly once with the analysis result.
+    *   MUST call \`sendResult(result)\` exactly once with the final analysis result (or \`{ error: ... }\` on failure).
     *   MUST complete within ~5 seconds.
 
     DATASET SCHEMA (for context on properties within inputData objects):
@@ -171,19 +210,27 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     Write a Node.js script that:
     1.  Takes the \`inputData\` array of objects.
     2.  Performs the analysis using \`inputData\` to achieve the goal: "${analysisGoal}"
-    3.  Calls \`sendResult(result)\` with the final JSON-serializable analysis result.
-    4.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
+    3.  Constructs a result object that **STRICTLY ADHERES** to the REQUIRED OUTPUT STRUCTURE specified below. Include all keys, even if the value is null, 0, or an empty array, unless it is truly optional (like fields within anomalies). **Use explicit key-value pairs; DO NOT use shorthand property names.**
+    4.  Calls \`sendResult(result)\` with the structured result object.
+    5.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
+
+    **REQUIRED OUTPUT STRUCTURE (for the object passed to sendResult):**
+    ${requiredOutputStructure}
 
     OUTPUT REQUIREMENTS:
     *   Provide ONLY the raw Node.js code string, starting with \`try { ... } catch (err) { ... }\`. No markdown.
-    *   The code MUST operate directly on the \`inputData\` variable. DO NOT include any CSV parsing logic.`;
+    *   The code MUST operate directly on the \`inputData\` variable. DO NOT include any CSV parsing logic.
+    *   The object passed to \`sendResult()\` MUST match the REQUIRED OUTPUT STRUCTURE exactly.`;
 
     try {
-        const messages = [{ role: "user", content: `Generate the Node.js analysis code based on the requirements and the goal: ${analysisGoal}` }];
-        const modelToUse = "claude-3-sonnet-20240229"; 
+        const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the goal and schema, ensuring the output strictly matches the required structure."}];
+        
+        // ---- DEFINE modelToUse HERE ----
+        const modelToUse = "claude-3-7-sonnet-20250219"; // Using Sonnet as specified
+        
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 3500, 
+            max_tokens: 13500, 
             system: analysisCodeGenSystemPrompt,
             messages,
             temperature: 0.0 
@@ -198,6 +245,7 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
             throw new Error('AI assistant provided no analysis code.');
         }
 
+        // Check if code includes calls to sendResult (basic validation)
         if (!generatedCode.includes('sendResult(')) {
              logger.warn('Generated analysis code might be missing sendResult() call.');
         }
@@ -205,12 +253,16 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
              logger.warn('Generated analysis code unexpectedly contains parsing logic!');
              // Potentially throw error here?
         }
-
-        logger.info(`Analysis code generated successfully using ${modelToUse}. Length: ${generatedCode.length}`);
+        
+        // Now modelToUse should be defined for the log
+        const currentModel = modelToUse; // Assign to different variable just in case of weird scope issue
+        logger.info(`Analysis code generated successfully using ${currentModel}. Length: ${generatedCode.length}`);
         return { code: generatedCode };
 
     } catch (error) {
-        logger.error(`Error during analysis code generation API call with model ${modelToUse}: ${error.message}`, error);
+        // Use the same variable name as defined in the try block for error logging
+        const errorModel = modelToUse || "[model variable undefined]"; 
+        logger.error(`Error during analysis code generation API call with model ${errorModel}: ${error.message}`, error);
         throw new Error(`AI failed to generate analysis code: ${error.message}`);
     }
 };
@@ -235,9 +287,11 @@ const generateReportCode = async ({ analysisSummary, dataJson }) => {
     logger.info('Generating React report code...');
 
     // 1. Construct the system prompt for React code generation (similar to original /prompts endpoint)
-    //    It needs to instruct the AI to use React.createElement, assume global libraries (React, Recharts), etc.
-    //    It also needs the analysis summary and the data structure (keys of dataJson) as context.
+    //    It needs the analysis summary and the data structure (keys of dataJson) as context.
     const dataKeys = dataJson ? Object.keys(dataJson) : [];
+    // -- More detailed structure based on observed analysis results --
+    const dataStructureDescription = `\n- **summary**: Object, contains:\n    - **dataRange**: Object (e.g., { start, end, totalDays })\n    - **overview**: Object (e.g., { totalIncome, totalExpenses, netProfit, profitMargin })\n- **incomeVsExpenses**: Object, contains:\n    - **overall**: Object (e.g., { totalIncome, totalExpenses, netProfit })\n    - **monthly**: ARRAY of objects (e.g., [{ period, income, expenses, netProfit, profitMargin }, ...]) - Use this for monthly charts.\n    - **quarterly**: ARRAY of objects (e.g., [{ period, income, expenses, netProfit, profitMargin }, ...])\n    - **yearly**: ARRAY of objects (e.g., [{ period, income, expenses, netProfit, profitMargin }, ...])\n- **budgetPerformance**: Object, contains:\n    - **overall**: Object (e.g., { actualIncome, budgetedIncome, incomeVariance, incomeVariancePercentage, actualExpenses, budgetedExpenses, expensesVariance, expensesVariancePercentage })\n    - **monthly**: ARRAY of objects (e.g., [{ period, actualIncome, budgetedIncome, incomeVariance, incomeVariancePercentage, actualExpenses, budgetedExpenses, expensesVariance, expensesVariancePercentage }, ...]) - Use this for budget charts.\n    - **quarterly**: ARRAY of objects (e.g., [{ period, actualIncome, budgetedIncome, ... }, ...])\n- **expenseBreakdown**: Object, contains:\n    - **overall**: ARRAY of objects (e.g., [{ category, amount, percentage }, ...]) - Use this for the main breakdown chart/table.\n    - **monthly**: ARRAY of objects (e.g., [{ period, totalExpenses, categories: [...] }, ...])\n    - **quarterly**: ARRAY of objects (e.g., [{ period, totalExpenses, categories: [...] }, ...])\n- **trends**: Object, contains:\n    - **income**: Object with key 'monthly' (ARRAY) containing trend data (e.g., [{ period, value }, ...]).\n    - **expenses**: Object with key 'monthly' (ARRAY) containing trend data.\n    - **netProfit**: Object with key 'monthly' (ARRAY) containing trend data.\n- **kpis**: Object, contains:\n    - **profitability**: Object (e.g., { netProfit, profitMargin, returnOnExpense })\n    - **budgetPerformance**: Object (e.g., { incomePerformance, expensePerformance, overallBudgetVariance })\n    - **expenseRatio**: Object (e.g., { topExpenseCategories (ARRAY of {category, percentage}), expenseToIncomeRatio })\n- **anomalies**: Object, contains:\n    - **income**: ARRAY of objects (e.g., [{ period, value, average, deviation, type, description? }, ...])\n    - **expenses**: ARRAY of objects\n    - **categories**: ARRAY of objects (e.g., [{ category, period, value, ... }, ...])\n- Other top-level keys potentially present: ${dataKeys.join(', ')}\n`;
+
     const reportGenSystemPrompt = `You are an expert React developer specializing in data visualization using Recharts. Generate ONLY the body of a single JavaScript React functional component named 'ReportComponent'.
 
 COMPONENT REQUIREMENTS:
@@ -245,21 +299,22 @@ COMPONENT REQUIREMENTS:
 2.  **Props:** The component MUST accept a single prop named \`reportData\`, which is the JSON object provided below.
 3.  **Rendering:** Use \`React.createElement\` for ALL component/element creation. Do NOT use JSX syntax.
 4.  **Global Libraries:** Assume \`React\` and \`Recharts\` are available as global variables. Access them directly (e.g., \`React.createElement(Recharts.LineChart, ...)\`). **Do NOT include \`import\` or \`require\` statements.**
-5.  **Analysis & Content:** Use the provided \`analysisSummary\` and the \`reportData\` prop to create meaningful visualizations (charts, tables, key figures) using Recharts and standard HTML elements via \`React.createElement\`. Structure the report logically.
-6.  **Styling:** Apply reasonable inline styles for presentation (e.g., \`style={{ margin: '10px' }}\`). Assume a standard sans-serif font.
-7.  **Error Handling:** Include basic error handling (e.g., check if \`reportData\` exists before accessing its properties). If critical data is missing, render a helpful message.
-8.  **Output:** Provide ONLY the JavaScript code for the \`ReportComponent\` function body, starting directly with \`function ReportComponent({ reportData }) {\` or similar. Do not include any surrounding text, explanations, or markdown formatting like \`\`\`.
+5.  **Analysis & Content:** Use the provided \`analysisSummary\` and the \`reportData\` prop to create meaningful visualizations (charts, tables, key figures) using Recharts and standard HTML elements via \`React.createElement\`. Structure the report logically. Display the following sections based on available data: Financial Summary, Income vs Expenses (Monthly Chart), Budget Performance (Monthly Chart), Expense Breakdown (Overall Pie Chart & Table), Key Trends (Income, Expenses, Net Profit Monthly Area Charts), KPIs, and Anomalies.
+6.  **Styling:** Apply reasonable inline styles for presentation (e.g., \`style={{ margin: '10px' }}\`). Assume a standard sans-serif font. Use contrasting colors for chart elements (e.g., income green, expenses red).
+7.  **Robust Data Handling:** \n    *   The \`reportData\` prop structure is described below under EXPECTED DATA STRUCTURE. Your code MUST strictly adhere to this structure. Pay close attention to nested keys and whether a value is an object or an array.\n    *   **Key Data Paths:** Access data using the CORRECT nested paths (e.g., \`reportData.summary.overview.totalIncome\`, \`reportData.kpis.profitability.profitMargin\`, \`reportData.kpis.expenseRatio.expenseToIncomeRatio\`).\n    *   **Check data existence AND type:** Before accessing properties or iterating (e.g., using \`.map()\`), ALWAYS verify that the parent object/array exists AND the specific property exists AND has the expected type based on the structure below (e.g., \`typeof reportData.summary?.overview?.totalIncome === 'number'\`, \`Array.isArray(reportData.expenseBreakdown?.overall)\`, \`Array.isArray(reportData.incomeVsExpenses?.monthly)\`).\n    *   **Safe Access:** Use optional chaining (\`?.\`) extensively (e.g., \`reportData?.summary?.overview?.totalIncome\`, \`reportData?.trends?.income?.monthly\`, \`reportData?.kpis?.profitability?.profitMargin\`).\n    *   **Chart Data:** For chart components (BarChart, LineChart, PieChart, AreaChart), the \`data\` prop MUST be an array. Ensure the corresponding property in \`reportData\` (e.g., \`reportData.incomeVsExpenses.monthly\`, \`reportData.expenseBreakdown.overall\`, \`reportData.trends.income.monthly\`) is validated as a non-empty array before rendering the chart.\n    *   **Rendering List/Table Items:** When mapping over an array of objects (e.g., \`reportData.anomalies.income.map(...)\` or rows in \`reportData.expenseBreakdown.overall\`), you MUST create React elements for the *specific properties* you want to display (e.g., \`anomaly.period\`, \`anomaly.value\`). **DO NOT render the entire object (e.g., \`anomaly\`) directly as a child element**, as this will cause a React error. Format the properties into strings or nested elements.\n    *   **Internal Errors:** If expected data based on the structure below is missing or invalid, render a clear, user-friendly message FOR THAT SPECIFIC SECTION (e.g., \`React.createElement('p', { style: { color: 'orange' } }, 'KPI data (reportData.kpis.profitability) is unavailable or invalid.')\`). Do NOT let the entire component crash.\n    *   **KPI Display:** Render ONLY the specific KPIs defined in the EXPECTED DATA STRUCTURE under the \`kpis\` key (i.e., netProfit, profitMargin, returnOnExpense, incomePerformance, expensePerformance, overallBudgetVariance, topExpenseCategories, expenseToIncomeRatio). Do NOT attempt to render any other KPIs.\n8.  **Output:** Provide ONLY the JavaScript code for the \`ReportComponent\` function body, starting directly with \`function ReportComponent({ reportData }) {\` or similar. Do not include any surrounding text, explanations, or markdown formatting like \`\`\`.
 
 ANALYSIS SUMMARY:
 ${analysisSummary}
 
-PROVIDED DATA STRUCTURE (Prop: reportData):
-${dataKeys.length > 0 ? `- Object with keys: ${dataKeys.join(', ')}` : '- No data provided (or data was empty/null). Handle gracefully.'}
+EXPECTED DATA STRUCTURE (Prop: reportData):
+${dataStructureDescription}
 
-Generate the React component code now.`;
+Base your component implementation STRICTLY on the ANALYSIS SUMMARY and the EXPECTED DATA STRUCTURE described above. Validate data presence and types carefully before use, especially checking for arrays before mapping or passing to charts using the specified nested paths.
+
+Generate the React component code now. Ensure it is robust and handles potential variations in the reportData structure gracefully.`;
 
     try {
-        const messages = [{ role: "user", content: "Generate the React component code for the report based on the summary and data structure."}];
+        const messages = [{ role: "user", content: "Generate the robust React component code for the report based on the summary and the detailed data structure provided in the system prompt, following all requirements, especially data validation and type checking using the correct nested paths before rendering."}];
         // Use a capable model, maybe Sonnet is sufficient for this?
         const modelToUse = "claude-3-7-sonnet-20250219";
         const apiOptions = {
@@ -349,7 +404,9 @@ const summarizeChatHistory = async (chatHistory) => {
 
     } catch (error) {
         // Add model to error log
-        logger.error(`Error during history summarization API call with model ${modelToUse}: ${error.message}`, error);
+        // Ensure modelToUse is defined in this scope or handle potential ReferenceError
+        const errorModel = typeof modelToUse !== 'undefined' ? modelToUse : '[model variable undefined]';
+        logger.error(`Error during history summarization API call with model ${errorModel}: ${error.message}`, error);
         return `Error summarizing history: ${error.message}`;
     }
 };

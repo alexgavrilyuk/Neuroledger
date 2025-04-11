@@ -89,6 +89,15 @@ const workerHandler = async (payload) => {
         // Update chat session lastActivityAt (previously updatedAt)
         await ChatSession.findByIdAndUpdate(chatSessionId, { lastActivityAt: new Date() });
 
+        // ---- ADD DEBUG LOG ----
+        logger.debug(`[Task Handler Emit] Emitting completed message ${finalAiMessage._id} to user ${userId}`, { 
+            sessionId: chatSessionId, 
+            messageId: finalAiMessage._id, 
+            hasCode: !!finalAiMessage.aiGeneratedCode, 
+            codeLength: finalAiMessage.aiGeneratedCode?.length 
+        });
+        // ---- END DEBUG LOG ----
+
         // Emit the final completed event with the full message object
         if (io) {
              io.to(`user:${userId}`).emit('chat:message:completed', {

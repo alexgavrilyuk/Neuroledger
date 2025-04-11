@@ -211,9 +211,21 @@ class AgentOrchestrator {
                     if (toolResult.error) {
                         logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} resulted in error: ${toolResult.error}`);
                     } else if (toolResult.result && toolResult.result.react_code) {
-                        // Store the generated code in the turn context
-                        this.turnContext.generatedReportCode = toolResult.result.react_code;
-                        logger.info(`[Agent Loop ${this.sessionId}] Stored generated React report code.`);
+                        // Clean the code before storing
+                        let cleanedCode = toolResult.result.react_code;
+                        if (cleanedCode && typeof cleanedCode === 'string') {
+                            const codeFenceRegex = /^```(?:javascript|js|json)?\s*([\s\S]*?)\s*```$/m;
+                            const match = cleanedCode.match(codeFenceRegex);
+                            if (match && match[1]) {
+                                cleanedCode = match[1].trim();
+                                console.log('[Agent Loop Clean] Cleaned React Code (fences removed):', cleanedCode);
+                            } else {
+                                cleanedCode = cleanedCode.trim();
+                            }
+                        }
+                        // Store the CLEANED generated code in the turn context
+                        this.turnContext.generatedReportCode = cleanedCode;
+                        logger.info(`[Agent Loop ${this.sessionId}] Stored cleaned generated React report code.`);
                     }
                     // Loop continues after report generation attempt
                 } else if (action.tool) {
@@ -272,6 +284,16 @@ class AgentOrchestrator {
 
                     this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary });
 
+                    // --- ADDED: Error Check specifically for Analysis Execution Failure ---
+                    if ((action.tool === 'execute_analysis_code' || action.tool === 'execute_backend_code') && toolResult.error) {
+                        logger.error(`[Agent Loop ${this.sessionId}] CRITICAL ERROR during code execution: ${toolResult.error}. Terminating loop.`);
+                        this.turnContext.error = `Code Execution Failed: ${resultSummary}`; 
+                        await this._updatePromptHistoryRecord('error', null, this.turnContext.error, null);
+                        this._emitAgentStatus('agent:error', { error: this.turnContext.error });
+                        return { status: 'error', error: this.turnContext.error }; // Exit loop immediately
+                    }
+                    // --- END ADDED Error Check ---
+
                     // --- Store Intermediate Results --- 
                     if (action.tool === 'get_dataset_schema' && toolResult.result) {
                         this.turnContext.intermediateResults.lastSchema = toolResult.result;
@@ -301,6 +323,7 @@ class AgentOrchestrator {
                     }
                      if (action.tool === 'execute_analysis_code') { // New name for analysis exec
                          if (toolResult.result !== undefined) {
+                             // Ensure we store the *actual* result from the execution tool's {result: ...} wrapper
                              this.turnContext.intermediateResults.analysisResult = toolResult.result;
                              logger.info(`Stored ANALYSIS execution result.`);
                          } else if (toolResult.error) {
@@ -627,17 +650,41 @@ class AgentOrchestrator {
              return;
         }
         try {
+            // Get analysis result if available (needed when completing)
+            const analysisResult = this.turnContext.intermediateResults.analysisResult;
+            // --- Get the report code DIRECTLY from the context --- 
+            const finalGeneratedCode = this.turnContext.generatedReportCode;
+            // --- Log the value directly from context --- 
+            console.log(`[_updatePromptHistoryRecord] Value of this.turnContext.generatedReportCode: ${finalGeneratedCode ? `Exists (Length: ${finalGeneratedCode.length})` : 'MISSING'}`);
+
+            // ---- ADD DEBUG LOG ----
+            logger.debug(`[Agent Update DB] Preparing update for ${this.aiMessagePlaceholderId}`, { 
+                status, 
+                hasResponseText: !!aiResponseText, 
+                hasErrorMessage: !!errorMessage, 
+                // Use the potentially cleaned code for logging and saving
+                hasGeneratedCode: !!finalGeneratedCode, 
+                codeLength: finalGeneratedCode?.length,
+                hasAnalysisResult: !!analysisResult, 
+            });
+            // ---- END DEBUG LOG ----
             const updateData = {
                 status: status,
                 // Conditionally add fields only if they have a value
                 ...(aiResponseText !== null && { aiResponseText: aiResponseText }),
                 ...(errorMessage !== null && { errorMessage: errorMessage }),
-                ...(aiGeneratedCode !== null && { aiGeneratedCode: aiGeneratedCode }), // Add generated code
+                // Use the potentially cleaned code for saving
+                ...(finalGeneratedCode !== null && finalGeneratedCode !== undefined && { aiGeneratedCode: finalGeneratedCode }), // Check not null/undefined
+                ...(status === 'completed' && analysisResult !== null && analysisResult !== undefined && { reportAnalysisData: analysisResult }),
                  agentSteps: this.turnContext.steps, // Store the steps taken
             };
             const updatedMessage = await PromptHistory.findByIdAndUpdate(this.aiMessagePlaceholderId, updateData, { new: true });
             if (updatedMessage) {
                  logger.info(`Updated PromptHistory ${this.aiMessagePlaceholderId} with status: ${status}`);
+                 // Log if analysis data was actually saved (useful for verification)
+                 if (status === 'completed' && analysisResult !== null && analysisResult !== undefined) {
+                     logger.debug(`[Agent Update DB] Saved reportAnalysisData for ${this.aiMessagePlaceholderId}`);
+                 }
             } else {
                  logger.warn(`PromptHistory record ${this.aiMessagePlaceholderId} not found during update.`);
             }
@@ -822,58 +869,78 @@ class AgentOrchestrator {
         }
     }
 
-    async _executeAnalysisCodeTool(args) { 
-        const { code, parsed_data_ref } = args; 
+    /** Tool: Execute Analysis Code */
+    async _executeAnalysisCodeTool(args) {
+        const { code, parsed_data_ref } = args;
         logger.info(`Executing tool: execute_analysis_code`);
-        if (!code || typeof code !== 'string') {
-            return { error: 'Missing or invalid required argument: code' };
+        if (!code || typeof code !== 'string' || !parsed_data_ref || typeof parsed_data_ref !== 'string') {
+            return { error: 'Missing or invalid arguments: code (string) and parsed_data_ref (string) are required' };
         }
-        if (!parsed_data_ref || typeof parsed_data_ref !== 'string' || !this.turnContext.intermediateResults[parsed_data_ref]) {
-            return { error: 'Missing or invalid parsed_data_ref. Ensure parse_csv_data ran successfully first.' };
-        }
-
+        
+        // Retrieve the actual parsed data using the reference ID
         const parsedData = this.turnContext.intermediateResults[parsed_data_ref];
+        if (!parsedData) {
+             return { error: `Parsed data not found for ref: ${parsed_data_ref}` };
+        }
         if (!Array.isArray(parsedData)) {
             return { error: 'Referenced parsed data is not an array.'}; 
         }
 
         try {
-            const executionResult = await codeExecutionService.executeSandboxedCode(
-                code, 
-                parsedData 
-            );
-            // Clean up the large parsed data from memory after use?
-            // delete this.turnContext.intermediateResults[parsed_data_ref]; 
-            return executionResult;
+            // Call the CORRECT function from the service: executeSandboxedCode
+            const result = await codeExecutionService.executeSandboxedCode(code, parsedData);
+            
+            // Log the full result
+            console.log('[Agent Tool _executeAnalysisCodeTool] Full analysis result:', JSON.stringify(result, null, 2));
+            
+            // Store the ACTUAL result object internally 
+            this.turnContext.intermediateResults.analysisResult = result.result; // Extract the inner 'result' object
+            return { result: result.result }; // Return the inner 'result' object
         } catch (error) {
-            logger.error(`_executeAnalysisCodeTool failed unexpectedly: ${error.message}`, { error });
-            return { error: `Unexpected error during analysis code execution: ${error.message}` };
+            logger.error(`_executeAnalysisCodeTool failed: ${error.message}`, { error });
+            this.turnContext.intermediateResults.analysisError = error.message;
+            return { error: `Analysis code execution failed: ${error.message}` };
         }
     }
 
+    /** Tool: Generate Report Code */
     async _generateReportCodeTool(args) {
-        const { analysis_summary, analysis_result } = args; 
+        const { analysis_summary, analysis_result } = args;
         logger.info(`Executing tool: generate_report_code`);
         if (!analysis_summary || typeof analysis_summary !== 'string') {
-            return { error: 'Missing or invalid required argument: analysis_summary' };
+            return { error: 'Missing or invalid argument: analysis_summary (string) is required' };
         }
-        // Retrieve analysis result from context if not passed directly (or validate if passed)
-        const dataForResult = analysis_result || this.turnContext.intermediateResults.analysisResult;
-        if (typeof dataForResult !== 'object') { 
-            logger.warn('_generateReportCodeTool called without valid analysis_result.');
-            return { error: 'Analysis results not available or invalid.' };
+        if (!analysis_result || typeof analysis_result !== 'object' || analysis_result === null) {
+            return { error: 'Missing or invalid argument: analysis_result (object) is required' };
         }
-
         try {
-            const generatedCodeResponse = await promptService.generateReportCode({
+            const result = await promptService.generateReportCode({
                 analysisSummary: analysis_summary,
-                dataJson: dataForResult || {} 
+                dataJson: analysis_result
             });
+             // ---- ADD DEBUG LOG ----
+            console.log('[Agent Tool _generateReportCodeTool] Raw Generated React Code:', result?.react_code); // Log raw code
+             // ---- END DEBUG LOG ----
 
-            if (!generatedCodeResponse || !generatedCodeResponse.react_code) {
-                 throw new Error('AI failed to generate valid React report code.');
+            // ---- ADD CLEANING STEP ----
+            let cleanedCode = result?.react_code;
+            if (cleanedCode && typeof cleanedCode === 'string') {
+                // Regex to match optional ```json, ```javascript, or ``` fences
+                const codeFenceRegex = /^```(?:javascript|js|json)?\s*([\s\S]*?)\s*```$/m;
+                const match = cleanedCode.match(codeFenceRegex);
+                if (match && match[1]) {
+                    cleanedCode = match[1].trim(); // Extract content inside fences
+                    console.log('[Agent Tool _generateReportCodeTool] Cleaned React Code (fences removed):', cleanedCode);
+                } else {
+                    // If no fences found, trim whitespace just in case
+                    cleanedCode = cleanedCode.trim();
+                }
             }
-            return { result: { react_code: generatedCodeResponse.react_code } };
+            // ---- END CLEANING STEP ----
+
+            // Store the CLEANED code internally
+            this.turnContext.generatedReportCode = cleanedCode;
+            return { result: { react_code: cleanedCode } }; // Return cleaned code
         } catch (error) {
             logger.error(`_generateReportCodeTool failed: ${error.message}`, { error });
             return { error: `Failed to generate report code: ${error.message}` };

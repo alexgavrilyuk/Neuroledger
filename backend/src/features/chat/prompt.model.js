@@ -40,7 +40,12 @@ const PromptHistorySchema = new mongoose.Schema({
   aiResponseText: { // Can still store text if code generation fails or for hybrid responses
       type: String,
   },
-  // NEW: Store fetched dataset content needed for rendering the report
+  // NEW: Add field to store the processed analysis results needed by the report code
+  reportAnalysisData: {
+      type: mongoose.Schema.Types.Mixed, // Store the potentially complex JSON object from analysis
+  },
+  // OLD: Store fetched dataset content needed for rendering the report
+  // This might still be useful if the raw data needs to be passed, but analysis data is primary
   reportDatasets: [{
     name: String,
     content: String,

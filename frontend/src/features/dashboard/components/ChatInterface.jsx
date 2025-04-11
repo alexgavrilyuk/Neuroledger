@@ -5,8 +5,7 @@ import Spinner from '../../../shared/ui/Spinner';
 import { ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
 import { useChat } from '../context/ChatContext';
 
-const ChatInterface = ({ messages = [], isLoading, currentSession }) => {
-    const { openReportModal } = useChat();
+const ChatInterface = ({ messages = [], isLoading, currentSession, onViewReport }) => {
     const hasMessages = messages.length > 0;
 
     return (
@@ -39,7 +38,7 @@ const ChatInterface = ({ messages = [], isLoading, currentSession }) => {
                     >
                         <MessageBubble
                             message={msg}
-                            onViewReport={openReportModal}
+                            onViewReport={onViewReport}
                         />
                     </div>
                 ))}

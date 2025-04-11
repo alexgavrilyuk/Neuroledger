@@ -8,9 +8,17 @@ import { HiOutlineChevronDoubleDown } from 'react-icons/hi';
  * Component for displaying the main chat area with messages and input
  */
 const ChatDetail = ({ onViewReport }) => {
+  // ---- ADD SIMPLEST LOG ----
+  console.log('[ChatDetail START] Component rendering/mounting...');
+  // ---- END SIMPLEST LOG ----
+
   const { messages, currentSession, loading } = useChat();
   const messagesEndRef = useRef(null);
   
+  // ---- ADD DEBUG LOG ----
+  console.log('[ChatDetail Render] Received messages array:', messages);
+  // ---- END DEBUG LOG ----
+
   // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -52,13 +60,18 @@ const ChatDetail = ({ onViewReport }) => {
           </div>
         ) : (
           <>
-            {messages.map((message) => (
-              <ChatMessage 
-                key={message._id} 
-                message={message} 
-                onViewReport={onViewReport}
-              />
-            ))}
+            {messages.map((message, index) => {
+              // ---- ADD DEBUG LOG ----
+              console.log(`[ChatDetail Map] Rendering message index ${index}, ID: ${message._id}`);
+              // ---- END DEBUG LOG ----
+              return (
+                <ChatMessage 
+                  key={message._id} 
+                  message={message} 
+                  onViewReport={onViewReport}
+                />
+              );
+            })}
             {/* Invisible element for scrolling to bottom */}
             <div ref={messagesEndRef} />
             

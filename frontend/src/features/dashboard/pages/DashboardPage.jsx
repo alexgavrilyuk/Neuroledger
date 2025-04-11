@@ -57,17 +57,31 @@ const DashboardPage = () => {
 
     // Handler to open the report viewer modal
     const handleViewReport = (reportInfoPayload, quality = null) => {
-        if (!reportInfoPayload || (!reportInfoPayload.code && !reportInfoPayload.reportData) || !reportInfoPayload.datasets) {
-            logger.error("handleViewReport called with invalid reportInfo payload", reportInfoPayload);
-            setCurrentReportInfo({ code: '', datasets: [], error: 'Invalid report data received.' });
+        // ---- ADD LOG AT START ----
+        // Log the received payload, expecting code and analysisData
+        console.log('[DashboardPage handleViewReport START] Received payload:', JSON.stringify(reportInfoPayload));
+        // ---- END LOG ----
+        
+        // SIMPLIFIED CHECK: Require code and the new analysisData field
+        if (!reportInfoPayload || !reportInfoPayload.code || !reportInfoPayload.analysisData) {
+            logger.error("handleViewReport called without valid code or analysisData", reportInfoPayload);
+            // Set error state or handle appropriately
+            setCurrentReportInfo({ code: '', analysisData: {}, error: 'Invalid report data: Code or analysis data missing.' });
+            setCurrentReportQuality(null);
         } else {
-            const infoType = reportInfoPayload.code ? 'code' : 'data';
-            const infoLength = reportInfoPayload.code ? reportInfoPayload.code.length : 'N/A';
-            logger.debug(`Opening report viewer with report ${infoType} (${infoLength} chars) and ${reportInfoPayload.datasets.length} datasets`);
-            setCurrentReportInfo(reportInfoPayload);
+            const infoLength = reportInfoPayload.code.length;
+            // Check analysisData type/keys if needed for more robust logging
+            const hasAnalysisData = typeof reportInfoPayload.analysisData === 'object' && reportInfoPayload.analysisData !== null;
+            logger.debug(`Opening report viewer with code (${infoLength} chars) and analysisData present: ${hasAnalysisData}`);
+            // Set state with code and analysisData
+            setCurrentReportInfo({ 
+                code: reportInfoPayload.code, 
+                analysisData: reportInfoPayload.analysisData // Pass the analysis data object
+            });
+             if (quality) setCurrentReportQuality(quality);
         }
-        if (quality) setCurrentReportQuality(quality);
-        setIsReportViewerOpen(true);
+       
+        setIsReportViewerOpen(true); // Always attempt to open modal, state will dictate content
     };
 
     // Handler for prompt submission
@@ -155,14 +169,11 @@ const DashboardPage = () => {
                 size="xl"
             >
                 <Modal.Body padding="none">
-                    {currentReportInfo ? (
-                        <ReportViewer
-                            reportInfo={currentReportInfo}
-                            themeName={themeName}
-                        />
-                    ) : (
-                        <div className="p-6 text-center text-gray-500">Loading report content...</div>
-                    )}
+                    <ReportViewer
+                        key={currentReportInfo?.code || 'report-viewer'}
+                        reportInfo={currentReportInfo}
+                        themeName={themeName}
+                    />
                 </Modal.Body>
             </Modal>
         </>
