@@ -25,7 +25,7 @@ The service handles:
 - Creating task with proper OIDC token configuration for authentication
 - Error handling and logging
 
-This helps maintain consistency in how background tasks are created across different features.
+This helps maintain consistency in how background tasks are created across different features. 
 
 ### Code Execution Service (`codeExecution.service.js`)
 

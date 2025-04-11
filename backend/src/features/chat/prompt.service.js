@@ -29,8 +29,8 @@ const assembleContext = async (userId, selectedDatasetIds) => {
         if (teamMemberships && teamMemberships.length > 0) {
             const teamIds = teamMemberships.map(membership => membership.teamId);
             const teams = await Team.find({ _id: { $in: teamIds } }).lean();
-            teams.forEach(team => {
-                if (team.settings?.aiContext) {
+                teams.forEach(team => {
+                    if (team.settings?.aiContext) {
                     teamContexts.push(`Team \"${team.name}\": ${team.settings.aiContext}`);
                 }
             });
@@ -69,7 +69,7 @@ const getLLMReasoningResponse = async (agentContext) => {
     if (!anthropic) {
         logger.error("getLLMReasoningResponse called but Anthropic client is not initialized.");
         throw new Error('AI assistant is currently unavailable.');
-    }
+     }
 
     const startTime = Date.now();
     const { originalQuery, historySummary, currentTurnSteps, availableTools, userContext, teamContext } = agentContext;
@@ -93,7 +93,7 @@ const getLLMReasoningResponse = async (agentContext) => {
             { role: "user", content: originalQuery } // The user's latest query
         ];
 
-        const modelToUse = "claude-3-opus-20240229"; // Use a powerful model for reasoning
+        const modelToUse = "claude-3-7-sonnet-20250219"; // Use a powerful model for reasoning
         const apiOptions = {
             model: modelToUse,
             max_tokens: 4096, // Max output tokens (tool call JSON or final answer)
@@ -134,94 +134,84 @@ const getLLMReasoningResponse = async (agentContext) => {
  * @param {object} params.datasetSchema - Schema information ({schemaInfo, columnDescriptions, description}).
  * @returns {Promise<{code: string | null}>} - The generated code string or null on failure.
  */
-const generateSandboxedCode = async ({ analysisGoal, datasetSchema }) => {
+const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     if (!anthropic) {
-        logger.error("generateSandboxedCode called but Anthropic client is not initialized.");
+        logger.error("generateAnalysisCode called but Anthropic client is not initialized.");
         throw new Error('AI assistant is currently unavailable.');
     }
     if (!analysisGoal || !datasetSchema) {
-        throw new Error('Missing analysis goal or dataset schema for code generation.');
+        throw new Error('Missing analysis goal or dataset schema for analysis code generation.');
     }
 
     const startTime = Date.now();
-    logger.info(`Generating sandboxed Node.js code for goal: \"${analysisGoal.substring(0, 100)}...\"`);
+    logger.info(`Generating analysis Node.js code for goal: \"${analysisGoal.substring(0, 100)}...\"`);
 
-    // 1. Construct a dedicated system prompt for sandboxed code generation
-    const codeGenSystemPrompt = `You are an expert Node.js developer writing code for a VERY RESTRICTED sandbox (Node.js vm.runInNewContext).\n
+    // Construct the system prompt for ANALYSIS code generation
+    const analysisCodeGenSystemPrompt = `You are an expert Node.js developer writing analysis code for a VERY RESTRICTED sandbox (Node.js vm.runInNewContext).
 
-CONTEXT IN SANDBOX:
-1.  \`datasetContent\`: A **string** variable with the raw dataset content (likely CSV).
-2.  \`sendResult(data)\`: Function to return ONE JSON-serializable result.
-3.  Standard JS built-ins (String, Array, Object, Math, JSON, etc.).
-4.  \`console.log/warn/error\` for debugging (does not return results).
+    CONTEXT IN SANDBOX:
+    1.  \`inputData\`: A JavaScript variable already populated with the PARSED dataset as an array of objects. Do NOT try to parse it again.
+    2.  \`sendResult(data)\`: Function to return ONE JSON-serializable result of your analysis.
+    3.  Standard JS built-ins ONLY (String, Array, Object, Math, JSON, Date, etc.).
+    4.  \`console.log/warn/error\` for debugging.
 
-RESTRICTIONS (CRITICAL):
-*   NO \`require()\` calls (no modules like fs, path, http, csv-parse, etc.).
-*   NO Node.js globals (process, Buffer, setTimeout, fetch, etc.).
-*   NO \`async/await\` (use only standard sync JS or basic Promises if absolutely needed).
-*   Code MUST be relatively simple and fast (runs within ~5 seconds).
-*   MUST call \`sendResult(data)\` exactly once with the final result.
+    RESTRICTIONS (CRITICAL):
+    *   NO \`require()\`. NO external libraries.
+    *   NO Node.js globals (process, Buffer, fs, etc.).
+    *   NO \`async/await\`.
+    *   MUST use the provided \`inputData\` variable directly.
+    *   MUST call \`sendResult(data)\` exactly once with the analysis result.
+    *   MUST complete within ~5 seconds.
 
-DATASET SCHEMA:
-*   Description: ${datasetSchema.description || '(No description provided)'}
-*   Columns:
-${(datasetSchema.schemaInfo || []).map(col => `    - ${col.name} (Type: ${col.type || 'unknown'})${datasetSchema.columnDescriptions?.[col.name] ? ': ' + datasetSchema.columnDescriptions[col.name] : ''}`).join('\n') || '    (No schema info available)'}
+    DATASET SCHEMA (for context on properties within inputData objects):
+    *   Description: ${datasetSchema.description || '(No description provided)'}
+    *   Columns: ${(datasetSchema.schemaInfo || []).map(col => `    - ${col.name} (Type: ${col.type || 'unknown'})`).join('\n') || '    (No schema info available)'}
 
-**TASK:**
-Write a Node.js script that achieves the goal: \"${analysisGoal}\"
+    **TASK:**
+    Write a Node.js script that:
+    1.  Takes the \`inputData\` array of objects.
+    2.  Performs the analysis using \`inputData\` to achieve the goal: "${analysisGoal}"
+    3.  Calls \`sendResult(result)\` with the final JSON-serializable analysis result.
+    4.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
 
-Specifically, the script MUST:
-1.  Take the \`datasetContent\` **string**.
-2.  **Parse the CSV string MANUALLY:**
-    *   Add \`console.log('Starting parsing...')\`.
-    *   Handle potential BOM.
-    *   Split into lines ('\\n'). Handle \`\\r\`. Add \`console.log(\`Processing \${lines.length} lines...\`)\`.
-    *   Get headers from first non-empty line, split by comma, trim. Add \`console.log(\`Headers: \${headers.join(',')}\`)\`.
-    *   Map remaining lines to objects. Add \`console.log(\`Processing row \${i+1}...\`)\` inside the loop. Add error logging within the loop for skipped rows or parsing issues.
-    *   Perform type conversion (e.g., parseFloat), checking for NaN.
-    *   Result is an array of objects (\`parsedData\`). Add \`console.log(\`Parsed \${parsedData.length} data rows.\`)\`.
-3.  **If the goal involves analysis:**
-    *   Add \`console.log('Starting analysis...')\`.
-    *   Perform calculation on \`parsedData\`.
-    *   Add \`console.log('Analysis complete.')\`.
-4.  Call \`sendResult(result)\`. Add \`console.log('Calling sendResult...')\` right before it.
-5.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` and \`console.error(\`Execution Error: \${err.message}\`)\` in the catch block.`
+    OUTPUT REQUIREMENTS:
+    *   Provide ONLY the raw Node.js code string, starting with \`try { ... } catch (err) { ... }\`. No markdown.
+    *   The code MUST operate directly on the \`inputData\` variable. DO NOT include any CSV parsing logic.`;
 
     try {
-        const messages = [{ role: "user", content: "Generate the Node.js code based on the requirements, ensuring CSV parsing is included."}]; // Updated user message slightly
-        const modelToUse = "claude-3-7-sonnet-20250219"; 
+        const messages = [{ role: "user", content: `Generate the Node.js analysis code based on the requirements and the goal: ${analysisGoal}` }];
+        const modelToUse = "claude-3-sonnet-20240229"; 
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 3072, // Increased tokens slightly for parsing logic
-            system: codeGenSystemPrompt,
+            max_tokens: 3500, 
+            system: analysisCodeGenSystemPrompt,
             messages,
             temperature: 0.0 
         };
 
-        logger.debug(`Calling Claude API for Sandboxed Code Generation with model ${modelToUse}...`);
+        logger.debug(`Calling Claude API for Analysis Code Generation with model ${modelToUse}...`);
         const claudeApiResponse = await anthropic.messages.create(apiOptions);
         const generatedCode = claudeApiResponse.content?.[0]?.type === 'text' ? claudeApiResponse.content[0].text.trim() : null;
 
         if (!generatedCode) {
-            logger.error('Unexpected or empty response format from Claude API for sandboxed code gen:', claudeApiResponse);
-            throw new Error('AI assistant provided no code.');
+            logger.error(`Unexpected or empty response format from Claude API for analysis code gen:`, claudeApiResponse);
+            throw new Error('AI assistant provided no analysis code.');
         }
 
-        // More robust check: includes parsing logic AND sendResult
-        if (!generatedCode.includes('sendResult(') || (!generatedCode.includes('.split(\'\n\')') && !generatedCode.includes('.split(",")'))) {
-             logger.warn('Generated sandboxed code might be missing parsing or sendResult() call.');
+        if (!generatedCode.includes('sendResult(')) {
+             logger.warn('Generated analysis code might be missing sendResult() call.');
+        }
+        if (generatedCode.includes('.split(') || generatedCode.includes('datasetContent')) {
+             logger.warn('Generated analysis code unexpectedly contains parsing logic!');
+             // Potentially throw error here?
         }
 
-        logger.debug('--- Received Generated Code ---');
-        console.log(generatedCode); // Log the exact code received
-        logger.debug('--- End Generated Code ---');
-
-        logger.info(`Sandboxed code generated successfully using ${modelToUse}. Length: ${generatedCode.length}`);
+        logger.info(`Analysis code generated successfully using ${modelToUse}. Length: ${generatedCode.length}`);
         return { code: generatedCode };
 
     } catch (error) {
-        logger.error(`Error during sandboxed code generation API call with model ${modelToUse}: ${error.message}`, error);
-        throw new Error(`AI failed to generate sandboxed code: ${error.message}`);
+        logger.error(`Error during analysis code generation API call with model ${modelToUse}: ${error.message}`, error);
+        throw new Error(`AI failed to generate analysis code: ${error.message}`);
     }
 };
 
@@ -271,10 +261,10 @@ Generate the React component code now.`;
     try {
         const messages = [{ role: "user", content: "Generate the React component code for the report based on the summary and data structure."}];
         // Use a capable model, maybe Sonnet is sufficient for this?
-        const modelToUse = "claude-3-sonnet-20240229";
+        const modelToUse = "claude-3-7-sonnet-20250219";
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 4096, // Allow ample space for component code
+            max_tokens: 16000, // Allow ample space for component code
             system: reportGenSystemPrompt,
             messages,
             temperature: 0.1 // Low temperature for more predictable code structure
@@ -338,7 +328,7 @@ const summarizeChatHistory = async (chatHistory) => {
         const modelToUse = "claude-3-7-sonnet-20250219"; 
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 250, // Limit summary length
+            max_tokens: 2500, // Limit summary length
             system: summarizationSystemPrompt,
             messages,
             temperature: 0.2 
@@ -367,7 +357,7 @@ const summarizeChatHistory = async (chatHistory) => {
 module.exports = {
     assembleContext, // Keep for potential future use
     getLLMReasoningResponse, // New function for the agent
-    generateSandboxedCode, // Add the new function
+    generateAnalysisCode, // Export new function
     generateReportCode, // Add the new function
     summarizeChatHistory // Add the new summarization function
     // generateCode, // Mark as removed/obsolete

@@ -5,6 +5,7 @@ const PromptHistory = require('./prompt.model');
 const { getIO } = require('../../socket'); // Corrected path
 const { assembleContext } = require('./prompt.service'); // Import assembleContext
 const codeExecutionService = require('../../shared/services/codeExecution.service'); // Import Code Execution Service
+const Papa = require('papaparse'); // Import papaparse
 
 const MAX_AGENT_ITERATIONS = 10; // Increased iterations slightly for multi-step tasks
 const MAX_TOOL_RETRIES = 1; // Allow one retry for potentially transient tool errors
@@ -24,7 +25,13 @@ class AgentOrchestrator {
             originalQuery: '',
             chatHistoryForSummarization: [], // Store raw history for summarizer
             steps: [], // Track tools used and results this turn
-            intermediateResults: {},
+            intermediateResults: {
+                lastSchema: null, 
+                parsedDataRef: null,
+                generatedAnalysisCode: null,
+                analysisResult: null,
+                analysisError: null,
+            },
             userContext: '', // User settings context
             teamContext: '', // Team settings context
             generatedReportCode: null, // NEW: Store generated React code this turn
@@ -85,14 +92,100 @@ class AgentOrchestrator {
             while (iterations < MAX_AGENT_ITERATIONS) {
                 iterations++;
                 logger.info(`[Agent Loop ${this.sessionId}] Iteration ${iterations}`);
+                
+                let action;
+                let forceAction = null; // null | 'execute_parser' | 'generate_analysis' | 'execute_analysis'
+                let codeToExecute = null;
+                let datasetIdForExecution = null; // Still needed for parsing
+                let parsedDataRefForExecution = null;
+                let analysisGoalForGeneration = null;
 
-                // 1. Reason/Plan: Call LLM to decide next action
-                const llmContext = this._prepareLLMContext();
-                const llmResponse = await promptService.getLLMReasoningResponse(llmContext);
+                // --- Determine if an action should be forced based on previous step --- 
+                if (this.turnContext.steps.length > 0) {
+                    const lastStep = this.turnContext.steps[this.turnContext.steps.length - 1];
+                    const lastTool = lastStep.tool;
+                    const lastResultSummary = lastStep.resultSummary || '';
+                    const lastArgs = lastStep.args || {};
 
-                // 2. Parse LLM Response: Tool call or final answer?
-                const action = this._parseLLMResponse(llmResponse);
+                    // Case 1: Generation of PARSER code succeeded -> Force execution of parser code
+                    if (lastTool === 'generate_data_extraction_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.generatedParserCode) {
+                        forceAction = 'execute_parser';
+                        let rawGeneratedCode = this.turnContext.intermediateResults.generatedParserCode;
+                        const codeBlockRegex = /^```(?:javascript|js)?\s*([\s\S]*?)\s*```$|^([\s\S]*)$/m;
+                        const match = rawGeneratedCode.match(codeBlockRegex);
+                        codeToExecute = match && (match[1] || match[2]) ? (match[1] || match[2]).trim() : rawGeneratedCode.trim();
+                        datasetIdForExecution = lastArgs.dataset_id;
+                        // Store original goal for the *next* generation step
+                        this.turnContext.intermediateResults.originalAnalysisGoal = lastArgs.analysis_goal;
+                        logger.info(`[Agent Loop ${this.sessionId}] Stage 1 Complete: Parser code generated. Forcing execution.`);
+                    }
+                    // Case 2: Execution of PARSER code succeeded -> Force generation of ANALYSIS code
+                    else if (lastTool === 'execute_backend_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.parserExecutionResult) {
+                        forceAction = 'generate_analysis';
+                        // --- OVERRIDE GOAL FOR DEBUGGING --- 
+                        // analysisGoalForGeneration = this.turnContext.intermediateResults.originalAnalysisGoal;
+                        analysisGoalForGeneration = "Calculate the total number of rows in the inputData array and return it as { rowCount: number }.";
+                        logger.info(`[Agent Loop ${this.sessionId}] Stage 2 Complete: Parser code executed. Forcing SIMPLE analysis code generation.`);
+                        // --- END OVERRIDE --- 
+                    }
+                    // Case 3: Generation of ANALYSIS code succeeded -> Force execution of analysis code
+                    else if (lastTool === 'generate_analysis_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.generatedAnalysisCode) {
+                        forceAction = 'execute_analysis';
+                        let rawGeneratedCode = this.turnContext.intermediateResults.generatedAnalysisCode;
+                        const codeBlockRegex = /^```(?:javascript|js)?\s*([\s\S]*?)\s*```$|^([\s\S]*)$/m;
+                        const match = rawGeneratedCode.match(codeBlockRegex);
+                        codeToExecute = match && (match[1] || match[2]) ? (match[1] || match[2]).trim() : rawGeneratedCode.trim();
+                        parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
+                        logger.info(`[Agent Loop ${this.sessionId}] Stage 3 Complete: Analysis code generated. Forcing execution.`);
+                    }
+                }
 
+                // --- Determine Action --- 
+                if (forceAction === 'execute_parser') {
+                    if (!codeToExecute) {
+                        logger.error('[Agent Loop] Cannot force PARSER execution, cleaned code is empty.');
+                        action = null; // Let LLM try to recover
+                    } else {
+                        action = {
+                            tool: 'execute_backend_code', // Still uses the old executor name for now
+                            args: { code: codeToExecute, dataset_id: datasetIdForExecution }
+                        };
+                    }
+                    this.turnContext.intermediateResults.generatedParserCode = null; // Clear intermediate
+                } else if (forceAction === 'generate_analysis') {
+                     if (!analysisGoalForGeneration) {
+                         logger.error('[Agent Loop] Cannot force ANALYSIS generation, original goal not found.');
+                         action = null;
+                     } else {
+                        action = {
+                            tool: 'generate_analysis_code',
+                            args: { analysis_goal: analysisGoalForGeneration }
+                        };
+                     }
+                } else if (forceAction === 'execute_analysis') {
+                     if (!codeToExecute) {
+                         logger.error('[Agent Loop] Cannot force ANALYSIS execution, cleaned code is empty.');
+                         action = null;
+                     } else if (!parsedDataRefForExecution) {
+                         logger.error('[Agent Loop] Cannot force ANALYSIS execution, parsed data reference is missing.');
+                         action = null;
+                     } else {
+                         action = {
+                             tool: 'execute_analysis_code',
+                             args: { code: codeToExecute, parsed_data_ref: parsedDataRefForExecution }
+                         };
+                     }
+                     this.turnContext.intermediateResults.generatedAnalysisCode = null; // Clear intermediate
+                }
+                
+                // If no action forced, get from LLM
+                if (!action) { 
+                    const llmContext = this._prepareLLMContext();
+                    const llmResponse = await promptService.getLLMReasoningResponse(llmContext);
+                    action = this._parseLLMResponse(llmResponse);
+                }
+
+                // --- Action Processing --- 
                 if (action.tool === '_answerUserTool') {
                     // Validate the extracted answer
                     if (typeof action.args.textResponse !== 'string' || action.args.textResponse.trim() === '') {
@@ -104,7 +197,7 @@ class AgentOrchestrator {
                     }
                     logger.info(`[Agent Loop ${this.sessionId}] LLM decided to answer.`);
                     this.turnContext.steps.push({ tool: action.tool, args: action.args, resultSummary: 'Final answer provided.' });
-                    break; // Exit loop
+                    break; 
                 } else if (action.tool === 'generate_report_code') { // Handle report generation
                     logger.info(`[Agent Loop ${this.sessionId}] LLM requested tool: ${action.tool}`);
                     this.turnContext.steps.push({ tool: action.tool, args: action.args, resultSummary: 'Executing tool...'});
@@ -124,60 +217,104 @@ class AgentOrchestrator {
                     }
                     // Loop continues after report generation attempt
                 } else if (action.tool) {
-                    logger.info(`[Agent Loop ${this.sessionId}] LLM requested tool: ${action.tool}`);
-                    const currentStepIndex = this.turnContext.steps.length; // Index for potential updates
-                    this.turnContext.steps.push({ tool: action.tool, args: action.args, resultSummary: 'Executing tool...', attempt: 1 });
+                    logger.info(`[Agent Loop ${this.sessionId}] Executing Action: Tool ${action.tool}`);
+                    const currentStepIndex = this.turnContext.steps.length;
+                    // Don't add a step if it's a forced action that logically follows the previous step?
+                    // Or maybe add it to show the forced step? Let's add it.
+                    this.turnContext.steps.push({ 
+                        tool: action.tool, 
+                        args: action.args, 
+                        resultSummary: 'Executing tool...', 
+                        attempt: 1, 
+                        isForced: !!forceAction // Mark if step was forced
+                    });
+                    
                     this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args });
 
                     let toolResult = await this.toolDispatcher(action.tool, action.args);
                     let resultSummary = this._summarizeToolResult(toolResult);
-                    this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
                     
-                    // --- Error Handling & Retry Logic --- 
-                    if (toolResult.error && (this.turnContext.toolErrorCounts[action.tool] || 0) < MAX_TOOL_RETRIES) {
-                        logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed. Attempting retry (${(this.turnContext.toolErrorCounts[action.tool] || 0) + 1}/${MAX_TOOL_RETRIES}). Error: ${toolResult.error}`);
-                        this.turnContext.toolErrorCounts[action.tool] = (this.turnContext.toolErrorCounts[action.tool] || 0) + 1;
-                        
-                        // Update step summary to indicate retry
-                        this.turnContext.steps[currentStepIndex].resultSummary = `Error: ${toolResult.error}. Retrying...`;
-                        this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary: this.turnContext.steps[currentStepIndex].resultSummary }); // Update FE briefly
-
-                        // Wait briefly before retry?
-                        // await new Promise(resolve => setTimeout(resolve, 500)); 
-
-                        this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args }); // Indicate retry attempt
-                        toolResult = await this.toolDispatcher(action.tool, action.args); // Retry the tool
-                        resultSummary = this._summarizeToolResult(toolResult); // Get new summary
-                        
-                        // Update step with final attempt result
+                    if(this.turnContext.steps[currentStepIndex]) {
                         this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
-                        this.turnContext.steps[currentStepIndex].attempt = 2; 
-                        
-                        if (toolResult.error) {
-                           logger.error(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed on retry. Error: ${toolResult.error}`);
-                        } else {
-                           logger.info(`[Agent Loop ${this.sessionId}] Tool ${action.tool} succeeded on retry.`);
-                        }
                     }
-                    // --- End Retry Logic --- 
+                    
+                    // --- Retry Logic (Only for non-forced steps?) ---
+                    // If a forced step fails, retrying might not help if the input was wrong.
+                    // Let's disable retry for forced steps for now.
+                    const allowRetry = !forceAction;
+                    if (allowRetry && toolResult.error && (this.turnContext.toolErrorCounts[action.tool] || 0) < MAX_TOOL_RETRIES) {
+                         const retryCount = (this.turnContext.toolErrorCounts[action.tool] || 0) + 1;
+                         logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed. Attempting retry (${retryCount}/${MAX_TOOL_RETRIES}). Error: ${toolResult.error}`);
+                         this.turnContext.toolErrorCounts[action.tool] = retryCount;
+                         
+                         const stepSummaryWithError = `Error: ${toolResult.error}. Retrying...`;
+                         if(this.turnContext.steps[currentStepIndex]) {
+                              this.turnContext.steps[currentStepIndex].resultSummary = stepSummaryWithError;
+                              this.turnContext.steps[currentStepIndex].attempt = retryCount + 1; 
+                         }
+                         this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary: stepSummaryWithError });
+
+                         this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args }); 
+                         toolResult = await this.toolDispatcher(action.tool, action.args); 
+                         resultSummary = this._summarizeToolResult(toolResult);
+                         
+                         if(this.turnContext.steps[currentStepIndex]) {
+                             this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
+                         }
+                         
+                         if (toolResult.error) {
+                            logger.error(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed on retry. Error: ${toolResult.error}`);
+                         } else {
+                            logger.info(`[Agent Loop ${this.sessionId}] Tool ${action.tool} succeeded on retry.`);
+                         }
+                     }
+                    // --- End Retry Logic ---
 
                     this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary });
 
-                    // Store intermediate results if needed (e.g., code from generate_data_extraction_code)
+                    // --- Store Intermediate Results --- 
+                    if (action.tool === 'get_dataset_schema' && toolResult.result) {
+                        this.turnContext.intermediateResults.lastSchema = toolResult.result;
+                        logger.info(`Stored dataset schema.`);
+                    }
+                    if (action.tool === 'parse_csv_data' && toolResult.result?.parsed_data_ref) {
+                        this.turnContext.intermediateResults.parsedDataRef = toolResult.result.parsed_data_ref;
+                        logger.info(`Stored parsed data reference: ${toolResult.result.parsed_data_ref}`);
+                    }
                     if (action.tool === 'generate_data_extraction_code' && toolResult.result?.code) {
-                         this.turnContext.intermediateResults.generatedCode = toolResult.result.code;
+                        this.turnContext.intermediateResults.generatedParserCode = toolResult.result.code;
+                        logger.info(`Stored generated PARSER code for execution.`);
+                    }
+                     if (action.tool === 'generate_analysis_code' && toolResult.result?.code) {
+                         this.turnContext.intermediateResults.generatedAnalysisCode = toolResult.result.code;
+                         logger.info(`Stored generated ANALYSIS code.`);
                     } 
-                    // Store execution result
-                    if (action.tool === 'execute_backend_code' && toolResult.result !== undefined) {
-                         this.turnContext.intermediateResults.codeExecutionResult = toolResult.result;
-                    } else if (action.tool === 'execute_backend_code' && toolResult.error) {
-                         this.turnContext.intermediateResults.codeExecutionError = toolResult.error;
+                    // Distinguish parser vs analysis execution results based on context
+                    if (action.tool === 'execute_backend_code') { // Old name used by parser exec
+                        if (toolResult.result !== undefined) {
+                             this.turnContext.intermediateResults.parserExecutionResult = toolResult.result;
+                             logger.info(`Stored PARSER execution result.`);
+                        } else if (toolResult.error) {
+                             this.turnContext.intermediateResults.parserExecutionError = toolResult.error;
+                             logger.warn(`Stored PARSER execution error.`);
+                        }
                     }
-
-                    if (toolResult.error) {
-                         logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} resulted in error: ${toolResult.error}`);
+                     if (action.tool === 'execute_analysis_code') { // New name for analysis exec
+                         if (toolResult.result !== undefined) {
+                             this.turnContext.intermediateResults.analysisResult = toolResult.result;
+                             logger.info(`Stored ANALYSIS execution result.`);
+                         } else if (toolResult.error) {
+                             this.turnContext.intermediateResults.analysisError = toolResult.error;
+                             logger.warn(`Stored ANALYSIS execution error.`);
+                         }
                     }
-                } else { // Should not happen with current parsing logic, but handle defensively
+                    if (action.tool === 'generate_report_code' && toolResult.result?.react_code) {
+                         this.turnContext.generatedReportCode = toolResult.result.react_code;
+                         logger.info(`Stored generated React report code.`);
+                    }
+                    // --- End Store Results ---
+                    
+                } else { 
                     logger.warn(`[Agent Loop ${this.sessionId}] LLM response parsing failed or yielded no action. Treating raw response as final answer. Raw: ${llmResponse}`);
                     this.turnContext.finalAnswer = llmResponse.trim();
                     this.turnContext.steps.push({ tool: '_unknown', args: {}, resultSummary: 'LLM response unclear, using as final answer.' });
@@ -318,7 +455,23 @@ class AgentOrchestrator {
             const potentialJson = jsonMatch[1] || jsonMatch[2];
             if (potentialJson) {
                  try {
-                    const parsed = JSON.parse(potentialJson);
+                    // --- SANITIZATION STEP --- 
+                    // Aggressively replace literal newlines \n within the string values 
+                    // specifically targeting the 'code' argument.
+                    let sanitizedJsonString = potentialJson.replace(/("code"\s*:\s*")([\s\S]*?)("(?!\\))/gs, (match, p1, p2, p3) => {
+                        // p1 = "code": "
+                        // p2 = the code content
+                        // p3 = the closing quote "
+                        const escapedCode = p2
+                            .replace(/\\/g, '\\\\') // Escape backslashes FIRST
+                            .replace(/"/g, '\\"')  // Escape double quotes
+                            .replace(/\n/g, '\\n') // Escape newlines
+                            .replace(/\r/g, '\\r'); // Escape carriage returns
+                        return p1 + escapedCode + p3;
+                    });
+                    // --- END SANITIZATION --- 
+
+                    const parsed = JSON.parse(sanitizedJsonString); // Parse the sanitized string
 
                     // Validate the parsed JSON structure for a tool call
                     if (parsed && typeof parsed.tool === 'string' && typeof parsed.args === 'object' && parsed.args !== null) {
@@ -347,8 +500,8 @@ class AgentOrchestrator {
                          return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                     }
                 } catch (e) {
-                    logger.error(`Failed to parse extracted JSON: ${e.message}. JSON source: ${potentialJson}`);
-                    // Fallback: Treat original string as answer
+                    // Log the sanitized string attempt as well - Use potentialJson for original
+                    logger.error(`Failed to parse extracted JSON: ${e.message}. Sanitized attempt: ${sanitizedJsonString || '[Sanitization failed]'}. Original JSON source: ${potentialJson}`);
                     return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                 }
             }
@@ -361,61 +514,48 @@ class AgentOrchestrator {
 
     /** Returns the structured definitions of available tools for the LLM prompt. */
     _getToolDefinitions() {
-        // Based on Section 7 of AI-Improvement-Plan.md (Phase 1, 2 & 3)
         return [
-            // Phase 1 tools (list_datasets, get_dataset_schema)
             {
                 name: 'list_datasets',
-                description: 'Lists available datasets (IDs, names, descriptions) accessible to the user/team.',
-                args: {}, // No arguments needed
-                output: '{ \"datasets\": [{ \"id\": \"...\", \"name\": \"...\", \"description\": \"...\" }, ...] }'
+                description: 'Lists available datasets (IDs, names, descriptions).',
+                args: {},
+                output: '{ \"datasets\": [{ \"id\": \"...\" }] }'
             },
             {
                 name: 'get_dataset_schema',
-                description: 'Gets detailed schema (column names, types), description, and column descriptions for a specific dataset ID.',
-                args: { dataset_id: 'string (The ID of the dataset)' },
-                output: '{ \"schemaInfo\": [{ \"name\": \"...\", \"type\": \"...\" }, ...], \"columnDescriptions\": {\"colA\": \"desc\", ...}, \"description\": \"...\" }'
+                description: 'Gets schema (column names, types, descriptions) for a specific dataset ID.',
+                args: { dataset_id: 'string' },
+                output: '{ \"schemaInfo\": [...], \"columnDescriptions\": {...}, \"description\": \"...\" }'
             },
-            // Phase 2 tools (generate_data_extraction_code, execute_backend_code)
             {
-                name: 'generate_data_extraction_code', // Phase 2 Tool
-                description: 'Generates Node.js code suitable for a restricted sandbox environment to extract or analyze data from a specific dataset based on a goal. Use this BEFORE execute_backend_code.',
-                args: {
-                    dataset_id: 'string (The ID of the dataset to analyze)',
-                    // columns_needed: 'string[] (Specific columns required for the analysis - optional but helpful)',
-                    // filters: 'object (Key-value pairs for filtering data - optional)',
-                    analysis_goal: 'string (Clear description of what the code should calculate or extract)'
-                },
+                name: 'parse_csv_data',
+                description: 'Parses the raw CSV content of a dataset using PapaParse. Returns a reference ID to the parsed data.',
+                args: { dataset_id: 'string' },
+                output: '{ \"status\": \"success\", \"parsed_data_ref\": \"<ref_id>\", \"rowCount\": <number> } or { \"error\": \"...\" }'
+            },
+            {
+                name: 'generate_analysis_code',
+                description: 'Generates Node.js analysis code expecting pre-parsed data in \`inputData\` variable.',
+                args: { analysis_goal: 'string' },
                 output: '{ \"code\": \"<Node.js code string>\" }'
             },
             {
-                name: 'execute_backend_code', // Phase 2 Tool
-                description: 'Executes the provided Node.js code in a secure backend sandbox with access ONLY to the content of the specified dataset (as datasetContent variable) and a sendResult(data) function. Use this AFTER generate_data_extraction_code.',
-                args: {
-                    code: 'string (The Node.js code generated by generate_data_extraction_code)',
-                    dataset_id: 'string (The ID of the dataset the code needs to access)'
-                },
-                output: '{ \"result\": <JSON output from sendResult(data)>, \"error\": \"<error message if execution failed>\" }'
+                name: 'execute_analysis_code',
+                description: 'Executes analysis code in a sandbox with parsed data injected as \`inputData\`.',
+                args: { code: 'string', parsed_data_ref: 'string' },
+                output: '{ \"result\": <JSON result>, \"error\": \"...\" }'
             },
-            // Phase 3 tool (generate_report_code)
             {
-                name: 'generate_report_code', 
-                description: 'Generates React component code (using React.createElement, NO JSX) for visualizing analysis results using provided data. Call this BEFORE _answerUserTool if a visual report is beneficial.',
-                args: {
-                    analysis_summary: 'string (A textual summary of the key findings from your analysis)',
-                    data_json: 'object (The JSON data object returned by execute_backend_code containing the data needed for the report)'
-                },
-                output: '{ \"react_code\": \"<React component code string>\" }'
+                name: 'generate_report_code',
+                description: 'Generates React report code based on analysis results.',
+                args: { analysis_summary: 'string', analysis_result: 'object' },
+                output: '{ \"react_code\": \"<React code string>\" }'
             },
-            // Final answer tool
-             {
-                name: '_answerUserTool', 
-                description: 'Provides the final textual answer to the user. If you generated report code with generate_report_code, call this AFTER that tool finishes, providing a concise text summary alongside the report.',
-                args: { 
-                    textResponse: 'string (The final, complete answer/summary for the user.)' 
-                    // No need to pass react code here, agent manages it internally
-                },
-                output: 'Signals loop completion. The provided textResponse will be sent to the user.'
+            {
+                name: '_answerUserTool',
+                description: 'Provides the final textual answer to the user.',
+                args: { textResponse: 'string' },
+                output: 'Signals loop end.'
             }
         ];
     }
@@ -425,17 +565,16 @@ class AgentOrchestrator {
         return {
             'list_datasets': this._listDatasetsTool,
             'get_dataset_schema': this._getDatasetSchemaTool,
-            'generate_data_extraction_code': this._generateDataExtractionCodeTool,
-            'execute_backend_code': this._executeBackendCodeTool,
-            'generate_report_code': this._generateReportCodeTool, // Phase 3
+            'parse_csv_data': this._parseCsvDataTool, 
+            'generate_analysis_code': this._generateAnalysisCodeTool, 
+            'execute_analysis_code': this._executeAnalysisCodeTool, 
+            'generate_report_code': this._generateReportCodeTool,
             '_answerUserTool': this._answerUserTool,
-            // Add future tool implementations here
         };
     }
 
     /** Summarizes tool results, especially large ones, for the LLM context. */
     _summarizeToolResult(result) {
-        // Add more detail to error summaries
         try {
             if (!result) return 'Tool returned no result.';
             if (result.error) {
@@ -455,16 +594,17 @@ class AgentOrchestrator {
                 }
                 return errorSummary;
             }
+            // Add summary for successful parsing
+            if (result.result?.status === 'success' && result.result?.parsed_data_ref) {
+                 return `Successfully parsed data (${result.result.rowCount || '?'} rows). Ref ID: ${result.result.parsed_data_ref}`;
+            }
             // Add specific summary for report code generation
             if (result.result && typeof result.result.react_code === 'string') {
                 return 'Successfully generated React report code.';
             }
             const resultString = JSON.stringify(result.result);
-            const limit = 1000;
+            const limit = 500; // Shorter limit for analysis results in context
             if (resultString.length > limit) {
-                if (result.result && typeof result.result.code === 'string') {
-                    return 'Successfully generated data extraction code snippet.';
-                }
                 let summary = resultString.substring(0, limit - 3) + '...';
                 try {
                     const parsed = JSON.parse(resultString); 
@@ -580,6 +720,9 @@ class AgentOrchestrator {
                 columnDescriptions: schemaData.columnDescriptions || {},
                 description: schemaData.description || ''
              };
+            // STORE SCHEMA FOR LATER USE BY CODE GEN
+            this.turnContext.intermediateResults.lastSchema = resultData;
+            logger.info(`[Agent Loop ${this.sessionId}] Stored dataset schema.`);
             return { result: resultData };
         } catch (error) {
             logger.error(`_getDatasetSchemaTool failed for ${dataset_id}: ${error.message}`, { error });
@@ -591,112 +734,146 @@ class AgentOrchestrator {
         }
     }
 
-    /** Tool: Generate Data Extraction Code */ 
-    async _generateDataExtractionCodeTool(args) {
-        const { dataset_id, analysis_goal } = args;
-        // Force a simpler goal for now to test parsing
-        const simplifiedGoal = "Parse the datasetContent CSV string into an array of objects using manual string splitting. Return the headers and the first 5 data rows.";
-        logger.info(`Executing tool: generate_data_extraction_code for dataset ${dataset_id} with simplified goal.`);
-        // Original goal logged for reference, but not sent for code gen yet
-        logger.debug(`Original analysis goal was: ${analysis_goal}`);
-
+    /** Tool: Parse CSV Data */
+    async _parseCsvDataTool(args) {
+        const { dataset_id } = args;
+        logger.info(`Executing tool: parse_csv_data for dataset ${dataset_id}`);
         if (!dataset_id || typeof dataset_id !== 'string') {
-            return { error: 'Missing or invalid required argument: dataset_id (must be a string)' };
+            return { error: 'Missing or invalid required argument: dataset_id' };
         }
-        // Analysis goal is now fixed, no need to validate it as input arg for now
-        // if (!analysis_goal || typeof analysis_goal !== 'string') {
-        //     return { error: 'Missing or invalid required argument: analysis_goal (must be a string)' };
-        // }
 
         try {
-            const schemaData = await datasetService.getDatasetSchema(dataset_id, this.userId);
-            if (!schemaData) {
-                 return { error: `Dataset schema not found or access denied for ID: ${dataset_id}. Cannot generate code without schema.` };
+            const rawContent = await datasetService.getRawDatasetContent(dataset_id, this.userId);
+            if (!rawContent) {
+                // Should be caught by getRawDatasetContent, but double-check
+                throw new Error('Failed to fetch dataset content or content is empty.');
+            }
+            
+            logger.info(`Parsing CSV content for dataset ${dataset_id} (length: ${rawContent.length})`);
+            // Use PapaParse for reliable parsing
+            const parseResult = Papa.parse(rawContent, {
+                header: true, // Automatically use first row as header
+                dynamicTyping: true, // Attempt to convert numbers/booleans
+                skipEmptyLines: true,
+                transformHeader: header => header.trim(), // Trim header whitespace
+                //delimiter: ",", // Default is comma
+                //newline: "", // Auto-detect
+                //quoteChar: '"', // Default
+            });
+
+            if (parseResult.errors && parseResult.errors.length > 0) {
+                logger.error(`PapaParse errors for dataset ${dataset_id}:`, parseResult.errors);
+                // Report only the first few errors to avoid overwhelming context
+                const errorSummary = parseResult.errors.slice(0, 3).map(e => e.message).join('; ');
+                return { error: `CSV Parsing failed: ${errorSummary}` };
             }
 
-            // Call promptService with the *simplified* goal
-            const generatedCodeResponse = await promptService.generateSandboxedCode({
-                analysisGoal: simplifiedGoal, // Use the simplified goal
+            if (!parseResult.data || parseResult.data.length === 0) {
+                return { error: 'CSV Parsing resulted in no data.' };
+            }
+
+            logger.info(`Successfully parsed ${parseResult.data.length} rows for dataset ${dataset_id}.`);
+            // Store the *full* parsed data in intermediate results
+            // Generate a unique reference for this parsed data within the turn
+            const parsedDataRef = `parsed_${dataset_id}_${Date.now()}`;
+            this.turnContext.intermediateResults[parsedDataRef] = parseResult.data; 
+
+            // Return success and the reference ID
+            return { 
+                result: { 
+                    status: 'success', 
+                    message: `Data parsed successfully, ${parseResult.data.length} rows found.`,
+                    parsed_data_ref: parsedDataRef, // Return reference for agent
+                    rowCount: parseResult.data.length
+                } 
+            };
+
+        } catch (error) {
+            logger.error(`_parseCsvDataTool failed for ${dataset_id}: ${error.message}`, { error });
+            return { error: `Failed to parse dataset content: ${error.message}` };
+        }
+    }
+
+    async _generateAnalysisCodeTool(args) { 
+        const { analysis_goal } = args; 
+        logger.info(`Executing tool: generate_analysis_code`);
+        if (!analysis_goal) {
+            return { error: 'Missing or invalid required argument: analysis_goal' };
+        }
+        // Retrieve the stored schema
+        const schemaData = this.turnContext.intermediateResults.lastSchema;
+        if (!schemaData) {
+            return { error: 'Schema not found in context. Use get_dataset_schema first.' };
+        }
+        try {
+            const generatedCodeResponse = await promptService.generateAnalysisCode({
+                analysisGoal: analysis_goal,
                 datasetSchema: schemaData 
             });
 
             if (!generatedCodeResponse || !generatedCodeResponse.code) {
-                 throw new Error('AI failed to generate valid code.');
+                 throw new Error('AI failed to generate valid analysis code.');
             }
-
-            // Store the generated code for potential later execution
-            this.turnContext.intermediateResults.generatedParserCode = generatedCodeResponse.code;
-
-            // Return the generated code string (even though we might not execute it directly yet)
-            // The next step for the agent should be to execute this code.
+            // Don't store here, just return. Agent loop stores in intermediateResults.
             return { result: { code: generatedCodeResponse.code } }; 
-
         } catch (error) {
-            logger.error(`_generateDataExtractionCodeTool failed for ${dataset_id}: ${error.message}`, { error });
-            return { error: `Failed to generate data extraction code: ${error.message}` };
+            logger.error(`_generateAnalysisCodeTool failed: ${error.message}`, { error });
+            return { error: `Failed to generate analysis code: ${error.message}` };
         }
     }
 
-    /** Tool: Execute Backend Code */ 
-    async _executeBackendCodeTool(args) {
-        let { code, dataset_id } = args;
-        logger.info(`Executing tool: execute_backend_code for dataset ${dataset_id}`);
-        
-        // If code wasn't explicitly passed, try using the parser code generated in the previous step
-        if (!code && this.turnContext.intermediateResults.generatedParserCode) {
-             logger.info('Using parser code generated in previous step.');
-             code = this.turnContext.intermediateResults.generatedParserCode;
-        } else if (!code) {
-             return { error: 'Missing required argument: code (and no parser code found in context)' };
+    async _executeAnalysisCodeTool(args) { 
+        const { code, parsed_data_ref } = args; 
+        logger.info(`Executing tool: execute_analysis_code`);
+        if (!code || typeof code !== 'string') {
+            return { error: 'Missing or invalid required argument: code' };
         }
-        
-        if (typeof code !== 'string' || code.trim() === '') {
-             return { error: 'Invalid argument: code must be a non-empty string' };
+        if (!parsed_data_ref || typeof parsed_data_ref !== 'string' || !this.turnContext.intermediateResults[parsed_data_ref]) {
+            return { error: 'Missing or invalid parsed_data_ref. Ensure parse_csv_data ran successfully first.' };
         }
-        if (!dataset_id || typeof dataset_id !== 'string') {
-            return { error: 'Missing or invalid required argument: dataset_id (must be a string)' };
+
+        const parsedData = this.turnContext.intermediateResults[parsed_data_ref];
+        if (!Array.isArray(parsedData)) {
+            return { error: 'Referenced parsed data is not an array.'}; 
         }
 
         try {
             const executionResult = await codeExecutionService.executeSandboxedCode(
-                code,
-                dataset_id,
-                this.userId
+                code, 
+                parsedData 
             );
+            // Clean up the large parsed data from memory after use?
+            // delete this.turnContext.intermediateResults[parsed_data_ref]; 
             return executionResult;
         } catch (error) {
-            logger.error(`_executeBackendCodeTool failed unexpectedly for ${dataset_id}: ${error.message}`, { error });
-            return { error: `Unexpected error during code execution: ${error.message}` };
+            logger.error(`_executeAnalysisCodeTool failed unexpectedly: ${error.message}`, { error });
+            return { error: `Unexpected error during analysis code execution: ${error.message}` };
         }
     }
 
-    /** Tool: Generate React Report Code */ // NEW PHASE 3 TOOL
     async _generateReportCodeTool(args) {
-        const { analysis_summary, data_json } = args;
+        const { analysis_summary, analysis_result } = args; 
         logger.info(`Executing tool: generate_report_code`);
         if (!analysis_summary || typeof analysis_summary !== 'string') {
-            return { error: 'Missing or invalid required argument: analysis_summary (must be a string)' };
+            return { error: 'Missing or invalid required argument: analysis_summary' };
         }
-         // data_json could be null/empty if code execution failed or produced no result, handle gracefully
-        if (typeof data_json !== 'object') { // Allow null or object
-            logger.warn('_generateReportCodeTool called with invalid data_json type.', { type: typeof data_json});
-            // Proceed but LLM might struggle without data
+        // Retrieve analysis result from context if not passed directly (or validate if passed)
+        const dataForResult = analysis_result || this.turnContext.intermediateResults.analysisResult;
+        if (typeof dataForResult !== 'object') { 
+            logger.warn('_generateReportCodeTool called without valid analysis_result.');
+            return { error: 'Analysis results not available or invalid.' };
         }
 
         try {
-            // Call a new function in promptService to generate the React code
             const generatedCodeResponse = await promptService.generateReportCode({
                 analysisSummary: analysis_summary,
-                dataJson: data_json || {} // Pass empty object if data is null/undefined
+                dataJson: dataForResult || {} 
             });
 
             if (!generatedCodeResponse || !generatedCodeResponse.react_code) {
                  throw new Error('AI failed to generate valid React report code.');
             }
-
-            // Return the generated code string
             return { result: { react_code: generatedCodeResponse.react_code } };
-
         } catch (error) {
             logger.error(`_generateReportCodeTool failed: ${error.message}`, { error });
             return { error: `Failed to generate report code: ${error.message}` };
