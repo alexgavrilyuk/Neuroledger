@@ -30,7 +30,6 @@ const formatPercentage = (value, decimals = 1) => {
  * @param {Object} contextParams - Parameters for the prompt.
  * @param {string} [contextParams.userContext] - General business context from user settings.
  * @param {string} [contextParams.teamContext] - General business context from team settings.
- * @param {string} contextParams.historySummary - A summary of the conversation history.
  * @param {Array} contextParams.currentTurnSteps - Steps taken so far in this turn (tool calls and results).
  * @param {Array} contextParams.availableTools - Descriptions of tools the agent can use.
  * @param {object|null} [contextParams.analysisResult] - The actual result object from a previous code execution step.
@@ -39,7 +38,7 @@ const formatPercentage = (value, decimals = 1) => {
  * @returns {string} - The formatted system prompt.
  */
 const generateAgentSystemPrompt = (contextParams) => {
-  const { userContext, teamContext, historySummary, currentTurnSteps, availableTools, analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = contextParams;
+  const { userContext, teamContext, currentTurnSteps, availableTools, analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = contextParams;
 
   // Format the tool definitions clearly for the LLM
   const formattedTools = availableTools.map(tool => (
@@ -111,9 +110,6 @@ const generateAgentSystemPrompt = (contextParams) => {
 
 You operate in a loop: Reason -> Act -> Observe.
 
-**Conversation History Summary:**
-${historySummary || 'No history summary available.'}
-
 **Current Turn Progress:**
 ${turnStepsText}
 
@@ -132,7 +128,22 @@ You have access to the following tools. To use a tool, output ONLY a single JSON
 Tool Definitions:
 [\n${formattedTools}\n]
 
-**IMPORTANT INSTRUCTIONS:**\n*   Analyze 'Current Turn Progress' / previous step results before deciding action.\n*   Do NOT call a tool if info already available in the current turn.\n*   Typical Workflow for Analysis:\n    1. Use \`list_datasets\` / \`get_dataset_schema\` to understand data.\n    2. Use \`parse_csv_data\` to parse the required dataset.\n    3. Use \`generate_analysis_code\` to create analysis code.\n    4. Use \`execute_analysis_code\` to run the analysis code.\n    5. Analyze the result from \`execute_analysis_code\`. \n    6. **If the user asked for a report AND the analysis in step 5 was successful, you MUST use \`generate_report_code\`.**\n    7. Provide the final answer/summary using \`_answerUserTool\`. If a report was generated (step 6), the text answer should be a concise summary complementing the report.\n*   The \`execute_analysis_code\` tool runs in a restricted sandbox. Code MUST use the \`inputData\` variable and call \`sendResult(data)\`. NO parsing allowed in this code.\n*   Ensure JSON for tool calls is correctly escaped, especially code strings for \`execute_analysis_code\` (newlines \\n, quotes \\", etc.).\n*   Base analysis ONLY on history and tool results.\n*   **CRITICAL: If \`Actual Analysis Results\` are shown above, YOU MUST use those exact figures when preparing arguments for \`generate_report_code\` or when summarizing results in \`_answerUserTool\`. Do NOT use numbers from the \`Current Turn Progress\` tool result summaries for these final steps. Do NOT hallucinate or make up numbers. Use the provided \`Actual Analysis Results\`.**\n*   **MODIFICATION HANDLING:** If the user asks to **modify** a previous report/analysis (e.g., change title, remove chart, add column) AND the modification **does not require new calculations**: \n    a. **REUSE** the previous analysis data (summarized under \`Previous Turn Artifacts\`). \n    b. Your primary action should be \`generate_report_code\`, passing the previous analysis data in the \`analysis_result\` argument and describing the modification in \`analysis_summary\`. \n    c. **DO NOT** call \`list_datasets\`, \`get_dataset_schema\`, \`parse_csv_data\`, \`generate_analysis_code\`, or \`execute_analysis_code\` unless the modification clearly requires re-running the underlying data analysis.\n*   **ERROR HANDLING:** If the *last step* in 'Current Turn Progress' shows a tool call resulted in an 'Error:', DO NOT call the same tool again immediately. Instead, use the \`_answerUserTool\` to inform the user that the action failed and you cannot proceed with that specific step.\n*   Handle tool errors appropriately.\n*   Output ONLY ONE valid JSON object for a single tool call in your response. Do not include any other text, explanations, or additional JSON objects before or after the tool call JSON.\n\nNow, analyze the user\'s latest query...`;
+**IMPORTANT INSTRUCTIONS:**
+*   Analyze 'Current Turn Progress' / previous step results before deciding action.
+*   Do NOT call a tool if info already available in the current turn.
+*   Typical Workflow for Analysis:
+    1. Use \`list_datasets\` / \`get_dataset_schema\` to understand data.
+    2. Use \`parse_csv_data\` to parse the required dataset.
+    3. Use \`generate_analysis_code\` to create analysis code.
+    4. Use \`execute_analysis_code\` to run the analysis code.
+    5. Analyze the result from \`execute_analysis_code\`. \n    6. **If the user asked for a report AND the analysis in step 5 was successful, you MUST use \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument in your tool call JSON.** The system will use the analysis results already in context.
+    7. Provide the final answer/summary using \`_answerUserTool\`. If a report was generated (step 6), the text answer should be a concise summary complementing the report.
+*   The \`execute_analysis_code\` tool runs in a restricted sandbox. Code MUST use the \`inputData\` variable and call \`sendResult(data)\`. NO parsing allowed in this code.
+*   Ensure JSON for tool calls is correctly escaped, especially code strings for \`execute_analysis_code\` (newlines \\n, quotes \\", etc.).
+*   Base analysis ONLY on history and tool results.
+*   **CRITICAL: When calling \`generate_report_code\` or \`_answerUserTool\` after successful analysis, use the figures shown in \`Actual Analysis Results\` above for your summary or final text. Do NOT use numbers from the \`Current Turn Progress\` tool result summaries for these steps.**
+*   **MODIFICATION HANDLING:** If the user asks to **modify** a previous report/analysis (e.g., change title, remove chart, add column) AND the modification **does not require new calculations**: \n    a. **REUSE** the previous analysis data (summarized under \`Previous Turn Artifacts\`). \n    b. Your primary action should be \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument describing the modification. The system will use the previous analysis data automatically.\n    c. **DO NOT** call \`list_datasets\`, \`get_dataset_schema\`, \`parse_csv_data\`, \`generate_analysis_code\`, or \`execute_analysis_code\` unless the modification clearly requires re-running the underlying data analysis.\n*   **ERROR HANDLING:** If the *last step* in 'Current Turn Progress' shows a tool call resulted in an 'Error:', DO NOT call the same tool again immediately. Instead, use the \`_answerUserTool\` to inform the user that the action failed and you cannot proceed with that specific step.
+*   Handle tool errors appropriately.\n*   Output ONLY ONE valid JSON object for a single tool call in your response. Do not include any other text, explanations, or additional JSON objects before or after the tool call JSON.\n\nNow, analyze the user\'s latest query which is provided as the final message in the conversation history...`;
 };
 
 // Replace the old export with the new one

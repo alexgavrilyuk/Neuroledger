@@ -95,7 +95,7 @@ const assembleContext = async (userId, selectedDatasetIds) => {
 /**
  * Calls the LLM to get the next reasoning step or final answer for the agent.
  * @param {object} agentContext - Context prepared by AgentOrchestrator.
- *   Includes: userId, originalQuery, historySummary, currentTurnSteps, availableTools, userContext, teamContext.
+ *   Includes: userId, originalQuery, fullChatHistory, currentTurnSteps, availableTools, userContext, teamContext, etc.
  * @returns {Promise<string>} - The raw text response from the LLM.
  */
 const getLLMReasoningResponse = async (agentContext) => {
@@ -104,68 +104,73 @@ const getLLMReasoningResponse = async (agentContext) => {
     const { provider, model: modelToUse } = await getUserModelPreference(userId);
     logger.info(`[LLM Reasoning] Using ${provider} model: ${modelToUse} for user ${userId}`);
 
-    // Check provider availability (redundant if getUserModelPreference handles fallback, but good practice)
+    // Check provider availability
     if (provider === 'claude' && !anthropic) {
         logger.error("getLLMReasoningResponse called for Claude but client is not initialized.");
         throw new Error('AI assistant (Claude) is currently unavailable.');
     }
      if (provider === 'gemini' && !geminiClient.isAvailable()) {
-        // This case should ideally be handled by the fallback in getUserModelPreference
         logger.error("getLLMReasoningResponse called for Gemini but client is not available. Fallback failed?");
         throw new Error('AI assistant (Gemini) is currently unavailable.');
     }
 
     const startTime = Date.now();
-    // Destructure ALL fields needed for the system prompt generator
-    const { originalQuery, historySummary, currentTurnSteps, availableTools, userContext, teamContext,
+    // Destructure fields needed, including fullChatHistory, excluding historySummary
+    const { originalQuery, fullChatHistory, currentTurnSteps, availableTools, userContext, teamContext,
             analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = agentContext;
 
     try {
         // 1. Generate the system prompt using the new template
+        //    Remove historySummary from the parameters passed
         const systemPrompt = generateAgentSystemPrompt({
-            userContext,         // Pass User AI context
-            teamContext,         // Pass Team AI context
-            historySummary,      // Pass history summary
-            currentTurnSteps,    // Pass steps taken this turn
-            availableTools,      // Pass tool definitions
-            analysisResult,      // Pass current turn analysis result (if any)
-            previousAnalysisResultSummary, // <<< Pass previous summary
-            hasPreviousGeneratedCode       // <<< Pass previous code flag
+            userContext,
+            teamContext,
+            // historySummary REMOVED
+            currentTurnSteps,
+            availableTools,
+            analysisResult,
+            previousAnalysisResultSummary,
+            hasPreviousGeneratedCode
         });
+        // Log the length, maybe log the prompt itself if needed for debugging (as before)
         logger.debug(`Agent System Prompt generated. Length: ${systemPrompt.length}`);
+        // --- ADDED: Log the full system prompt being sent (as before) ---
+        logger.debug(`[Agent Reasoning] Full System Prompt being sent to ${provider} model ${modelToUse}:\n------ START SYSTEM PROMPT ------\n${systemPrompt}\n------ END SYSTEM PROMPT ------`);
+        // --- END ADDED LOG ---
 
         // 2. Construct the messages array for the API call
-        //    The agent loop provides the necessary history/tool context via the system prompt.
-        //    We only need to provide the *current* user query here.
+        //    Include the fullChatHistory before the current originalQuery.
         const messages = [
-            // TODO: Consider adding summarized history directly to messages if system prompt gets too large
+            ...(fullChatHistory || []), // Spread the formatted history array, ensure it's an array
             { role: "user", content: originalQuery } // The user's latest query
         ];
 
-        // --- MODIFIED: Prepare API options based on provider ---
+        // Log the number of messages being sent
+        logger.debug(`[Agent Reasoning] Sending ${messages.length} messages (history + current) to ${provider}.`);
+
+
+        // 3. Prepare API options based on provider
         const apiOptions = {
             model: modelToUse,
-            max_tokens: provider === 'gemini' ? 18192 : 14096, // Example: Gemini might support more output tokens
+            // Adjusted token limits based on model capabilities - CHECK DOCUMENTATION
+            max_tokens: provider === 'gemini' ? 8192 : 4096, 
             system: systemPrompt,
-            messages,
-            temperature: 0.1 // Lower temperature for more predictable tool usage
+            messages, // Pass the combined history + current message
+            temperature: 0.1
         };
 
-        // --- MODIFIED: Log the full system prompt being sent --- 
-        logger.debug(`[Agent Reasoning] Full System Prompt being sent to ${provider} model ${apiOptions.model}:\\n------ START SYSTEM PROMPT ------\\n${systemPrompt}\\n------ END SYSTEM PROMPT ------`);
-        // --- END MODIFIED LOG --- 
 
-        // 3. Call the appropriate API
+        // 4. Call the appropriate API
         let apiResponse;
         logger.debug(`Calling ${provider} API for Agent Reasoning with model ${apiOptions.model}...`);
-        
+
         if (provider === 'gemini') {
             apiResponse = await geminiClient.generateContent(apiOptions);
         } else { // Default to claude
             apiResponse = await anthropic.messages.create(apiOptions);
         }
 
-        // 4. Extract raw response (structure is similar thanks to gemini.client wrapper)
+        // 5. Extract raw response
         const rawResponse = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text : null;
 
         if (!rawResponse) {
@@ -174,16 +179,19 @@ const getLLMReasoningResponse = async (agentContext) => {
         }
 
         logger.debug(`${provider} Agent RAW response received. Length: ${rawResponse?.length}`);
-        logger.debug(`Raw Response: ${rawResponse}`); // Log the raw response for debugging parsing
+        // Optional: Log only a snippet of raw response if too long
+        // logger.debug(`Raw Response Snippet: ${rawResponse.substring(0, 200)}...`); 
+        logger.debug(`Raw Response: ${rawResponse}`); // Keep full log for now
+
+
         const durationMs = Date.now() - startTime;
         logger.info(`LLM Reasoning step via ${provider} completed in ${durationMs}ms.`);
 
-        // 5. Return the raw response for the AgentOrchestrator to parse
+        // 6. Return the raw response
         return rawResponse;
 
     } catch (error) {
         logger.error(`Error during ${provider} LLM reasoning API call: ${error.message}`, error);
-        // Rethrow the error to be handled by the AgentOrchestrator
         throw new Error(`AI assistant (${provider}) failed to generate a response: ${error.message}`);
     }
 };
@@ -488,82 +496,12 @@ Focus on creating a functional, well-structured, and visually clear report compo
     }
 };
 
-/**
- * Summarizes a given chat history using an LLM call.
- * @param {string} userId - The ID of the user whose history is being summarized.
- * @param {Array<{role: string, content: string}>} chatHistory - The recent chat history.
- * @returns {Promise<string>} - The summarized history string.
- */
-const summarizeChatHistory = async (userId, chatHistory) => {
-    // --- MODIFIED: Get user preference ---
-    const { provider, model: modelToUse } = await getUserModelPreference(userId);
-    logger.info(`[History Summary] Using ${provider} model: ${modelToUse} for user ${userId}`);
-
-    // Check availability
-    if ((provider === 'claude' && !anthropic) || (provider === 'gemini' && !geminiClient.isAvailable())) {
-         logger.error(`summarizeChatHistory called but selected provider (${provider}) client is not available.`);
-         // Return a generic message instead of throwing, as summary is non-critical path usually
-         return "Error: AI summarization service unavailable."; 
-    }
-
-    if (!chatHistory || chatHistory.length === 0) {
-        return "No history to summarize.";
-    }
-
-    const startTime = Date.now();
-    logger.info(`Summarizing chat history (${chatHistory.length} messages) using ${provider}...`);
-
-    // Construct the prompt for summarization
-    const summarizationPrompt = `Summarize the key points and context of the following conversation concisely. Focus on information relevant for continuing the chat, like user goals, data mentioned, and recent outcomes. Format as a brief paragraph.`;
-    // Use the Claude-style message format, Gemini client will adapt it
-    const messages = [
-        ...chatHistory, // Pass the history as messages
-        { role: "user", content: summarizationPrompt } // Add the summarization instruction
-    ];
-
-    try {
-         // --- MODIFIED: Prepare API options ---
-        const apiOptions = {
-            model: modelToUse,
-            max_tokens: 512, // Summary should be concise
-            messages,
-            // System prompt usually not needed for simple summarization
-            temperature: 0.3 
-        };
-
-        // --- MODIFIED: Call appropriate API ---
-         let apiResponse;
-        if (provider === 'gemini') {
-            // Pass null for system prompt if not applicable
-            apiResponse = await geminiClient.generateContent({...apiOptions, system: null}); 
-        } else {
-            apiResponse = await anthropic.messages.create(apiOptions);
-        }
-        
-        // --- MODIFIED: Extract summary ---
-        const summary = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text : null;
-
-        if (!summary) {
-            logger.warn(`History summarization by ${provider} returned empty content.`);
-            return "Could not generate summary.";
-        }
-
-        const durationMs = Date.now() - startTime;
-        logger.info(`History summarization via ${provider} completed in ${durationMs}ms. Summary length: ${summary.length}`);
-        return summary.trim();
-
-    } catch (error) {
-        logger.error(`Error during ${provider} history summarization API call: ${error.message}`, error);
-        return `Error summarizing history: ${error.message}`;
-    }
-};
-
 module.exports = {
     assembleContext, // Keep for potential future use
     getLLMReasoningResponse, // New function for the agent
     generateAnalysisCode, // Export new function
     generateReportCode, // Add the new function
-    summarizeChatHistory // Add the new summarization function
+    // summarizeChatHistory REMOVED from exports
     // generateCode, // Mark as removed/obsolete
     // generateWithHistory // Mark as removed/obsolete
 };

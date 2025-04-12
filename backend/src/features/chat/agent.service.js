@@ -416,44 +416,43 @@ class AgentOrchestrator {
                  chatSessionId: this.sessionId,
                  _id: { $ne: this.aiMessagePlaceholderId } // Exclude the current placeholder
              })
-             .sort({ createdAt: -1 }) // Fetch newest first
-             .limit(HISTORY_FETCH_LIMIT)
-             .select('messageType promptText aiResponseText reportAnalysisData aiGeneratedCode createdAt') // Added _id for logging
+             .sort({ createdAt: 1 }) // Fetch oldest first for chronological order
+             .limit(HISTORY_FETCH_LIMIT) // Still limit to avoid excessive context
+             .select('messageType promptText aiResponseText reportAnalysisData aiGeneratedCode createdAt _id') // Added reportAnalysisData, aiGeneratedCode, _id
              .lean();
 
-             // Note: historyRecords is now newest-to-oldest due to sort
+             logger.debug(`[Agent History Prep] Fetched ${historyRecords.length} history records.`);
 
-             // --- REVISED LOGIC to find artifacts independently --- 
+             // Format history for LLM (chronological order)
+             const formattedHistory = historyRecords.map(msg => ({
+                 role: msg.messageType === 'user' ? 'user' : 'assistant',
+                 // Ensure content exists, provide fallback if necessary
+                 content: (msg.messageType === 'user' ? msg.promptText : msg.aiResponseText) || ''
+             })).filter(msg => msg.content); // Filter out messages with no content
+
+
+             // Store the formatted full history in the turn context
+             this.turnContext.fullChatHistory = formattedHistory;
+
+
+             // --- REVISED LOGIC to find artifacts independently ---
+             // Search newest-to-oldest for artifacts
              let previousAnalysisResult = null;
              let previousGeneratedCode = null;
-             let previousResultSummary = null;
              let analysisFoundOnMsgId = null;
              let codeFoundOnMsgId = null;
 
-             logger.debug(`[Agent History Prep] Searching ${historyRecords.length} history records for artifacts...`);
+             // Use the original lean objects from historyRecords for artifact search, which include the necessary fields
+             const historyRecordsForArtifactSearch = [...historyRecords].reverse(); // Create reversed copy for searching newest-first
+             logger.debug(`[Agent History Prep] Searching ${historyRecordsForArtifactSearch.length} history records (newest first) for artifacts...`);
 
-             for (const msg of historyRecords) { // Iterate newest to oldest
+
+             for (const msg of historyRecordsForArtifactSearch) { // Iterate newest to oldest
                  if (msg.messageType === 'assistant') {
-                     // --- ADD INNER LOOP DEBUG --- 
-                    // logger.debug(`[Agent History Prep] Checking assistant msg ${msg._id}:`, { 
-                    //     hasReportData: !!msg.reportAnalysisData, 
-                    //     reportDataType: typeof msg.reportAnalysisData,
-                    //     hasAiCode: !!msg.aiGeneratedCode,
-                    //     codeLength: msg.aiGeneratedCode?.length 
-                    // });
-                    // --- END INNER LOOP DEBUG --- 
-
-                    // Find the *first* (most recent) message with analysis data
-                    if (previousAnalysisResult === null && msg.reportAnalysisData) {
+                     // Find the *first* (most recent) message with analysis data
+                     if (previousAnalysisResult === null && msg.reportAnalysisData) {
                          previousAnalysisResult = msg.reportAnalysisData;
                          analysisFoundOnMsgId = msg._id;
-                         // Attempt to create a concise summary for the prompt
-                         if (typeof previousAnalysisResult === 'object' && previousAnalysisResult !== null) {
-                             const keys = Object.keys(previousAnalysisResult);
-                             previousResultSummary = `Previous analysis generated ${keys.length} main sections: ${keys.slice(0, 3).join(', ')}${keys.length > 3 ? ', ...' : ''}`;
-                         } else {
-                             previousResultSummary = 'Previous analysis data exists (non-object format).';
-                         }
                          logger.info(`[Agent History Prep] Found previous analysis result on message ID ${analysisFoundOnMsgId}`);
                      }
 
@@ -466,55 +465,30 @@ class AgentOrchestrator {
                  }
                  // Stop searching if we've found both artifacts
                  if (previousAnalysisResult !== null && previousGeneratedCode !== null) {
-                     logger.debug('[Agent History Prep] Found both analysis and code artifacts. Stopping search.');
+                     logger.debug('[Agent History Prep] Found both analysis and code artifacts. Stopping artifact search.');
                      break;
                  }
              }
-             // --- END REVISED LOGIC ---
+             // --- END REVISED LOGIC --
 
-             // Store potentially found artifacts in intermediate results for potential reuse by _prepareLLMContext
-             this.turnContext.intermediateResults.previousAnalysisData = previousAnalysisResult; // Correct field name
+
+             // Store potentially found artifacts in intermediate results
+             this.turnContext.intermediateResults.previousAnalysisData = previousAnalysisResult;
              this.turnContext.intermediateResults.previousGeneratedCode = previousGeneratedCode;
-            // this.turnContext.intermediateResults.previousResultSummary = previousResultSummary; // Summary is generated in _prepareLLMContext now
 
-             // --- ADD DEBUG LOG --- 
-             logger.debug(`[Agent History Prep] Post-loop check:`, { 
-                 hasPreviousAnalysis: !!previousAnalysisResult, 
+             logger.debug(`[Agent History Prep] Post-artifact search check:`, {
+                 hasPreviousAnalysis: !!previousAnalysisResult,
                  analysisMsgId: analysisFoundOnMsgId,
-                 hasPreviousCode: !!previousGeneratedCode, 
+                 hasPreviousCode: !!previousGeneratedCode,
                  codeMsgId: codeFoundOnMsgId,
-                // previousSummary: previousResultSummary // No longer set here
              });
-             // --- END DEBUG LOG ---
 
-             // --- History Summarization (moved after artifact search) --- 
-             const historyForSummarization = historyRecords
-                .reverse() // Put back in chronological order for summarization
-                .map(msg => ({
-                    role: msg.messageType === 'user' ? 'user' : 'assistant',
-                    content: msg.messageType === 'user' ? msg.promptText : msg.aiResponseText 
-                }))
-                .filter(msg => msg.content);
-                
-             this.turnContext.chatHistoryForSummarization = historyForSummarization; // Store for potential future use?
-             const historyLength = historyForSummarization.length;
+             // --- History Summarization and related fields REMOVED ---
+             // Removed: chatHistoryForSummarization, historySummary generation logic
 
-             if (historyLength === 0) {
-                 this.turnContext.historySummary = "No previous conversation history.";
-             } else if (historyLength > HISTORY_SUMMARIZATION_THRESHOLD) {
-                 logger.info(`History length (${historyLength}) exceeds threshold (${HISTORY_SUMMARIZATION_THRESHOLD}). Attempting summarization...`);
-                 this.turnContext.historySummary = await promptService.summarizeChatHistory(
-                     this.userId,
-                     historyForSummarization
-                 );
-                 logger.info(`History summarized successfully.`);
-             } else {
-                 this.turnContext.historySummary = `Recent conversation history (last ${historyLength} messages - full content provided in context if possible).`;
-             }
-             
         } catch (err) {
-             logger.error(`Failed to fetch or summarize chat history for session ${this.sessionId}: ${err.message}`);
-             this.turnContext.historySummary = "Error processing conversation history.";
+             logger.error(`Failed to fetch chat history for session ${this.sessionId}: ${err.message}`);
+             this.turnContext.fullChatHistory = []; // Ensure it's an empty array on error
              // Reset artifact state on error to avoid passing stale data
              this.turnContext.intermediateResults.previousAnalysisData = null;
              this.turnContext.intermediateResults.previousGeneratedCode = null;
@@ -540,13 +514,14 @@ class AgentOrchestrator {
         }
         // --- END ADDED ---
 
-        // Ensure historySummary is generated if needed (maybe move logic here?)
-        const historySummary = this.turnContext.historySummary || "No history summary available."; // Use stored or default
+        // Ensure fullChatHistory exists (it should be set by _prepareChatHistory)
+        const fullChatHistory = this.turnContext.fullChatHistory || [];
 
         return {
             userId: this.userId, // Pass userId for model preference selection
             originalQuery: this.turnContext.originalQuery,
-            historySummary: historySummary,
+            // REMOVED historySummary
+            fullChatHistory: fullChatHistory, // Pass the full formatted history
             currentTurnSteps: this.turnContext.steps,
             availableTools: this._getToolDefinitions(), // Pass tool definitions
             userContext: this.turnContext.userContext, // Pass user context
@@ -576,26 +551,19 @@ class AgentOrchestrator {
         const trimmedResponse = llmResponse.trim();
         
         // Regex to find a JSON object enclosed in optional markdown fences
-        // It looks for { ... } possibly surrounded by ```json ... ``` or ``` ... ```
         const jsonRegex = /^```(?:json)?\s*(\{[\s\S]*\})\s*```$|^(\{[\s\S]*\})$/m;
         const jsonMatch = trimmedResponse.match(jsonRegex);
 
-        // If a JSON block is found (either fenced or raw)
         if (jsonMatch) {
-            // Extract the JSON part (group 1 for fenced, group 2 for raw)
             const potentialJson = jsonMatch[1] || jsonMatch[2];
             if (potentialJson) {
+                 let sanitizedJsonString = null; // Declare outside the try block
                  try {
                     // --- SANITIZATION STEP --- 
-                    // Aggressively replace literal newlines \n within the string values 
-                    // specifically targeting the 'code' argument.
-                    let sanitizedJsonString = potentialJson.replace(/("code"\s*:\s*")([\s\S]*?)("(?!\\))/gs, (match, p1, p2, p3) => {
-                        // p1 = "code": "
-                        // p2 = the code content
-                        // p3 = the closing quote "
+                    sanitizedJsonString = potentialJson.replace(/("code"\s*:\s*")([\s\S]*?)("(?!\\))/gs, (match, p1, p2, p3) => {
                         const escapedCode = p2
-                            .replace(/\\/g, '\\\\') // Escape backslashes FIRST
-                            .replace(/"/g, '\\"')  // Escape double quotes
+                            .replace(/\\/g, '\\') // Escape backslashes FIRST
+                            .replace(/"/g, '\"')  // Escape double quotes
                             .replace(/\n/g, '\\n') // Escape newlines
                             .replace(/\r/g, '\\r'); // Escape carriage returns
                         return p1 + escapedCode + p3;
@@ -615,72 +583,82 @@ class AgentOrchestrator {
                                      return { tool: parsed.tool, args: parsed.args };
                                 } else {
                                      logger.warn('_answerUserTool called via JSON but missing/empty textResponse.');
-                                     // Fallback to treating the original trimmed string as the answer if textResponse is invalid
                                      return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                                 }
                             }
                             return { tool: parsed.tool, args: parsed.args }; // Valid tool call
                         } else {
                             logger.warn(`LLM requested unknown tool via JSON: ${parsed.tool}`);
-                            // Fallback: Treat original string as answer
                             return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                         }
                     } else {
                          logger.warn('Parsed JSON does not match expected tool structure.', parsed);
-                         // Fallback: Treat original string as answer
                          return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                     }
                 } catch (e) {
-                    // Log the sanitized string attempt as well - Use potentialJson for original
-                    logger.error(`Failed to parse extracted JSON: ${e.message}. Sanitized attempt: ${sanitizedJsonString || '[Sanitization failed]'}. Original JSON source: ${potentialJson}`);
+                    // sanitizedJsonString is now accessible here
+                    logger.error(`Failed to parse extracted JSON: ${e.message}. Sanitized attempt: ${sanitizedJsonString !== null ? sanitizedJsonString : '[Sanitization failed or not reached]'}. Original JSON source: ${potentialJson}`);
                     return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                 }
             }
         }
 
-        // If no JSON block is found or parsing failed, assume the whole response is the final answer text
         logger.debug('LLM response treated as final answer text (no valid JSON tool call found).');
         return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
     }
 
-    /** Returns the structured definitions of available tools for the LLM prompt. */
+    /** Returns array of tool definitions the LLM can use. */
     _getToolDefinitions() {
+        // Note: Output format must match what the LLM expects.
         return [
             {
                 name: 'list_datasets',
                 description: 'Lists available datasets (IDs, names, descriptions).',
-                args: {},
-                output: '{ \"datasets\": [{ \"id\": \"...\" }] }'
+                args: {}, // No arguments needed
+                output: '{ "datasets": [{ "id": "...", "name": "...", "description": "..." }] }'
             },
             {
                 name: 'get_dataset_schema',
                 description: 'Gets schema (column names, types, descriptions) for a specific dataset ID.',
-                args: { dataset_id: 'string' },
-                output: '{ \"schemaInfo\": [...], \"columnDescriptions\": {...}, \"description\": \"...\" }'
+                args: {
+                    dataset_id: 'string' // Specify required arguments and types
+                },
+                output: '{ "schemaInfo": [...], "columnDescriptions": {...}, "description": "..." }'
             },
             {
                 name: 'parse_csv_data',
                 description: 'Parses the raw CSV content of a dataset using PapaParse. Returns a reference ID to the parsed data.',
-                args: { dataset_id: 'string' },
-                output: '{ \"status\": \"success\", \"parsed_data_ref\": \"<ref_id>\", \"rowCount\": <number> } or { \"error\": \"...\" }'
+                args: {
+                    dataset_id: 'string'
+                },
+                 output: '{ "status": "success", "parsed_data_ref": "<ref_id>", "rowCount": <number> } or { "error": "..." }'
             },
             {
                 name: 'generate_analysis_code',
-                description: 'Generates Node.js analysis code expecting pre-parsed data in \`inputData\` variable.',
-                args: { analysis_goal: 'string' },
-                output: '{ \"code\": \"<Node.js code string>\" }'
+                description: 'Generates Node.js analysis code expecting pre-parsed data in `inputData` variable. Requires schema context from `get_dataset_schema`.',
+                args: {
+                     analysis_goal: 'string'
+                     // Removed dataset_id, as schema is retrieved separately
+                },
+                 output: '{ "code": "<Node.js code string>" }'
             },
             {
-                name: 'execute_analysis_code',
-                description: 'Executes analysis code in a sandbox with parsed data injected as \`inputData\`.',
-                args: { code: 'string', parsed_data_ref: 'string' },
-                output: '{ \"result\": <JSON result>, \"error\": \"...\" }'
+                 name: 'execute_analysis_code',
+                 description: 'Executes analysis code in a sandbox with parsed data injected as `inputData`. Requires `parse_csv_data` to be called first.',
+                 args: {
+                     code: 'string', 
+                     parsed_data_ref: 'string'
+                 },
+                 output: '{ "result": <JSON result>, "error": "..." }'
             },
             {
                 name: 'generate_report_code',
-                description: 'Generates React report code based on analysis results.',
-                args: { analysis_summary: 'string', analysis_result: 'object' },
-                output: '{ \"react_code\": \"<React code string>\" }'
+                description: 'Generates React report code based on analysis results available in the context. Use this AFTER `execute_analysis_code` succeeds.',
+                // *** REMOVED analysis_result from args presented to LLM ***
+                args: {
+                    analysis_summary: 'string' // Only require summary from LLM
+                },
+                output: '{ "react_code": "<React code string>" }'
             },
             {
                 name: '_answerUserTool',
@@ -824,7 +802,26 @@ class AgentOrchestrator {
                  throw new Error(`Invalid arguments provided for tool ${toolName}. Expected an object.`);
             }
 
-            const result = await toolFunction.call(this, args);
+            // *** MODIFICATION FOR generate_report_code ***
+            let finalArgs = args;
+            if (toolName === 'generate_report_code') {
+                const analysisResultFromContext = this.turnContext.intermediateResults.analysisResult;
+                if (!analysisResultFromContext) {
+                    logger.error(`Cannot dispatch generate_report_code: analysisResult is missing from turn context.`);
+                    return { error: 'Cannot generate report code: Analysis result is missing. Please run analysis first.' };
+                }
+                // Add the analysis result from context to the arguments passed to the implementation
+                finalArgs = {
+                    ...args, // Should contain analysis_summary from LLM
+                    analysis_result: analysisResultFromContext
+                };
+                logger.debug(`[Dispatcher] Augmented generate_report_code args with analysisResult from context.`);
+            }
+            // *** END MODIFICATION ***
+
+            // Pass the potentially modified args to the tool function
+            const result = await toolFunction.call(this, finalArgs);
+
             // Ensure result is in the { result: ... } or { error: ... } format
             if (result && (result.result !== undefined || result.error !== undefined)) {
                  return result;
