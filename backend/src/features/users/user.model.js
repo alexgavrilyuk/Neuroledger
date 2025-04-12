@@ -57,7 +57,13 @@ const UserSchema = new mongoose.Schema({
   settings: {
     currency: { type: String, default: 'USD' },
     dateFormat: { type: String, default: 'YYYY-MM-DD' },
-    aiContext: { type: String, default: '' }
+    aiContext: { type: String, default: '' },
+    // NEW: User preference for AI model
+    preferredAiModel: {
+        type: String,
+        enum: ['claude', 'gemini'],
+        default: 'claude' // Default to Claude initially
+    }
   },
   // --- Teams Reference - Now implemented ---
   teams: [{

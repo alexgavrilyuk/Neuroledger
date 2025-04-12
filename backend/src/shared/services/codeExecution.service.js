@@ -65,9 +65,9 @@ const executeSandboxedCode = async (code, parsedData) => {
   // 3. Execute Code in Sandbox
   try {
     logger.debug('Executing analysis code in vm.runInNewContext...');
-    // No need to wrap in function anymore if code expects inputData directly
-    // const fullCode = `(function() {\n${code}\n})();`; 
-    vm.runInNewContext(code, sandboxContext, { // Execute the analysis code directly
+    // Wrap the user code in an IIFE to allow top-level return statements
+    const wrappedCode = `(function(){\n${code}\n})();`; 
+    vm.runInNewContext(wrappedCode, sandboxContext, {
       timeout: CODE_EXECUTION_TIMEOUT_MS,
       displayErrors: true,
     });

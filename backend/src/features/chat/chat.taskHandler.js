@@ -64,12 +64,44 @@ const workerHandler = async (payload) => {
         throw new Error('AI placeholder message not found or unauthorized');
     }
 
+    // --- ADDED: Fetch previous AI message artifacts for context ---
+    let previousAnalysisData = null;
+    let previousGeneratedCode = null;
+
+    try {
+        const previousAiMessage = await PromptHistory.findOne({
+            chatSessionId: chatSessionId,
+            messageType: 'assistant',
+            // Find the latest AI message BEFORE the current user message
+            createdAt: { $lt: userMessage.createdAt }
+        })
+        .sort({ createdAt: -1 })
+        .select('reportAnalysisData aiGeneratedCode') // Select only needed fields
+        .lean();
+
+        if (previousAiMessage) {
+            previousAnalysisData = previousAiMessage.reportAnalysisData; // May be null
+            previousGeneratedCode = previousAiMessage.aiGeneratedCode;   // May be null
+            logger.debug(`[Task Handler] Found previous AI message artifacts. Analysis: ${!!previousAnalysisData}, Code: ${!!previousGeneratedCode}`);
+        } else {
+             logger.debug('[Task Handler] No previous AI message found in this session.');
+        }
+    } catch (historyError) {
+         logger.error(`[Task Handler] Error fetching previous AI message history: ${historyError.message}`);
+         // Continue without previous context if history fetch fails
+    }
+    // --- END ADDED --- 
+
     // --- Start Agent Orchestration --- 
     const agentOrchestrator = new AgentOrchestrator(
         userId,
         chatSession.teamId || null, // Pass teamId from session
         chatSessionId,
-        aiMessageId
+        aiMessageId,
+        // --- ADDED: Pass previous state to constructor ---
+        previousAnalysisData,
+        previousGeneratedCode
+        // --- END ADDED ---
     );
 
     // The agent loop handles internal state updates (DB) and agent:* websocket events

@@ -6,6 +6,7 @@ const { getIO } = require('../../socket'); // Corrected path
 const { assembleContext } = require('./prompt.service'); // Import assembleContext
 const codeExecutionService = require('../../shared/services/codeExecution.service'); // Import Code Execution Service
 const Papa = require('papaparse'); // Import papaparse
+const User = require('../users/user.model');
 
 const MAX_AGENT_ITERATIONS = 10; // Increased iterations slightly for multi-step tasks
 const MAX_TOOL_RETRIES = 1; // Allow one retry for potentially transient tool errors
@@ -16,7 +17,7 @@ const HISTORY_FETCH_LIMIT = 20; // Max messages to fetch for context/summarizati
  * Orchestrates the agent's reasoning loop to fulfill user requests.
  */
 class AgentOrchestrator {
-    constructor(userId, teamId, sessionId, aiMessagePlaceholderId) {
+    constructor(userId, teamId, sessionId, aiMessagePlaceholderId, previousAnalysisData = null, previousGeneratedCode = null) {
         this.userId = userId;
         this.teamId = teamId; // May be null for personal context
         this.sessionId = sessionId;
@@ -31,6 +32,8 @@ class AgentOrchestrator {
                 generatedAnalysisCode: null,
                 analysisResult: null,
                 analysisError: null,
+                previousAnalysisData: previousAnalysisData,
+                previousGeneratedCode: previousGeneratedCode,
             },
             userContext: '', // User settings context
             teamContext: '', // Team settings context
@@ -131,10 +134,8 @@ class AgentOrchestrator {
                     // Case 3: Generation of ANALYSIS code succeeded -> Force execution of analysis code
                     else if (lastTool === 'generate_analysis_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.generatedAnalysisCode) {
                         forceAction = 'execute_analysis';
-                        let rawGeneratedCode = this.turnContext.intermediateResults.generatedAnalysisCode;
-                        const codeBlockRegex = /^```(?:javascript|js)?\s*([\s\S]*?)\s*```$|^([\s\S]*)$/m;
-                        const match = rawGeneratedCode.match(codeBlockRegex);
-                        codeToExecute = match && (match[1] || match[2]) ? (match[1] || match[2]).trim() : rawGeneratedCode.trim();
+                        // Use the already cleaned code stored from the generation step
+                        codeToExecute = this.turnContext.intermediateResults.generatedAnalysisCode;
                         parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
                         logger.info(`[Agent Loop ${this.sessionId}] Stage 3 Complete: Analysis code generated. Forcing execution.`);
                     }
@@ -163,6 +164,23 @@ class AgentOrchestrator {
                         };
                      }
                 } else if (forceAction === 'execute_analysis') {
+                     const rawGeneratedCode = this.turnContext.intermediateResults.generatedAnalysisCode;
+                     parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
+
+                     // --- Ensure code fences are removed RIGHT BEFORE execution ---
+                     let codeToExecute = rawGeneratedCode; // Default to raw code
+                     if (rawGeneratedCode && typeof rawGeneratedCode === 'string') {
+                         const codeFenceRegex = /^```(?:javascript|js)?\s*([\s\S]*?)\s*```$|^([\s\S]*)$/m;
+                         const match = rawGeneratedCode.match(codeFenceRegex);
+                         if (match && (match[1] || match[2])) {
+                             codeToExecute = (match[1] || match[2]).trim(); // Use cleaned code
+                             logger.debug('[Agent Loop] Cleaned analysis code before execution.');
+                         } else {
+                              codeToExecute = rawGeneratedCode.trim(); // Trim anyway
+                         }
+                     }
+                     // --- End cleaning ---
+
                      if (!codeToExecute) {
                          logger.error('[Agent Loop] Cannot force ANALYSIS execution, cleaned code is empty.');
                          action = null;
@@ -175,7 +193,7 @@ class AgentOrchestrator {
                              args: { code: codeToExecute, parsed_data_ref: parsedDataRefForExecution }
                          };
                      }
-                     this.turnContext.intermediateResults.generatedAnalysisCode = null; // Clear intermediate
+                     this.turnContext.intermediateResults.generatedAnalysisCode = null; // Clear intermediate context
                 }
                 
                 // If no action forced, get from LLM
@@ -396,121 +414,159 @@ class AgentOrchestrator {
         try {
              const historyRecords = await PromptHistory.find({
                  chatSessionId: this.sessionId,
-                 _id: { $ne: this.aiMessagePlaceholderId }
+                 _id: { $ne: this.aiMessagePlaceholderId } // Exclude the current placeholder
              })
-             .sort({ createdAt: -1 }) 
-             .limit(HISTORY_FETCH_LIMIT) 
-             .select('messageType promptText aiResponseText reportAnalysisData aiGeneratedCode createdAt')
+             .sort({ createdAt: -1 }) // Fetch newest first
+             .limit(HISTORY_FETCH_LIMIT)
+             .select('messageType promptText aiResponseText reportAnalysisData aiGeneratedCode createdAt') // Added _id for logging
              .lean();
 
-             historyRecords.reverse(); // Chronological order
+             // Note: historyRecords is now newest-to-oldest due to sort
 
-             this.turnContext.chatHistoryForSummarization = historyRecords.map(msg => ({
-                 role: msg.messageType === 'user' ? 'user' : 'assistant',
-                 content: msg.messageType === 'user' ? msg.promptText : msg.aiResponseText 
-             })).filter(msg => msg.content);
-
-             // --- Find the most recent assistant message with analysis and code ---
+             // --- REVISED LOGIC to find artifacts independently --- 
              let previousAnalysisResult = null;
              let previousGeneratedCode = null;
              let previousResultSummary = null;
+             let analysisFoundOnMsgId = null;
+             let codeFoundOnMsgId = null;
 
-             for (let i = historyRecords.length - 1; i >= 0; i--) {
-                 const msg = historyRecords[i];
+             logger.debug(`[Agent History Prep] Searching ${historyRecords.length} history records for artifacts...`);
+
+             for (const msg of historyRecords) { // Iterate newest to oldest
                  if (msg.messageType === 'assistant') {
-                    // --- ADD INNER LOOP DEBUG --- 
-                    logger.debug(`[Agent History Prep] Checking assistant msg ${msg._id}:`, { 
-                        hasReportData: !!msg.reportAnalysisData, 
-                        reportDataType: typeof msg.reportAnalysisData,
-                        hasAiCode: !!msg.aiGeneratedCode,
-                        codeLength: msg.aiGeneratedCode?.length 
-                    });
+                     // --- ADD INNER LOOP DEBUG --- 
+                    // logger.debug(`[Agent History Prep] Checking assistant msg ${msg._id}:`, { 
+                    //     hasReportData: !!msg.reportAnalysisData, 
+                    //     reportDataType: typeof msg.reportAnalysisData,
+                    //     hasAiCode: !!msg.aiGeneratedCode,
+                    //     codeLength: msg.aiGeneratedCode?.length 
+                    // });
                     // --- END INNER LOOP DEBUG --- 
 
-                     if (msg.reportAnalysisData && msg.aiGeneratedCode) {
+                    // Find the *first* (most recent) message with analysis data
+                    if (previousAnalysisResult === null && msg.reportAnalysisData) {
                          previousAnalysisResult = msg.reportAnalysisData;
-                         previousGeneratedCode = msg.aiGeneratedCode;
+                         analysisFoundOnMsgId = msg._id;
                          // Attempt to create a concise summary for the prompt
                          if (typeof previousAnalysisResult === 'object' && previousAnalysisResult !== null) {
                              const keys = Object.keys(previousAnalysisResult);
                              previousResultSummary = `Previous analysis generated ${keys.length} main sections: ${keys.slice(0, 3).join(', ')}${keys.length > 3 ? ', ...' : ''}`;
                          } else {
-                             previousResultSummary = 'Previous analysis data exists.';
+                             previousResultSummary = 'Previous analysis data exists (non-object format).';
                          }
-                         logger.info(`[Agent History Prep] Found previous analysis results and code from message ID ${msg._id}`);
-                         break; // Found the most recent one
+                         logger.info(`[Agent History Prep] Found previous analysis result on message ID ${analysisFoundOnMsgId}`);
                      }
+
+                    // Find the *first* (most recent) message with generated code
+                    if (previousGeneratedCode === null && msg.aiGeneratedCode) {
+                         previousGeneratedCode = msg.aiGeneratedCode;
+                         codeFoundOnMsgId = msg._id;
+                          logger.info(`[Agent History Prep] Found previous generated code on message ID ${codeFoundOnMsgId}`);
+                    }
+                 }
+                 // Stop searching if we've found both artifacts
+                 if (previousAnalysisResult !== null && previousGeneratedCode !== null) {
+                     logger.debug('[Agent History Prep] Found both analysis and code artifacts. Stopping search.');
+                     break;
                  }
              }
+             // --- END REVISED LOGIC ---
 
-             // Store found artifacts in intermediate results for potential reuse
-             this.turnContext.intermediateResults.previousAnalysisResult = previousAnalysisResult;
+             // Store potentially found artifacts in intermediate results for potential reuse by _prepareLLMContext
+             this.turnContext.intermediateResults.previousAnalysisData = previousAnalysisResult; // Correct field name
              this.turnContext.intermediateResults.previousGeneratedCode = previousGeneratedCode;
-             this.turnContext.intermediateResults.previousResultSummary = previousResultSummary;
+            // this.turnContext.intermediateResults.previousResultSummary = previousResultSummary; // Summary is generated in _prepareLLMContext now
+
              // --- ADD DEBUG LOG --- 
              logger.debug(`[Agent History Prep] Post-loop check:`, { 
                  hasPreviousAnalysis: !!previousAnalysisResult, 
+                 analysisMsgId: analysisFoundOnMsgId,
                  hasPreviousCode: !!previousGeneratedCode, 
-                 previousSummary: previousResultSummary 
+                 codeMsgId: codeFoundOnMsgId,
+                // previousSummary: previousResultSummary // No longer set here
              });
              // --- END DEBUG LOG ---
-             // --- End of finding previous artifacts ---
 
-             const historyLength = this.turnContext.chatHistoryForSummarization.length;
-             logger.debug(`Fetched ${historyLength} history records for session ${this.sessionId}.`);
+             // --- History Summarization (moved after artifact search) --- 
+             const historyForSummarization = historyRecords
+                .reverse() // Put back in chronological order for summarization
+                .map(msg => ({
+                    role: msg.messageType === 'user' ? 'user' : 'assistant',
+                    content: msg.messageType === 'user' ? msg.promptText : msg.aiResponseText 
+                }))
+                .filter(msg => msg.content);
+                
+             this.turnContext.chatHistoryForSummarization = historyForSummarization; // Store for potential future use?
+             const historyLength = historyForSummarization.length;
 
              if (historyLength === 0) {
                  this.turnContext.historySummary = "No previous conversation history.";
              } else if (historyLength > HISTORY_SUMMARIZATION_THRESHOLD) {
                  logger.info(`History length (${historyLength}) exceeds threshold (${HISTORY_SUMMARIZATION_THRESHOLD}). Attempting summarization...`);
-                 // Call prompt service to summarize the fetched history
                  this.turnContext.historySummary = await promptService.summarizeChatHistory(
-                     this.turnContext.chatHistoryForSummarization
+                     this.userId,
+                     historyForSummarization
                  );
                  logger.info(`History summarized successfully.`);
              } else {
-                 // If history is short, format it directly (or use as is for the main prompt)
-                 // For now, just use a simple message indicating direct inclusion might happen
                  this.turnContext.historySummary = `Recent conversation history (last ${historyLength} messages - full content provided in context if possible).`;
-                 // TODO: Decide if short history should be passed differently to the main LLM call
-                 // vs. relying on the summarization slot in the system prompt.
              }
              
         } catch (err) {
              logger.error(`Failed to fetch or summarize chat history for session ${this.sessionId}: ${err.message}`);
              this.turnContext.historySummary = "Error processing conversation history.";
+             // Reset artifact state on error to avoid passing stale data
+             this.turnContext.intermediateResults.previousAnalysisData = null;
+             this.turnContext.intermediateResults.previousGeneratedCode = null;
         }
     }
 
-    /** Prepares context for the LLM reasoning step. */
+    /**
+     * Prepares the full context object required by the LLM reasoning prompt service.
+     * @returns {object} - Context object for promptService.getLLMReasoningResponse.
+     */
     _prepareLLMContext() {
-        const context = {
-            userId: this.userId,
-            teamId: this.teamId,
-            sessionId: this.sessionId,
+        // --- ADDED: Prepare previous analysis context ---
+        let previousAnalysisResultSummary = null;
+        let hasPreviousGeneratedCode = false;
+
+        if (this.turnContext.intermediateResults.previousAnalysisData) {
+            // Simple summary indicating data is available. The LLM prompt instructs it to use this.
+            previousAnalysisResultSummary = "Analysis results from a previous turn are available and should be reused if applicable.";
+            // You could add more detail here if needed, e.g., extracting key figures.
+        }
+        if (this.turnContext.intermediateResults.previousGeneratedCode) {
+            hasPreviousGeneratedCode = true;
+        }
+        // --- END ADDED ---
+
+        // Ensure historySummary is generated if needed (maybe move logic here?)
+        const historySummary = this.turnContext.historySummary || "No history summary available."; // Use stored or default
+
+        return {
+            userId: this.userId, // Pass userId for model preference selection
             originalQuery: this.turnContext.originalQuery,
-            historySummary: this.turnContext.historySummary, // Use the prepared summary
+            historySummary: historySummary,
             currentTurnSteps: this.turnContext.steps,
-            availableTools: this._getToolDefinitions(),
-            userContext: this.turnContext.userContext, // User settings context
-            teamContext: this.turnContext.teamContext, // Team settings context
-            analysisResult: this.turnContext.intermediateResults.analysisResult || null,
-            // --- Add context about previous artifacts ---\
-            previousAnalysisResultSummary: this.turnContext.intermediateResults.previousResultSummary || null,
-            hasPreviousGeneratedCode: !!this.turnContext.intermediateResults.previousGeneratedCode,
-            // --- End added context ---
+            availableTools: this._getToolDefinitions(), // Pass tool definitions
+            userContext: this.turnContext.userContext, // Pass user context
+            teamContext: this.turnContext.teamContext, // Pass team context
+            // --- ADDED: Pass previous analysis info ---
+            previousAnalysisResultSummary: previousAnalysisResultSummary,
+            hasPreviousGeneratedCode: hasPreviousGeneratedCode,
+            // --- END ADDED ---
+            // Pass current turn analysis result if available (for direct use)
+            analysisResult: this.turnContext.intermediateResults.analysisResult
         };
-        logger.debug('[Agent Loop] Prepared LLM Context', { stepsCount: context.currentTurnSteps.length, historyLength: this.turnContext.chatHistoryForSummarization.length });
-        return context;
     }
 
-     /**
-      * Parses the LLM's raw response text to identify tool calls or final answers.
-      * Expected tool call format: A JSON object like {"tool": "<name>", "args": {...}}
-      * Anything else is treated as a final answer for the _answerUserTool.
-      * @param {string} llmResponse - The raw text response from the LLM.
-      * @returns {{tool: string|null, args: object|null}} - Parsed action.
-      */
+    /**
+     * Parses the LLM's raw response text to identify tool calls or final answers.
+     * Expected tool call format: A JSON object like {"tool": "<name>", "args": {...}}
+     * Anything else is treated as a final answer for the _answerUserTool.
+     * @param {string} llmResponse - The raw text response from the LLM.
+     * @returns {{tool: string|null, args: object|null}} - Parsed action.
+     */
     _parseLLMResponse(llmResponse) {
         if (!llmResponse || typeof llmResponse !== 'string') {
              logger.warn('LLM response is empty or not a string.');
@@ -906,6 +962,7 @@ class AgentOrchestrator {
         }
         try {
             const generatedCodeResponse = await promptService.generateAnalysisCode({
+                userId: this.userId,
                 analysisGoal: analysis_goal,
                 datasetSchema: schemaData 
             });
@@ -1000,7 +1057,10 @@ class AgentOrchestrator {
         // Call the prompt service with the CORRECT, verified data
         try {
             logger.debug('[Agent Report Gen] Calling promptService.generateReportCode with args:', { analysisSummary: reportArgs.analysisSummary, dataJsonKeys: Object.keys(reportArgs.dataJson || {}) });
-            const result = await promptService.generateReportCode(reportArgs);
+            const result = await promptService.generateReportCode({
+                userId: this.userId,
+                ...reportArgs // Spread the existing arguments
+            });
             
             let cleanedCode = result?.react_code;
             if (cleanedCode && typeof cleanedCode === 'string') {

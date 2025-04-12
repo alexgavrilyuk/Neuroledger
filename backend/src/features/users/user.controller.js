@@ -26,43 +26,77 @@ const getCurrentUser = async (req, res, next) => {
   }
 };
 
-/**
- * Update the current user's settings
- */
-const updateUserSettings = async (req, res, next) => {
-  try {
-    const userId = req.user._id;
-    const { currency, dateFormat, aiContext } = req.body;
+// --- Controller to Update User Settings (currency, dateFormat, aiContext, preferredAiModel) ---
+// This is the correct version that handles preferredAiModel and has logging
+const updateUserSettings = async (req, res) => {
+    const userId = req.user?._id;
+    const { currency, dateFormat, aiContext, preferredAiModel } = req.body;
 
-    const user = await User.findById(userId);
+    // --- DEBUG LOG: Incoming request body ---
+    logger.debug(`[updateUserSettings] Received request for user ${userId}. Body:`, req.body);
 
-    if (!user) {
-      logger.warn(`User with ID ${userId} not found when updating settings`);
-      return res.status(404).json({ status: 'error', message: 'User not found' });
+    if (!userId) {
+        logger.error(`[updateUserSettings] Failed to extract userId from req.user._id`);
+        return res.status(401).json({ status: 'error', message: 'Unauthorized - User ID missing' });
     }
 
-    // Initialize settings object if it doesn't exist
-    if (!user.settings) {
-      user.settings = {};
+    // Validate preferredAiModel if provided
+    if (preferredAiModel && !['claude', 'gemini'].includes(preferredAiModel)) {
+        logger.warn(`[updateUserSettings] Invalid preferredAiModel value received: ${preferredAiModel}`);
+        return res.status(400).json({ status: 'error', message: 'Invalid preferred AI model specified.' });
     }
 
-    // Update only the provided settings
-    if (currency !== undefined) user.settings.currency = currency;
-    if (dateFormat !== undefined) user.settings.dateFormat = dateFormat;
-    if (aiContext !== undefined) user.settings.aiContext = aiContext;
+    try {
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ status: 'error', message: 'User not found' });
+        }
 
-    // Save the updates
-    await user.save();
+        // --- DEBUG LOG: Settings before update ---
+        logger.debug(`[updateUserSettings] User ${userId} settings BEFORE update:`, user.settings);
 
-    logger.info(`User ${userId} updated their settings`);
-    res.status(200).json({ status: 'success', data: user });
-  } catch (error) {
-    logger.error(`Error updating user settings: ${error.message}`);
-    next(error);
-  }
+        // Update settings object conditionally
+        let updated = false;
+        if (currency !== undefined && user.settings.currency !== currency) {
+            user.settings.currency = currency;
+            updated = true;
+        }
+        if (dateFormat !== undefined && user.settings.dateFormat !== dateFormat) {
+            user.settings.dateFormat = dateFormat;
+            updated = true;
+        }
+        if (aiContext !== undefined && user.settings.aiContext !== aiContext) {
+            user.settings.aiContext = aiContext;
+            updated = true;
+        }
+        if (preferredAiModel !== undefined && user.settings.preferredAiModel !== preferredAiModel) {
+            user.settings.preferredAiModel = preferredAiModel;
+            logger.info(`[updateUserSettings] Updating preferredAiModel for user ${userId} to: ${preferredAiModel}`);
+            updated = true;
+        }
+
+        if (updated) {
+            await user.save();
+             // --- DEBUG LOG: Settings AFTER save ---
+            logger.debug(`[updateUserSettings] User ${userId} settings AFTER save:`, user.settings);
+            logger.info(`User settings updated successfully for user ID: ${userId}`);
+        } else {
+            logger.info(`[updateUserSettings] No settings changes detected for user ID: ${userId}`);
+        }
+
+        res.status(200).json({ status: 'success', data: user });
+
+    } catch (error) {
+        logger.error(`Error updating user settings for user ID ${userId}: ${error.message}`);
+        res.status(500).json({ status: 'error', message: 'Error updating settings' });
+    }
 };
+
+// --- Get User Settings (If needed separately, otherwise /users/me is used) ---
+// exports.getUserSettings = async (req, res) => { ... }; // Keep commented unless separate endpoint is truly needed
 
 module.exports = {
   getCurrentUser,
   updateUserSettings
+  // getUserSettings // Keep commented
 };

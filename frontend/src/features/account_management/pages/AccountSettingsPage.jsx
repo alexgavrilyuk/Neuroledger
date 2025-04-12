@@ -14,7 +14,8 @@ import {
   CalendarIcon,
   CheckIcon,
   ArrowPathIcon,
-  ExclamationCircleIcon
+  ExclamationCircleIcon,
+  CpuChipIcon
 } from '@heroicons/react/24/outline';
 
 const AccountSettingsPage = () => {
@@ -27,6 +28,7 @@ const AccountSettingsPage = () => {
   // General settings
   const [currency, setCurrency] = useState('USD');
   const [dateFormat, setDateFormat] = useState('YYYY-MM-DD');
+  const [preferredAiModel, setPreferredAiModel] = useState('claude');
   const [hasChanges, setHasChanges] = useState(false);
 
   // Load current settings from user object
@@ -34,6 +36,7 @@ const AccountSettingsPage = () => {
     if (user) {
       setCurrency(user.settings?.currency || 'USD');
       setDateFormat(user.settings?.dateFormat || 'YYYY-MM-DD');
+      setPreferredAiModel(user.settings?.preferredAiModel || 'claude');
       setLoading(false);
       setHasChanges(false);
     }
@@ -44,13 +47,15 @@ const AccountSettingsPage = () => {
     if (user && !loading) {
       const currentCurrency = user.settings?.currency || 'USD';
       const currentDateFormat = user.settings?.dateFormat || 'YYYY-MM-DD';
+      const currentPreferredAiModel = user.settings?.preferredAiModel || 'claude';
 
       setHasChanges(
         currency !== currentCurrency ||
-        dateFormat !== currentDateFormat
+        dateFormat !== currentDateFormat ||
+        preferredAiModel !== currentPreferredAiModel
       );
     }
-  }, [currency, dateFormat, user, loading]);
+  }, [currency, dateFormat, preferredAiModel, user, loading]);
 
   const handleSaveGeneralSettings = async (e) => {
     e.preventDefault();
@@ -62,7 +67,8 @@ const AccountSettingsPage = () => {
 
       const response = await apiClient.put('/users/me/settings', {
         currency,
-        dateFormat
+        dateFormat,
+        preferredAiModel
       });
 
       if (response.data.status === 'success') {
@@ -129,7 +135,7 @@ const AccountSettingsPage = () => {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
                 {/* Currency Setting - Enhanced with icon and better select styling */}
                 <div className="space-y-2">
                   <div className="flex items-center mb-2">
@@ -186,6 +192,32 @@ const AccountSettingsPage = () => {
 
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Choose how dates are displayed throughout the application.
+                  </p>
+                </div>
+
+                {/* AI Model Preference Setting */}
+                <div className="space-y-2">
+                  <div className="flex items-center mb-2">
+                    <CpuChipIcon className="h-5 w-5 mr-2 text-blue-500" />
+                    <label htmlFor="aiModel" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Preferred AI Model
+                    </label>
+                  </div>
+
+                  <div className="relative rounded-md shadow-soft-sm dark:shadow-soft-dark-sm bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 focus-within:border-blue-500">
+                    <select
+                      id="aiModel"
+                      value={preferredAiModel}
+                      onChange={(e) => setPreferredAiModel(e.target.value)}
+                      className="block w-full rounded-md border-0 bg-transparent py-2 pl-3 pr-10 text-gray-900 dark:text-white focus:ring-2 focus:ring-inset focus:ring-blue-500 dark:focus:ring-blue-400 sm:text-sm"
+                    >
+                      <option value="claude">Claude 3 (Recommended)</option>
+                      <option value="gemini">Google Gemini 2.5 Pro</option>
+                    </select>
+                  </div>
+
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Choose the AI model for chat and analysis tasks.
                   </p>
                 </div>
               </div>

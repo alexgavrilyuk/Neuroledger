@@ -1,6 +1,8 @@
 // backend/src/features/chat/prompt.service.js
 // ** UPDATED FILE - Now includes team business context **
 const anthropic = require('../../shared/external_apis/claude.client');
+// --- NEW: Import Gemini client ---
+const geminiClient = require('../../shared/external_apis/gemini.client');
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
 const Team = require('../teams/team.model');
@@ -10,6 +12,37 @@ const TeamMember = require('../teams/team-member.model');
 const logger = require('../../shared/utils/logger');
 // Import the NEW agent system prompt generator
 const generateAgentSystemPrompt = require('./system-prompt-template');
+
+// --- NEW: Helper function to get user model preference ---
+const getUserModelPreference = async (userId) => {
+    if (!userId) {
+        logger.warn('Cannot fetch model preference without userId. Defaulting to Claude.');
+        return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Default model
+    }
+    try {
+        // Select only the preferredAiModel field
+        const user = await User.findById(userId).select('settings.preferredAiModel').lean();
+        const preference = user?.settings?.preferredAiModel || 'claude'; // Default to claude if not found
+
+        if (preference === 'gemini') {
+             // Check if Gemini client is available before returning preference
+             if (!geminiClient.isAvailable()) {
+                 logger.warn(`User ${userId} prefers Gemini, but Gemini client is not available. Falling back to Claude.`);
+                 return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Fallback model
+             }
+             // --- TODO: Select appropriate Gemini model variant ---
+             // For now, hardcoding 1.5 Pro, but could be based on task (reasoning vs code gen)
+             return { provider: 'gemini', model: 'gemini-2.5-pro-preview-03-25' }; 
+        } else {
+             // --- TODO: Select appropriate Claude model variant ---
+             // Keeping Haiku for now, but original code used Sonnet/Opus for different tasks
+             return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; 
+        }
+    } catch (error) {
+        logger.error(`Error fetching user model preference for user ${userId}: ${error.message}. Defaulting to Claude.`);
+        return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Default model on error
+    }
+};
 
 // Enhanced context assembly function - now includes team context
 const assembleContext = async (userId, selectedDatasetIds) => {
@@ -62,14 +95,25 @@ const assembleContext = async (userId, selectedDatasetIds) => {
 /**
  * Calls the LLM to get the next reasoning step or final answer for the agent.
  * @param {object} agentContext - Context prepared by AgentOrchestrator.
- *   Includes: originalQuery, historySummary, currentTurnSteps, availableTools, userContext, teamContext.
+ *   Includes: userId, originalQuery, historySummary, currentTurnSteps, availableTools, userContext, teamContext.
  * @returns {Promise<string>} - The raw text response from the LLM.
  */
 const getLLMReasoningResponse = async (agentContext) => {
-    if (!anthropic) {
-        logger.error("getLLMReasoningResponse called but Anthropic client is not initialized.");
-        throw new Error('AI assistant is currently unavailable.');
-     }
+    // --- MODIFIED: Get user preference ---
+    const { userId } = agentContext;
+    const { provider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[LLM Reasoning] Using ${provider} model: ${modelToUse} for user ${userId}`);
+
+    // Check provider availability (redundant if getUserModelPreference handles fallback, but good practice)
+    if (provider === 'claude' && !anthropic) {
+        logger.error("getLLMReasoningResponse called for Claude but client is not initialized.");
+        throw new Error('AI assistant (Claude) is currently unavailable.');
+    }
+     if (provider === 'gemini' && !geminiClient.isAvailable()) {
+        // This case should ideally be handled by the fallback in getUserModelPreference
+        logger.error("getLLMReasoningResponse called for Gemini but client is not available. Fallback failed?");
+        throw new Error('AI assistant (Gemini) is currently unavailable.');
+    }
 
     const startTime = Date.now();
     // Destructure ALL fields needed for the system prompt generator
@@ -98,62 +142,77 @@ const getLLMReasoningResponse = async (agentContext) => {
             { role: "user", content: originalQuery } // The user's latest query
         ];
 
-        const modelToUse = "claude-3-7-sonnet-20250219"; // Use Opus specifically for the main reasoning step
+        // --- MODIFIED: Prepare API options based on provider ---
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 14096, // Max output tokens (tool call JSON or final answer) - Opus has larger context but keep output reasonable
+            max_tokens: provider === 'gemini' ? 18192 : 14096, // Example: Gemini might support more output tokens
             system: systemPrompt,
             messages,
             temperature: 0.1 // Lower temperature for more predictable tool usage
         };
 
-        // --- ADDED: Log the full system prompt being sent --- 
-        logger.debug(`[Agent Reasoning] Full System Prompt being sent to ${apiOptions.model}:\n------ START SYSTEM PROMPT ------\n${systemPrompt}\n------ END SYSTEM PROMPT ------`);
-        // --- END ADDED LOG --- 
+        // --- MODIFIED: Log the full system prompt being sent --- 
+        logger.debug(`[Agent Reasoning] Full System Prompt being sent to ${provider} model ${apiOptions.model}:\\n------ START SYSTEM PROMPT ------\\n${systemPrompt}\\n------ END SYSTEM PROMPT ------`);
+        // --- END MODIFIED LOG --- 
 
-        // 3. Call Claude API
-        logger.debug(`Calling Claude API for Agent Reasoning with model ${apiOptions.model}...`);
-        const claudeApiResponse = await anthropic.messages.create(apiOptions);
-        const rawResponse = claudeApiResponse.content?.[0]?.type === 'text' ? claudeApiResponse.content[0].text : null;
-
-        if (!rawResponse) {
-            logger.error('Unexpected or empty response format from Claude API for agent reasoning:', claudeApiResponse);
-            throw new Error('AI assistant provided an empty or unparseable response.');
+        // 3. Call the appropriate API
+        let apiResponse;
+        logger.debug(`Calling ${provider} API for Agent Reasoning with model ${apiOptions.model}...`);
+        
+        if (provider === 'gemini') {
+            apiResponse = await geminiClient.generateContent(apiOptions);
+        } else { // Default to claude
+            apiResponse = await anthropic.messages.create(apiOptions);
         }
 
-        logger.debug(`Claude Agent RAW response received. Length: ${rawResponse?.length}`);
+        // 4. Extract raw response (structure is similar thanks to gemini.client wrapper)
+        const rawResponse = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text : null;
+
+        if (!rawResponse) {
+            logger.error(`Unexpected or empty response format from ${provider} API for agent reasoning:`, apiResponse);
+            throw new Error(`AI assistant (${provider}) provided an empty or unparseable response.`);
+        }
+
+        logger.debug(`${provider} Agent RAW response received. Length: ${rawResponse?.length}`);
         logger.debug(`Raw Response: ${rawResponse}`); // Log the raw response for debugging parsing
         const durationMs = Date.now() - startTime;
-        logger.info(`LLM Reasoning step completed in ${durationMs}ms.`);
+        logger.info(`LLM Reasoning step via ${provider} completed in ${durationMs}ms.`);
 
-        // 4. Return the raw response for the AgentOrchestrator to parse
+        // 5. Return the raw response for the AgentOrchestrator to parse
         return rawResponse;
 
     } catch (error) {
-        logger.error(`Error during LLM reasoning API call: ${error.message}`, error);
+        logger.error(`Error during ${provider} LLM reasoning API call: ${error.message}`, error);
         // Rethrow the error to be handled by the AgentOrchestrator
-        throw new Error(`AI assistant failed to generate a response: ${error.message}`);
+        throw new Error(`AI assistant (${provider}) failed to generate a response: ${error.message}`);
     }
 };
 
 /**
  * Generates Node.js code for execution in a restricted sandbox environment.
  * @param {object} params - Parameters for code generation.
+ * @param {string} params.userId - The ID of the user requesting the code.
  * @param {string} params.analysisGoal - The specific goal the code should achieve.
  * @param {object} params.datasetSchema - Schema information ({schemaInfo, columnDescriptions, description}).
  * @returns {Promise<{code: string | null}>} - The generated code string or null on failure.
  */
-const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
-    if (!anthropic) {
-        logger.error("generateAnalysisCode called but Anthropic client is not initialized.");
-        throw new Error('AI assistant is currently unavailable.');
+const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => {
+    // --- MODIFIED: Get user preference ---
+    const { provider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[Analysis Code Gen] Using ${provider} model: ${modelToUse} for user ${userId}`);
+
+    // Check availability
+    if ((provider === 'claude' && !anthropic) || (provider === 'gemini' && !geminiClient.isAvailable())) {
+         logger.error(`generateAnalysisCode called but selected provider (${provider}) client is not available.`);
+         throw new Error(`AI assistant (${provider}) is currently unavailable for code generation.`);
     }
+    
     if (!analysisGoal || !datasetSchema) {
         throw new Error('Missing analysis goal or dataset schema for analysis code generation.');
     }
 
     const startTime = Date.now();
-    logger.info('Generating analysis Node.js code for goal: \"%s...\"', analysisGoal.substring(0, 50));
+    logger.info('Generating analysis Node.js code for goal: \\"%s...\\" using %s', analysisGoal.substring(0, 50), provider);
 
     // Construct the system prompt for ANALYSIS code generation
     // ADDED: Explicit output structure definition
@@ -210,6 +269,8 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     *   MUST use the provided \`inputData\` variable directly.
     *   MUST call \`sendResult(result)\` exactly once with the final analysis result (or \`{ error: ... }\` on failure).
     *   MUST complete within ~5 seconds.
+    *   MUST use ES5 syntax ONLY. DO NOT use ES6+ features such as template literals (e.g., \`string \${variable}\`), arrow functions (=>), let, or const. Use traditional string concatenation (+) and var for variable declarations.
+    *   **Execution Flow:** The generated code will be executed directly. **Do NOT use top-level \`return\` statements.** The script should run to completion and use the provided \`sendResult(result)\` function to return the final JSON analysis object. Errors should be allowed to throw naturally (they will be caught).
 
     DATASET SCHEMA (for context on properties within inputData objects):
     *   Description: ${datasetSchema.description || '(No description provided)'}
@@ -234,27 +295,33 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     *   The code MUST operate directly on the \`inputData\` variable. DO NOT include any CSV parsing logic.
     *   The object passed to \`sendResult()\` MUST match the REQUIRED OUTPUT STRUCTURE exactly.`;
 
-    // Define modelToUse outside the try block to ensure it's accessible in catch
-    const modelToUse = "claude-3-7-sonnet-20250219"; // Using Sonnet as specified
-
     try {
         const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the goal and schema, ensuring the output strictly matches the required structure."}];
         
+        // --- MODIFIED: Prepare API options ---
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 13500, 
+             // Example: Maybe allow more tokens for code gen? Adjust per model limits/needs.
+            max_tokens: provider === 'gemini' ? 18192 : 14096, 
             system: analysisCodeGenSystemPrompt,
             messages,
-            temperature: 0.0 
+            temperature: 0.0 // Low temp for code gen
         };
 
-        logger.debug(`Calling Claude API for Analysis Code Generation with model ${modelToUse}...`);
-        const claudeApiResponse = await anthropic.messages.create(apiOptions);
-        const generatedCode = claudeApiResponse.content?.[0]?.type === 'text' ? claudeApiResponse.content[0].text.trim() : null;
+        // --- MODIFIED: Call appropriate API ---
+        let apiResponse;
+        if (provider === 'gemini') {
+            apiResponse = await geminiClient.generateContent(apiOptions);
+        } else {
+            apiResponse = await anthropic.messages.create(apiOptions);
+        }
+
+        // --- MODIFIED: Extract code (structure is similar) ---
+        const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
 
         if (!generatedCode) {
-            logger.error(`Unexpected or empty response format from Claude API for analysis code gen:`, claudeApiResponse);
-            throw new Error('AI assistant provided no analysis code.');
+            logger.error(`Analysis code generation by ${provider} returned empty content.`, apiResponse);
+            throw new Error(`AI assistant (${provider}) failed to generate analysis code.`);
         }
 
         // Check if code includes calls to sendResult (basic validation)
@@ -274,76 +341,136 @@ const generateAnalysisCode = async ({ analysisGoal, datasetSchema }) => {
     } catch (error) {
         // Use the same variable name as defined in the try block for error logging
         const errorModel = modelToUse;
-        logger.error(`Error during analysis code generation API call with model ${errorModel}: ${error.message}`, error);
-        throw new Error(`AI failed to generate analysis code: ${error.message}`);
+        logger.error(`Error during ${provider} analysis code generation API call with model ${errorModel}: ${error.message}`, error);
+        throw new Error(`AI assistant (${provider}) failed to generate analysis code: ${error.message}`);
     }
 };
 
 /**
  * Generates React component code for visualizing analysis results.
  * @param {object} params - Parameters for report generation.
+ * @param {string} params.userId - The ID of the user requesting the report.
  * @param {string} params.analysisSummary - A textual summary of the key findings.
  * @param {object} params.dataJson - The JSON data object (from code execution) for the report.
  * @returns {Promise<{react_code: string | null}>} - The generated React code string or null on failure.
  */
-const generateReportCode = async ({ analysisSummary, dataJson }) => {
-    if (!anthropic) {
-        logger.error('generateReportCode called but Anthropic client is not initialized.');
-        throw new Error('AI assistant is currently unavailable.');
+const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
+    // --- MODIFIED: Get user preference ---
+    const { provider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[Report Code Gen] Using ${provider} model: ${modelToUse} for user ${userId}`);
+
+    // Check availability
+    if ((provider === 'claude' && !anthropic) || (provider === 'gemini' && !geminiClient.isAvailable())) {
+         logger.error(`generateReportCode called but selected provider (${provider}) client is not available.`);
+         throw new Error(`AI assistant (${provider}) is currently unavailable for report code generation.`);
     }
-    if (!analysisSummary) {
-        throw new Error('Missing analysis summary for report code generation.');
+    
+    if (!analysisSummary || !dataJson) {
+        throw new Error('Missing analysis summary or data for report code generation.');
     }
 
     const startTime = Date.now();
     logger.info('Generating React report code...');
 
-    // 1. Construct the system prompt for React code generation (similar to original /prompts endpoint)
-    //    It needs the analysis summary and the data structure (keys of dataJson) as context.
-    const dataKeys = dataJson ? Object.keys(dataJson) : [];
-    // -- More detailed structure based on observed analysis results --
-    const dataStructureDescription = `\n- **summary**: Object, contains:\n    - **dataRange**: Object (e.g., { start, end, totalDays })\n    - **overview**: Object (e.g., { totalIncome, totalExpenses, netProfit, profitMargin })\n- **incomeVsExpenses**: Object, contains:\n    - **overall**: Object (e.g., { totalIncome, totalExpenses, netProfit })\n    - **monthly**: ARRAY of objects (e.g., [{ period, income, expenses, netProfit, profitMargin }, ...]) - Use this for monthly charts.\n    - **quarterly**: ARRAY of objects (e.g., [{ period, income, expenses, netProfit, profitMargin }, ...])\n    - **yearly**: ARRAY of objects (e.g., [{ period, income, expenses, netProfit, profitMargin }, ...])\n- **budgetPerformance**: Object, contains:\n    - **overall**: Object (e.g., { actualIncome, budgetedIncome, incomeVariance, incomeVariancePercentage, actualExpenses, budgetedExpenses, expensesVariance, expensesVariancePercentage })\n    - **monthly**: ARRAY of objects (e.g., [{ period, actualIncome, budgetedIncome, incomeVariance, incomeVariancePercentage, actualExpenses, budgetedExpenses, expensesVariance, expensesVariancePercentage }, ...]) - Use this for budget charts.\n    - **quarterly**: ARRAY of objects (e.g., [{ period, actualIncome, budgetedIncome, ... }, ...])\n- **expenseBreakdown**: Object, contains:\n    - **overall**: ARRAY of objects (e.g., [{ category, amount, percentage }, ...]) - Use this for the main breakdown chart/table.\n    - **monthly**: ARRAY of objects (e.g., [{ period, totalExpenses, categories: [...] }, ...])\n    - **quarterly**: ARRAY of objects (e.g., [{ period, totalExpenses, categories: [...] }, ...])\n- **trends**: Object, contains:\n    - **income**: Object with key 'monthly' (ARRAY) containing trend data (e.g., [{ period, value }, ...]).\n    - **expenses**: Object with key 'monthly' (ARRAY) containing trend data.\n    - **netProfit**: Object with key 'monthly' (ARRAY) containing trend data.\n- **kpis**: Object, contains:\n    - **profitability**: Object (e.g., { netProfit, profitMargin, returnOnExpense })\n    - **budgetPerformance**: Object (e.g., { incomePerformance, expensePerformance, overallBudgetVariance })\n    - **expenseRatio**: Object (e.g., { topExpenseCategories (ARRAY of {category, percentage}), expenseToIncomeRatio })\n- **anomalies**: Object, contains:\n    - **income**: ARRAY of objects (e.g., [{ period, value, average, deviation, type, description? }, ...])\n    - **expenses**: ARRAY of objects\n    - **categories**: ARRAY of objects (e.g., [{ category, period, value, ... }, ...])\n- Other top-level keys potentially present: ${dataKeys.join(', ')}\n`;
+    // --- System Prompt for React Report Code Generation ---
+    // Added detailed instructions and component import list
+    const systemPrompt = `\
+You are an expert React developer specializing in data visualization using the Recharts library.
+Your task is to generate a **single, self-contained React functional component** named 'ReportComponent' based on the provided analysis data and summary.
 
-    const reportGenSystemPrompt = `You are an expert React developer specializing in data visualization using Recharts. Generate ONLY the body of a single JavaScript React functional component named 'ReportComponent'.
+**Input Data Structure:**
+The component will receive a prop named 'reportData' which is a JSON object containing the analysis results. The structure of 'reportData' is:
+\`\`\`json
+${JSON.stringify(dataJson, null, 2)}
+\`\`\`
 
-COMPONENT REQUIREMENTS:
-1.  **Component Name:** EXACTLY 'ReportComponent'.
-2.  **Props:** The component MUST accept a single prop named \`reportData\`, which is the JSON object provided below.
-3.  **Rendering:** Use \`React.createElement\` for ALL component/element creation. Do NOT use JSX syntax.
-4.  **Global Libraries:** Assume \`React\` and \`Recharts\` are available as global variables. Access them directly (e.g., \`React.createElement(Recharts.LineChart, ...)\`). **Do NOT include \`import\` or \`require\` statements.**
-5.  **Analysis & Content:** Use the provided \`analysisSummary\` and the \`reportData\` prop to create meaningful visualizations (charts, tables, key figures) using Recharts and standard HTML elements via \`React.createElement\`. Structure the report logically. Display the following sections based on available data: Financial Summary, Income vs Expenses (Monthly Chart), Budget Performance (Monthly Chart), Expense Breakdown (Overall Pie Chart & Table), Key Trends (Income, Expenses, Net Profit Monthly Area Charts), KPIs, and Anomalies.
-6.  **Styling:** Apply reasonable inline styles for presentation (e.g., \`style={{ margin: '10px' }}\`). Assume a standard sans-serif font. Use contrasting colors for chart elements (e.g., income green, expenses red).
-7.  **Robust Data Handling:** \n    *   The \`reportData\` prop structure is described below under EXPECTED DATA STRUCTURE. Your code MUST strictly adhere to this structure. Pay close attention to nested keys and whether a value is an object or an array.\n    *   **Key Data Paths:** Access data using the CORRECT nested paths (e.g., \`reportData.summary.overview.totalIncome\`, \`reportData.kpis.profitability.profitMargin\`, \`reportData.kpis.expenseRatio.expenseToIncomeRatio\`).\n    *   **Check data existence AND type:** Before accessing properties or iterating (e.g., using \`.map()\`), ALWAYS verify that the parent object/array exists AND the specific property exists AND has the expected type based on the structure below (e.g., \`typeof reportData.summary?.overview?.totalIncome === 'number'\`, \`Array.isArray(reportData.expenseBreakdown?.overall)\`, \`Array.isArray(reportData.incomeVsExpenses?.monthly)\`).\n    *   **Safe Access:** Use optional chaining (\`?.\`) extensively (e.g., \`reportData?.summary?.overview?.totalIncome\`, \`reportData?.trends?.income?.monthly\`, \`reportData?.kpis?.profitability?.profitMargin\`).\n    *   **Chart Data:** For chart components (BarChart, LineChart, PieChart, AreaChart), the \`data\` prop MUST be an array. Ensure the corresponding property in \`reportData\` (e.g., \`reportData.incomeVsExpenses.monthly\`, \`reportData.expenseBreakdown.overall\`, \`reportData.trends.income.monthly\`) is validated as a non-empty array before rendering the chart.\n    *   **Rendering List/Table Items:** When mapping over an array of objects (e.g., \`reportData.anomalies.income.map(...)\` or rows in \`reportData.expenseBreakdown.overall\`), you MUST create React elements for the *specific properties* you want to display (e.g., \`anomaly.period\`, \`anomaly.value\`). **DO NOT render the entire object (e.g., \`anomaly\`) directly as a child element**, as this will cause a React error. Format the properties into strings or nested elements.\n    *   **Internal Errors:** If expected data based on the structure below is missing or invalid, render a clear, user-friendly message FOR THAT SPECIFIC SECTION (e.g., \`React.createElement('p', { style: { color: 'orange' } }, 'KPI data (reportData.kpis.profitability) is unavailable or invalid.')\`). Do NOT let the entire component crash.\n    *   **KPI Display:** Render ONLY the specific KPIs defined in the EXPECTED DATA STRUCTURE under the \`kpis\` key (i.e., netProfit, profitMargin, returnOnExpense, incomePerformance, expensePerformance, overallBudgetVariance, topExpenseCategories, expenseToIncomeRatio). Do NOT attempt to render any other KPIs.\n8.  **Output:** Provide ONLY the JavaScript code for the \`ReportComponent\` function body, starting directly with \`function ReportComponent({ reportData }) {\` or similar. Do not include any surrounding text, explanations, or markdown formatting like \`\`\`.
-
-ANALYSIS SUMMARY:
+**Analysis Summary (Context):**
 ${analysisSummary}
 
-EXPECTED DATA STRUCTURE (Prop: reportData):
-${dataStructureDescription}
+**Requirements:**
+1.  **Component Definition:** Define a single functional component: \`function ReportComponent({ reportData })\`.
+2.  **React & Recharts:** Assume React and ReactDOM are available globally. Import necessary Recharts components using destructuring **at the top of the function**:
+    \`\`\`javascript
+    const { createElement } = React; // Use createElement for JSX elements
+    const { ResponsiveContainer, LineChart, BarChart, PieChart, ComposedChart, AreaChart, Line, Bar, Pie, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, LabelList } = Recharts; // MUST include all used components here, especially Area!
+    \`\`\`
+3.  **Styling:** Use inline styles ONLY. Define a \`styles\` object containing style objects for different elements (e.g., \`reportContainer\`, \`section\`, \`kpiCard\`, \`chartContainer\`). Use basic, clean styling (e.g., font sizes, padding, margins, borders, background colors).
+4.  **Data Handling:** Safely access data from the \`reportData\` prop (e.g., \`reportData?.summary?.overview?.totalIncome\`). Handle potential missing data gracefully (e.g., display 'N/A' or a placeholder message). Include helper functions for formatting (e.g., \`formatCurrency\`, \`formatPercentage\`.
+5.  **Structure:** Organize the report into logical sections using \`<div>\` elements with appropriate titles (\`<h2>\`, \`<h3>\`). Key sections might include:
+    *   Executive Summary (using the provided \`analysisSummary\`)
+    *   Key Performance Indicators (KPIs)
+    *   Income vs. Expenses Analysis (using charts)
+    *   Budget Performance (using charts/tables)
+    *   Expense Breakdown (using charts/tables)
+    *   Trend Analysis (using charts like Line or Area charts)
+    *   Anomalies (if any data is provided, otherwise state none found)
+6.  **Charts:** Use appropriate Recharts components (LineChart, BarChart, PieChart, AreaChart, ComposedChart) to visualize the data. Ensure charts are responsive using \`ResponsiveContainer\`. Use clear labels, tooltips, and legends.
+7.  **Tables:** If displaying tabular data (e.g., monthly breakdowns), use basic HTML table elements (\`<table>\`, \`<thead>\`, \`<tbody>\`, \`<tr>\`, \`<th>\`, \`<td>\`) styled using the \`styles\` object.
+8.  **Code Output:** Output ONLY the JavaScript code for the \`ReportComponent\` function. Do NOT wrap it in Markdown code fences (\`\`\`javascript ... \`\`\`). Do NOT include any other text, explanations, or imports outside the function body. The entire output must be executable JavaScript defining the component.
+9.  **Error Handling:** The component itself should handle potential missing fields in \`reportData\` gracefully. Helper functions should also handle invalid inputs (e.g., non-numeric values for formatting).
 
-Base your component implementation STRICTLY on the ANALYSIS SUMMARY and the EXPECTED DATA STRUCTURE described above. Validate data presence and types carefully before use, especially checking for arrays before mapping or passing to charts using the specified nested paths.
+**Example Structure (Conceptual):**
+\`\`\`javascript
+function ReportComponent({ reportData }) {
+    const { createElement } = React;
+    const { /* Recharts components... */ Area, Line, Bar, Pie, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer /* etc. */ } = Recharts; // Ensure ALL needed components are here!
 
-Generate the React component code now. Ensure it is robust and handles potential variations in the reportData structure gracefully.`;
+    const styles = { /* ... */ };
+    const formatCurrency = (value) => { /* ... */ };
+    // ... other helpers
+
+    const renderKPIs = () => { /* ... */ };
+    const renderIncomeExpenseChart = () => { /* ... */ };
+    // ... other render functions for sections
+
+    return createElement('div', { style: styles.reportContainer },
+        createElement('h1', null, 'Financial Analysis Report'),
+        renderKPIs(),
+        renderIncomeExpenseChart(),
+        // ... other sections
+    );
+}
+\`\`\`
+Focus on creating a functional, well-structured, and visually clear report component based *strictly* on the provided \`reportData\` and \`analysisSummary\`.`;
 
     try {
         const messages = [{ role: "user", content: "Generate the robust React component code for the report based on the summary and the detailed data structure provided in the system prompt, following all requirements, especially data validation and type checking using the correct nested paths before rendering."}];
         // Use a capable model, maybe Sonnet is sufficient for this?
-        const modelToUse = "claude-3-7-sonnet-20250219";
         const apiOptions = {
             model: modelToUse,
             max_tokens: 16000, // Allow ample space for component code
-            system: reportGenSystemPrompt,
+            system: systemPrompt,
             messages,
             temperature: 0.1 // Low temperature for more predictable code structure
         };
 
-        logger.debug(`Calling Claude API for Report Code Generation with model ${modelToUse}...`);
-        const claudeApiResponse = await anthropic.messages.create(apiOptions);
-        const generatedCode = claudeApiResponse.content?.[0]?.type === 'text' ? claudeApiResponse.content[0].text.trim() : null;
+        logger.debug(`Calling API for Report Code Generation with model ${modelToUse}...`); // Generic log message
+
+        // --- MODIFIED: Call appropriate API based on provider ---
+        let apiResponse;
+        if (provider === 'gemini') {
+            // Adapt options slightly if needed for Gemini (e.g., system prompt handling)
+            // Assuming geminiClient can handle the 'system' property or it should be adapted.
+            // If Gemini doesn't use 'system', pass null or structure differently.
+            // For now, assume direct passing works, adjust if Gemini client has specific needs.
+            apiResponse = await geminiClient.generateContent(apiOptions); 
+        } else if (provider === 'claude' && anthropic) {
+             apiResponse = await anthropic.messages.create(apiOptions);
+        } else {
+             // Handle cases where the provider is unknown or the client isn't available
+             logger.error(`generateReportCode: Unsupported provider '${provider}' or client not available.`);
+             throw new Error(`Unsupported provider '${provider}' or client not available for report generation.`);
+        }
+        // --- END MODIFICATION ---
+
+        // --- MODIFIED: Extract content consistently ---
+        // Both Gemini and Claude (v3) responses seem to use a similar structure
+        const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
+        // --- END MODIFICATION ---
 
         if (!generatedCode) {
-            logger.error('Unexpected or empty response format from Claude API for report code gen:', claudeApiResponse);
-            throw new Error('AI assistant provided no report code.');
+            logger.error(`Unexpected or empty response format from ${provider} API for report code gen:`, apiResponse);
+            throw new Error(`AI assistant (${provider}) failed to generate report code.`);
         }
 
         // Basic validation: Does it look like a React component using createElement?
@@ -357,68 +484,76 @@ Generate the React component code now. Ensure it is robust and handles potential
 
     } catch (error) {
         logger.error(`Error during report code generation API call with model ${modelToUse}: ${error.message}`, error);
-        throw new Error(`AI failed to generate report code: ${error.message}`);
+        throw new Error(`AI assistant (${provider}) failed to generate report code: ${error.message}`);
     }
 };
 
 /**
  * Summarizes a given chat history using an LLM call.
+ * @param {string} userId - The ID of the user whose history is being summarized.
  * @param {Array<{role: string, content: string}>} chatHistory - The recent chat history.
  * @returns {Promise<string>} - The summarized history string.
  */
-const summarizeChatHistory = async (chatHistory) => {
-    if (!anthropic) {
-        logger.error('summarizeChatHistory called but Anthropic client is not initialized.');
-        return "Error: AI assistant unavailable for summarization."; // Return error string
+const summarizeChatHistory = async (userId, chatHistory) => {
+    // --- MODIFIED: Get user preference ---
+    const { provider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[History Summary] Using ${provider} model: ${modelToUse} for user ${userId}`);
+
+    // Check availability
+    if ((provider === 'claude' && !anthropic) || (provider === 'gemini' && !geminiClient.isAvailable())) {
+         logger.error(`summarizeChatHistory called but selected provider (${provider}) client is not available.`);
+         // Return a generic message instead of throwing, as summary is non-critical path usually
+         return "Error: AI summarization service unavailable."; 
     }
+
     if (!chatHistory || chatHistory.length === 0) {
-        return "No conversation history to summarize.";
+        return "No history to summarize.";
     }
 
     const startTime = Date.now();
-    logger.info(`Summarizing chat history (${chatHistory.length} messages)...`);
+    logger.info(`Summarizing chat history (${chatHistory.length} messages) using ${provider}...`);
 
-    // 1. Construct the summarization prompt
-    const summarizationSystemPrompt = "You are a helpful assistant specializing in summarizing conversations. Given the following chat history between a User and an AI Financial Analyst Agent, provide a concise summary focusing on the key topics discussed, questions asked, analyses performed, and conclusions reached. Aim for a summary that captures the essence of the conversation flow and the most important information exchanged. Do not exceed 3-4 sentences.";
-
-    // Format history for the prompt message
-    const historyString = chatHistory.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n---\n');
+    // Construct the prompt for summarization
+    const summarizationPrompt = `Summarize the key points and context of the following conversation concisely. Focus on information relevant for continuing the chat, like user goals, data mentioned, and recent outcomes. Format as a brief paragraph.`;
+    // Use the Claude-style message format, Gemini client will adapt it
     const messages = [
-        { 
-            role: "user", 
-            content: `Please summarize the following conversation history:\n\n${historyString}`
-        }
+        ...chatHistory, // Pass the history as messages
+        { role: "user", content: summarizationPrompt } // Add the summarization instruction
     ];
 
     try {
-        // Use a smaller, faster model for summarization
-        const modelToUse = "claude-3-7-sonnet-20250219"; 
+         // --- MODIFIED: Prepare API options ---
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 2500, // Limit summary length
-            system: summarizationSystemPrompt,
+            max_tokens: 512, // Summary should be concise
             messages,
-            temperature: 0.2 
+            // System prompt usually not needed for simple summarization
+            temperature: 0.3 
         };
 
-        // Add model to log
-        logger.debug(`Calling Claude API for History Summarization with model ${modelToUse}...`);
-        const claudeApiResponse = await anthropic.messages.create(apiOptions);
-        const summary = claudeApiResponse.content?.[0]?.type === 'text' ? claudeApiResponse.content[0].text.trim() : null;
+        // --- MODIFIED: Call appropriate API ---
+         let apiResponse;
+        if (provider === 'gemini') {
+            // Pass null for system prompt if not applicable
+            apiResponse = await geminiClient.generateContent({...apiOptions, system: null}); 
+        } else {
+            apiResponse = await anthropic.messages.create(apiOptions);
+        }
+        
+        // --- MODIFIED: Extract summary ---
+        const summary = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text : null;
 
         if (!summary) {
-            logger.error('Unexpected or empty response format from Claude API for history summarization:', claudeApiResponse);
-            return "Error: Failed to generate history summary.";
+            logger.warn(`History summarization by ${provider} returned empty content.`);
+            return "Could not generate summary.";
         }
 
-        logger.info(`History summarized successfully using ${modelToUse} in ${Date.now() - startTime}ms.`);
-        return summary;
+        const durationMs = Date.now() - startTime;
+        logger.info(`History summarization via ${provider} completed in ${durationMs}ms. Summary length: ${summary.length}`);
+        return summary.trim();
 
     } catch (error) {
-        // Add model to error log
-        // Ensure modelToUse is defined in this scope or handle potential ReferenceError
-        const errorModel = typeof modelToUse !== 'undefined' ? modelToUse : '[model variable undefined]';
-        logger.error(`Error during history summarization API call with model ${errorModel}: ${error.message}`, error);
+        logger.error(`Error during ${provider} history summarization API call: ${error.message}`, error);
         return `Error summarizing history: ${error.message}`;
     }
 };
