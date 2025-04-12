@@ -72,7 +72,9 @@ const getLLMReasoningResponse = async (agentContext) => {
      }
 
     const startTime = Date.now();
-    const { originalQuery, historySummary, currentTurnSteps, availableTools, userContext, teamContext } = agentContext;
+    // Destructure ALL fields needed for the system prompt generator
+    const { originalQuery, historySummary, currentTurnSteps, availableTools, userContext, teamContext,
+            analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = agentContext;
 
     try {
         // 1. Generate the system prompt using the new template
@@ -82,7 +84,9 @@ const getLLMReasoningResponse = async (agentContext) => {
             historySummary,      // Pass history summary
             currentTurnSteps,    // Pass steps taken this turn
             availableTools,      // Pass tool definitions
-            analysisResult: agentContext.analysisResult // <<< EXPLICITLY PASS ANALYSIS RESULT
+            analysisResult,      // Pass current turn analysis result (if any)
+            previousAnalysisResultSummary, // <<< Pass previous summary
+            hasPreviousGeneratedCode       // <<< Pass previous code flag
         });
         logger.debug(`Agent System Prompt generated. Length: ${systemPrompt.length}`);
 
