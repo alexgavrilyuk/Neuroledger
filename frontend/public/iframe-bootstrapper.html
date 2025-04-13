@@ -30,19 +30,24 @@
         function sendMessageToParent(type, status, detail) {
             if (window.parent && window.parent !== window) {
                  console.log(`%c[Iframe SEND]%c Sending message to parent: { type: ${type}, status: ${status}, detail: ${detail ? String(detail).substring(0, 100) + '...' : 'N/A'} } (Target: ${parentTargetOrigin})`, "color: blue; font-weight: bold;", "color: blue;");
-                let serializableDetail = detail;
-                // Basic error serialization
+                let messagePayload = { type: type, status: status, detail: detail }; // Start with raw detail
+
+                // Special handling ONLY for Error objects to make them serializable
                 if (detail instanceof Error) {
-                    serializableDetail = `Error: ${detail.message}${detail.stack ? `\nStack: ${detail.stack}` : ''}`;
-                } else if (typeof detail === 'object' && detail !== null) {
-                    // Basic attempt to serialize, might fail on complex objects
-                    try {
-                        serializableDetail = JSON.stringify(detail, null, 2); // Simple stringify for objects
-                    } catch (e) {
-                        serializableDetail = "[Unserializable detail object]";
-                    }
+                    messagePayload.detail = `Error: ${detail.message}${detail.stack ? `\nStack: ${detail.stack}` : ''}`;
                 }
-                window.parent.postMessage({ type: type, status: status, detail: serializableDetail }, parentTargetOrigin);
+                 // --- REMOVED UNNECESSARY OBJECT STRINGIFICATION ---
+                 // else if (typeof detail === 'object' && detail !== null) {
+                 //    try {
+                 //        serializableDetail = JSON.stringify(detail, null, 2);
+                 //    } catch (e) {
+                 //        serializableDetail = "[Unserializable detail object]";
+                 //    }
+                 // }
+                 // --- END REMOVAL ---
+
+                // Send the possibly modified payload
+                window.parent.postMessage(messagePayload, parentTargetOrigin);
             } else {
                 console.warn("[Iframe SEND] Cannot send message: window.parent is not accessible or is the same window.");
             }
@@ -152,7 +157,6 @@
                              Papa: window.Papa, // PapaParse
                              XLSX: window.XLSX, // SheetJS
                              console: window.console, // Allow console logging from generated code
-                             // Add other globals if your system prompt relies on them
                          };
                          // Create the component function from the code string
                          const getReportComponent = new Function('executionScope', `
@@ -257,6 +261,17 @@
                 } else if (type === 'setTheme') {
                     themeName = payload?.name || 'light';
                     applyTheme(themeName); // Apply theme immediately when message received
+                } else if (type === 'getReportHtml') {
+                    console.log('%c[Iframe MSG]%c Parent requested report HTML.', "color: blue; font-weight: bold;", "color: blue;");
+                    const reportRootElement = document.getElementById('report-root');
+                    if (reportRootElement) {
+                        const htmlContent = reportRootElement.innerHTML;
+                        console.log('%c[Iframe SEND]%c Sending reportHtmlResponse to parent.', "color: blue; font-weight: bold;", "color: blue;");
+                        sendMessageToParent('reportHtmlResponse', 'success', { html: htmlContent });
+                    } else {
+                        console.error('%c[Iframe SEND]%c Cannot send HTML: #report-root not found.', "color: red; font-weight: bold;", "color: red;");
+                        sendMessageToParent('reportHtmlResponse', 'error', 'Could not find report content element.');
+                    }
                 } else {
                     console.warn(`%c[Iframe MSG]%c Received unknown message type: ${type}`, "color: blue; font-weight: bold;", "color: blue;");
                 }

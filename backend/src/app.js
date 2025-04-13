@@ -2,15 +2,25 @@
 // ** UPDATED FILE **
 const express = require('express');
 const cors = require('cors');
-const mainRouter = require('./routes');
-const errorHandler = require('./shared/middleware/error.handler');
+const morgan = require('morgan');
+require('dotenv').config();
+const mainRoutes = require('./routes');
+const errorHandler = require('./shared/middleware/error.handler.js');
 const logger = require('./shared/utils/logger');
+const { initializeSocket } = require('./socket');
+
+const exportRoutes = require('./features/export/export.routes'); // Import export routes
 
 const app = express();
 
-// --- Middleware ---
-app.use(cors()); // Enable CORS
-app.use(express.json()); // Parse JSON request bodies
+// Middleware
+app.use(cors({
+    origin: process.env.FRONTEND_URL || '*', // Allow requests from frontend URL
+    credentials: true,
+}));
+app.use(morgan('dev'));
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
 // Request Logging (Simple)
 app.use((req, res, next) => {
@@ -18,10 +28,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// Main API Routes - Mount main routes back under /api/v1
+app.use('/api/v1', mainRoutes);
+// Add export routes under /api/export (remains separate)
+app.use('/api/export', exportRoutes);
 
-// --- API Routes ---
-app.use('/api/v1', mainRouter);
-
+// Simple health check endpoint
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
 
 // --- Catch 404 Routes ---
 app.use((req, res, next) => {

@@ -7,6 +7,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import logger from '../../../shared/utils/logger';
 import Spinner from '../../../shared/ui/Spinner';
 import { ExclamationTriangleIcon } from '@heroicons/react/24/outline';
+import Button from '../../../shared/ui/Button';
+import apiClient from '../../../shared/services/apiClient'; // Restore apiClient import
 
 const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
     // ---- ADD DEBUG LOG ----
@@ -18,6 +20,8 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
     const [iframeError, setIframeError] = useState(null);
     const [isIframeReadyForData, setIsIframeReadyForData] = useState(false); // Track if iframe sent 'iframeReady'
     const [iframeContentWindow, setIframeContentWindow] = useState(null); // Store reference to iframe window
+    const [pdfExportStatus, setPdfExportStatus] = useState('idle'); // idle, starting, success, error
+    const [pdfExportError, setPdfExportError] = useState(null);
 
     // Define the target origin for postMessage security (use '*' for sandboxed iframes during dev/if needed)
     // Use window.location.origin for production if the iframe src is from the same origin (but it isn't here)
@@ -36,6 +40,7 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
              setIframeStatus('ready_for_libs'); // HTML loaded, waiting for libraries inside iframe
              setIsIframeReadyForData(false); // Reset flag until iframe signals readiness
              setIframeError(null);
+             setPdfExportStatus('idle'); // Reset export status on load
              logger.debug('ReportViewer: Stored iframe contentWindow in state.');
         } else {
              logger.error("ReportViewer: Iframe loaded but contentWindow is inaccessible!");
@@ -121,12 +126,27 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
                  if (status === 'success') {
                      setIframeStatus('rendered');
                      setIframeError(null);
+                     setPdfExportStatus('idle'); // Ready to export once rendered
                  } else if (status === 'error') {
                      setIframeStatus('error');
                      setIframeError(detail || 'Iframe reported an execution error');
+                     setPdfExportStatus('idle'); // Reset on general iframe error
                  } else {
                      logger.warn(`ReportViewer: Received unknown iframeReportStatus: ${status}`);
                  }
+             } else if (type === 'reportHtmlResponse') {
+                 logger.info(`ReportViewer: Received reportHtmlResponse from iframe. Status: ${status}`);
+                 if (status === 'success' && detail?.html) {
+                     setPdfExportStatus('generating'); // Update status
+                     // Call backend API to generate PDF
+                     callExportApi(detail.html);
+                 } else {
+                     logger.error('ReportViewer: Failed to get HTML from iframe.', detail);
+                     setPdfExportStatus('error');
+                     setPdfExportError(detail || 'Failed to retrieve report HTML from sandbox.');
+                 }
+             } else { // Handle other message types if necessary
+                 logger.warn(`ReportViewer: Received unhandled message type: ${type}`);
              }
         };
         window.addEventListener('message', handleIframeMessage);
@@ -210,6 +230,84 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
          }
      }, [reportInfo]); // Only trigger reset when reportInfo itself changes
 
+    // Function to trigger request for HTML from iframe
+    const handleExportClick = useCallback(() => {
+        logger.info('ReportViewer: PDF Export button clicked.');
+        if (iframeContentWindow && (iframeStatus === 'rendered' || isIframeReadyForData)) {
+            setPdfExportStatus('starting');
+            setPdfExportError(null);
+            logger.debug(`ReportViewer: Sending 'getReportHtml' message to iframe (Target Origin: ${targetOrigin})`);
+            try {
+                iframeContentWindow.postMessage({ type: 'getReportHtml' }, targetOrigin);
+            } catch (postError) {
+                logger.error("ReportViewer: Error sending getReportHtml message:", postError);
+                setPdfExportStatus('error');
+                setPdfExportError(`Failed to communicate with sandbox: ${postError.message}`);
+                // Reset status after delay
+                setTimeout(() => setPdfExportStatus('idle'), 3000);
+            }
+        } else {
+            logger.warn('ReportViewer: Export clicked, but iframe is not ready or accessible.');
+            setPdfExportStatus('error');
+            setPdfExportError('Report is not ready for export yet.');
+            // Reset status after delay
+            setTimeout(() => setPdfExportStatus('idle'), 3000);
+        }
+    }, [iframeContentWindow, iframeStatus, isIframeReadyForData, targetOrigin]);
+
+    // Function to call the backend PDF export API using apiClient
+    const callExportApi = useCallback(async (htmlContent) => {
+        logger.info('ReportViewer: Calling backend export endpoint via apiClient.');
+
+        // Authentication is handled by the apiClient interceptor
+        // API path needs adjustment relative to apiClient baseURL ('/api/v1')
+        const relativeApiPath = '../export/pdf'; // Goes from /api/v1 up to /api then down to /export/pdf
+        
+        try {
+            const response = await apiClient.post(relativeApiPath, {
+                htmlContent,
+                themeName // Send theme to backend for styling
+            }, {
+                responseType: 'blob' // Crucial: expect binary data (PDF)
+            });
+
+            // Create a Blob from the PDF Stream (axios puts blob in response.data)
+            const pdfBlob = new Blob([response.data], { type: 'application/pdf' });
+ 
+            // Create a Blob URL from the PDF data
+            const fileURL = URL.createObjectURL(pdfBlob);
+            
+            // Create temp link element and trigger download
+            const link = document.createElement('a');
+            link.href = fileURL;
+            link.download = 'report.pdf';
+            link.click();
+            URL.revokeObjectURL(fileURL);
+
+            setPdfExportStatus('success');
+            setPdfExportError(null);
+        } catch (error) {
+            logger.error('ReportViewer: Backend PDF export failed:', error);
+            let errorMsg = 'Failed to generate PDF on server.';
+            // Axios error structure differs from fetch
+            if (error.response && error.response.data) {
+                // Try to parse error message from blob if API returns error as JSON blob
+                try {
+                    const errorJson = JSON.parse(await error.response.data.text());
+                    errorMsg = errorJson.message || errorMsg;
+                } catch (parseError) {
+                    // Fallback if error response isn't JSON
+                    errorMsg = error.response.statusText || errorMsg;
+                }
+            } else {
+                 errorMsg = error.message || errorMsg;
+            }
+            
+            setPdfExportStatus('error');
+            setPdfExportError(errorMsg);
+            setTimeout(() => setPdfExportStatus('idle'), 3000); // Reset after error
+        }
+    }, [themeName]); // Dependencies: themeName is sent, apiClient handles auth context implicitly
 
     // UI Status Mapping
     const getStatusText = () => {
@@ -230,19 +328,47 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
     const showErrorIcon = iframeStatus === 'error';
     const showStatusBar = iframeStatus !== 'rendered' || iframeError; // Show status unless successfully rendered
 
+    // Determine button state
+    const isExportDisabled = pdfExportStatus === 'starting' || iframeStatus !== 'rendered';
+    const exportButtonText = () => {
+        switch(pdfExportStatus) {
+            case 'starting': return 'Exporting...';
+            case 'success': return 'Exported!';
+            case 'error': return 'Export Failed';
+            default: return 'Export to PDF';
+        }
+    };
 
     return (
         <div className="w-full h-[75vh] flex flex-col border border-gray-200 dark:border-gray-700 rounded-md overflow-hidden bg-gray-50 dark:bg-gray-800/50">
-             {/* Status/Error Bar */}
-             {showStatusBar && (
-                 <div className={`p-2 text-xs text-center border-b ${
-                     iframeStatus === 'error' ? 'bg-red-100 dark:bg-red-900/30 border-red-200 dark:border-red-700 text-red-700 dark:text-red-200'
-                     : 'bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-700 text-blue-700 dark:text-blue-200'
-                 } flex items-center justify-center gap-x-2`}>
-                    {showErrorIcon ? <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0" /> : <Spinner size="sm" className="h-4 w-4" />}
-                    <span>{getStatusText()}</span>
+             {/* Top Bar with Status and Export Button */}
+             <div className="p-2 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-4">
+                 {/* Status Area */}
+                 <div className={`flex items-center justify-start gap-x-2 text-xs flex-grow overflow-hidden ${
+                     iframeStatus === 'error' ? 'text-red-700 dark:text-red-200'
+                     : pdfExportStatus === 'error' ? 'text-red-700 dark:text-red-200'
+                     : 'text-blue-700 dark:text-blue-200'
+                 }`}>
+                    {showErrorIcon || pdfExportStatus === 'error' ? <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0" />
+                     : showSpinner ? <Spinner size="sm" className="h-4 w-4" />
+                     : <span className="h-4 w-4 flex-shrink-0"></span> // Placeholder for alignment
+                    }
+                    <span className="truncate">{pdfExportStatus === 'error' ? `Export Error: ${pdfExportError}` : getStatusText()}</span>
                  </div>
-             )}
+
+                 {/* Export Button Area */}
+                 <div className="flex-shrink-0">
+                     <Button
+                         variant="outline" // Or your desired button style
+                         size="sm"
+                         onClick={handleExportClick}
+                         disabled={isExportDisabled}
+                         aria-label="Export report to PDF"
+                     >
+                         {exportButtonText()}
+                     </Button>
+                 </div>
+             </div>
             {/* Iframe Container */}
             <div className="flex-grow relative">
                  {/* Loading Spinner Overlay (only visible during loading phases) */}
