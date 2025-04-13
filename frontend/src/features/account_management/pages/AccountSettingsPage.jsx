@@ -211,8 +211,9 @@ const AccountSettingsPage = () => {
                       onChange={(e) => setPreferredAiModel(e.target.value)}
                       className="block w-full rounded-md border-0 bg-transparent py-2 pl-3 pr-10 text-gray-900 dark:text-white focus:ring-2 focus:ring-inset focus:ring-blue-500 dark:focus:ring-blue-400 sm:text-sm"
                     >
-                      <option value="claude">Claude 3 (Recommended)</option>
-                      <option value="gemini">Google Gemini 2.5 Pro</option>
+                      <option value="claude">Claude 3.7 Sonnet (Recommended)</option>
+                      <option value="gemini">Google Gemeni 2.5</option>
+                      <option value="openai">OpenAI (gpt-o3-mini)</option>
                     </select>
                   </div>
 

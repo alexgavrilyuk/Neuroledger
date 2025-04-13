@@ -167,17 +167,18 @@ class AgentOrchestrator {
                      const rawGeneratedCode = this.turnContext.intermediateResults.generatedAnalysisCode;
                      parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
 
-                     // --- Ensure code fences are removed RIGHT BEFORE execution ---
-                     let codeToExecute = rawGeneratedCode; // Default to raw code
+                     // --- Updated Code Cleaning Logic --- 
+                     let codeToExecute = '';
                      if (rawGeneratedCode && typeof rawGeneratedCode === 'string') {
-                         const codeFenceRegex = /^```(?:javascript|js)?\s*([\s\S]*?)\s*```$|^([\s\S]*)$/m;
-                         const match = rawGeneratedCode.match(codeFenceRegex);
-                         if (match && (match[1] || match[2])) {
-                             codeToExecute = (match[1] || match[2]).trim(); // Use cleaned code
-                             logger.debug('[Agent Loop] Cleaned analysis code before execution.');
-                         } else {
-                              codeToExecute = rawGeneratedCode.trim(); // Trim anyway
-                         }
+                         let cleanedCode = rawGeneratedCode.trim(); // 1. Trim whitespace
+                         const startFence = /^```(?:javascript|js)?\s*/; // Regex for start fence
+                         const endFence = /\s*```$/; // Regex for end fence
+                         cleanedCode = cleanedCode.replace(startFence, ''); // 2. Remove start fence
+                         cleanedCode = cleanedCode.replace(endFence, ''); // 3. Remove end fence
+                         codeToExecute = cleanedCode.trim(); // 4. Trim again
+                         logger.debug('[Agent Loop] Cleaned analysis code before execution. Length after clean: ', codeToExecute.length);
+                     } else {
+                         logger.warn('[Agent Loop] Raw generated code is missing or not a string.');
                      }
                      // --- End cleaning ---
 

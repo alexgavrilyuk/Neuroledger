@@ -67,6 +67,13 @@ const executeSandboxedCode = async (code, parsedData) => {
     logger.debug('Executing analysis code in vm.runInNewContext...');
     // Wrap the user code in an IIFE to allow top-level return statements
     const wrappedCode = `(function(){\n${code}\n})();`; 
+    
+    // --- ADDED: Log code snippet before execution ---
+    const codeSnippetStart = wrappedCode.substring(0, 500);
+    const codeSnippetEnd = wrappedCode.length > 500 ? wrappedCode.substring(wrappedCode.length - 500) : '';
+    logger.debug(`[Code Exec] Attempting to run code. Start: "${codeSnippetStart}..." End: "...${codeSnippetEnd}" Total Length: ${wrappedCode.length}`);
+    // --- END ADDED LOG ---
+
     vm.runInNewContext(wrappedCode, sandboxContext, {
       timeout: CODE_EXECUTION_TIMEOUT_MS,
       displayErrors: true,

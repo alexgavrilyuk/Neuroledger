@@ -60,10 +60,11 @@ const UserSchema = new mongoose.Schema({
     aiContext: { type: String, default: '' },
     // NEW: User preference for AI model
     preferredAiModel: {
-        type: String,
-        enum: ['claude', 'gemini'],
-        default: 'claude' // Default to Claude initially
-    }
+      type: String,
+      enum: ['claude', 'gemini', 'openai'],
+      default: 'claude', // Default to Claude initially
+      trim: true,
+    },
   },
   // --- Teams Reference - Now implemented ---
   teams: [{

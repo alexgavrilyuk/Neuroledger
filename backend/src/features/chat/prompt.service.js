@@ -3,6 +3,8 @@
 const anthropic = require('../../shared/external_apis/claude.client');
 // --- NEW: Import Gemini client ---
 const geminiClient = require('../../shared/external_apis/gemini.client');
+// --- NEW: Import OpenAI client ---
+const openaiClient = require('../../shared/external_apis/openai.client');
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
 const Team = require('../teams/team.model');
@@ -17,7 +19,7 @@ const generateAgentSystemPrompt = require('./system-prompt-template');
 const getUserModelPreference = async (userId) => {
     if (!userId) {
         logger.warn('Cannot fetch model preference without userId. Defaulting to Claude.');
-        return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Default model
+        return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Consistent default
     }
     try {
         // Select only the preferredAiModel field
@@ -30,13 +32,19 @@ const getUserModelPreference = async (userId) => {
                  logger.warn(`User ${userId} prefers Gemini, but Gemini client is not available. Falling back to Claude.`);
                  return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Fallback model
              }
-             // --- TODO: Select appropriate Gemini model variant ---
-             // For now, hardcoding 1.5 Pro, but could be based on task (reasoning vs code gen)
-             return { provider: 'gemini', model: 'gemini-2.5-pro-preview-03-25' }; 
-        } else {
-             // --- TODO: Select appropriate Claude model variant ---
-             // Keeping Haiku for now, but original code used Sonnet/Opus for different tasks
-             return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; 
+             // Use a specific Gemini model
+             return { provider: 'gemini', model: 'gemini-2.5-pro-preview-03-25' }; // Example: Using Flash
+        } else if (preference === 'openai') {
+            // Check if OpenAI client is available
+            if (!openaiClient.isAvailable()) {
+                logger.warn(`User ${userId} prefers OpenAI, but OpenAI client is not available. Falling back to Claude.`);
+                return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Fallback model
+            }
+            // Use the specified OpenAI model
+            return { provider: 'openai', model: 'o3-mini-2025-01-31' }; // Using gpt-3.5-turbo for "o3 mini"
+        } else { // Default case is claude
+             // Use a specific Claude model
+             return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Default Claude model
         }
     } catch (error) {
         logger.error(`Error fetching user model preference for user ${userId}: ${error.message}. Defaulting to Claude.`);
@@ -104,14 +112,12 @@ const getLLMReasoningResponse = async (agentContext) => {
     const { provider, model: modelToUse } = await getUserModelPreference(userId);
     logger.info(`[LLM Reasoning] Using ${provider} model: ${modelToUse} for user ${userId}`);
 
-    // Check provider availability
-    if (provider === 'claude' && !anthropic) {
-        logger.error("getLLMReasoningResponse called for Claude but client is not initialized.");
-        throw new Error('AI assistant (Claude) is currently unavailable.');
-    }
-     if (provider === 'gemini' && !geminiClient.isAvailable()) {
-        logger.error("getLLMReasoningResponse called for Gemini but client is not available. Fallback failed?");
-        throw new Error('AI assistant (Gemini) is currently unavailable.');
+    // Check provider availability - ADDED OpenAI check
+    if ((provider === 'claude' && !anthropic) ||
+        (provider === 'gemini' && !geminiClient.isAvailable()) ||
+        (provider === 'openai' && !openaiClient.isAvailable())) {
+        logger.error(`getLLMReasoningResponse called for ${provider} but client is not available.`);
+        throw new Error(`AI assistant (${provider}) is currently unavailable.`);
     }
 
     const startTime = Date.now();
@@ -152,25 +158,27 @@ const getLLMReasoningResponse = async (agentContext) => {
         // 3. Prepare API options based on provider
         const apiOptions = {
             model: modelToUse,
-            // Adjusted token limits based on model capabilities - CHECK DOCUMENTATION
-            max_tokens: provider === 'gemini' ? 8192 : 4096, 
+            // Adjusted token limits - ADDED OpenAI
+            max_tokens: provider === 'gemini' ? 28192 : (provider === 'openai' ? 24096 : 24096), // OpenAI similar to Claude
             system: systemPrompt,
             messages, // Pass the combined history + current message
             temperature: 0.1
         };
 
 
-        // 4. Call the appropriate API
+        // 4. Call the appropriate API - ADDED OpenAI
         let apiResponse;
         logger.debug(`Calling ${provider} API for Agent Reasoning with model ${apiOptions.model}...`);
 
         if (provider === 'gemini') {
             apiResponse = await geminiClient.generateContent(apiOptions);
+        } else if (provider === 'openai') {
+            apiResponse = await openaiClient.createChatCompletion(apiOptions);
         } else { // Default to claude
             apiResponse = await anthropic.messages.create(apiOptions);
         }
 
-        // 5. Extract raw response
+        // 5. Extract raw response (Structure should be consistent due to client adaptation)
         const rawResponse = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text : null;
 
         if (!rawResponse) {
@@ -209,8 +217,10 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
     const { provider, model: modelToUse } = await getUserModelPreference(userId);
     logger.info(`[Analysis Code Gen] Using ${provider} model: ${modelToUse} for user ${userId}`);
 
-    // Check availability
-    if ((provider === 'claude' && !anthropic) || (provider === 'gemini' && !geminiClient.isAvailable())) {
+    // Check availability - ADDED OpenAI check
+    if ((provider === 'claude' && !anthropic) ||
+        (provider === 'gemini' && !geminiClient.isAvailable()) ||
+        (provider === 'openai' && !openaiClient.isAvailable())) {
          logger.error(`generateAnalysisCode called but selected provider (${provider}) client is not available.`);
          throw new Error(`AI assistant (${provider}) is currently unavailable for code generation.`);
     }
@@ -306,25 +316,27 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
     try {
         const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the goal and schema, ensuring the output strictly matches the required structure."}];
         
-        // --- MODIFIED: Prepare API options ---
+        // --- MODIFIED: Prepare API options - ADDED OpenAI ---
         const apiOptions = {
             model: modelToUse,
-             // Example: Maybe allow more tokens for code gen? Adjust per model limits/needs.
-            max_tokens: provider === 'gemini' ? 18192 : 14096, 
+             // Adjusted token limits - ADDED OpenAI
+            max_tokens: provider === 'gemini' ? 18192 : (provider === 'openai' ? 8192 : 14096), // OpenAI gets 8k tokens
             system: analysisCodeGenSystemPrompt,
             messages,
             temperature: 0.0 // Low temp for code gen
         };
 
-        // --- MODIFIED: Call appropriate API ---
+        // --- MODIFIED: Call appropriate API - ADDED OpenAI ---
         let apiResponse;
         if (provider === 'gemini') {
             apiResponse = await geminiClient.generateContent(apiOptions);
-        } else {
+        } else if (provider === 'openai') {
+            apiResponse = await openaiClient.createChatCompletion(apiOptions);
+        } else { // Default to Claude
             apiResponse = await anthropic.messages.create(apiOptions);
         }
 
-        // --- MODIFIED: Extract code (structure is similar) ---
+        // --- MODIFIED: Extract code (structure should be consistent) ---
         const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
 
         if (!generatedCode) {
@@ -367,8 +379,10 @@ const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
     const { provider, model: modelToUse } = await getUserModelPreference(userId);
     logger.info(`[Report Code Gen] Using ${provider} model: ${modelToUse} for user ${userId}`);
 
-    // Check availability
-    if ((provider === 'claude' && !anthropic) || (provider === 'gemini' && !geminiClient.isAvailable())) {
+    // Check availability - ADDED OpenAI check
+    if ((provider === 'claude' && !anthropic) ||
+        (provider === 'gemini' && !geminiClient.isAvailable()) ||
+        (provider === 'openai' && !openaiClient.isAvailable())) {
          logger.error(`generateReportCode called but selected provider (${provider}) client is not available.`);
          throw new Error(`AI assistant (${provider}) is currently unavailable for report code generation.`);
     }
@@ -443,6 +457,7 @@ ${analysisSummary}
     *   Trend Analysis (using charts like Line or Area charts)
     *   Anomalies (if any data is provided, otherwise state none found)
 6.  **Charts:** Use appropriate Recharts components (LineChart, BarChart, PieChart, AreaChart, ComposedChart) to visualize the data. Ensure charts are responsive using \`ResponsiveContainer\`. Use clear labels, tooltips, and legends.
+    *   **Axis Formatting:** For Y-axis ticks (using \`tickFormatter\`), use a simple number formatting function (like the \`formatNumber\` helper) to display numerical values. **Do NOT use the \`formatCurrency\` function for axis ticks**, as it can cause errors if the currency symbol is removed incorrectly.
 7.  **Tables:** If displaying tabular data (e.g., monthly breakdowns), use basic HTML table elements (\`<table>\`, \`<thead>\`, \`<tbody>\`, \`<tr>\`, \`<th>\`, \`<td>\`) styled using the \`styles\` object.
 8.  **Code Output:** Output ONLY the JavaScript code for the \`ReportComponent\` function. Do NOT wrap it in Markdown code fences (\`\`\`javascript ... \`\`\`). Do NOT include any other text, explanations, or imports outside the function body. The entire output must be executable JavaScript defining the component.
 9.  **Error Handling:** The component itself should handle potential missing fields in \`reportData\` gracefully. Helper functions should also handle invalid inputs (e.g., non-numeric values for formatting).
@@ -476,33 +491,32 @@ Focus on creating a functional, well-structured, and visually clear report compo
         // Use a capable model, maybe Sonnet is sufficient for this?
         const apiOptions = {
             model: modelToUse,
-            max_tokens: 16000, // Allow ample space for component code
+            // Adjusted token limits - ADDED OpenAI
+            max_tokens: provider === 'gemini' ? 16000 : (provider === 'openai' ? 16000 : 16000), // OpenAI gets 16k
             system: systemPrompt,
             messages,
             temperature: 0.1 // Low temperature for more predictable code structure
         };
 
-        logger.debug(`Calling API for Report Code Generation with model ${modelToUse}...`); // Generic log message
+        logger.debug(`Calling ${provider} API for Report Code Generation with model ${modelToUse}...`);
 
-        // --- MODIFIED: Call appropriate API based on provider ---
+        // --- MODIFIED: Call appropriate API based on provider - ADDED OpenAI ---
         let apiResponse;
         if (provider === 'gemini') {
-            // Adapt options slightly if needed for Gemini (e.g., system prompt handling)
-            // Assuming geminiClient can handle the 'system' property or it should be adapted.
-            // If Gemini doesn't use 'system', pass null or structure differently.
-            // For now, assume direct passing works, adjust if Gemini client has specific needs.
-            apiResponse = await geminiClient.generateContent(apiOptions); 
-        } else if (provider === 'claude' && anthropic) {
+            apiResponse = await geminiClient.generateContent(apiOptions);
+        } else if (provider === 'openai') {
+             apiResponse = await openaiClient.createChatCompletion(apiOptions);
+        } else if (provider === 'claude' && anthropic) { // Keep explicit Claude check
              apiResponse = await anthropic.messages.create(apiOptions);
         } else {
-             // Handle cases where the provider is unknown or the client isn't available
+             // Handle cases where the provider is unknown or the client isn't available after the initial check (shouldn't happen)
              logger.error(`generateReportCode: Unsupported provider '${provider}' or client not available.`);
              throw new Error(`Unsupported provider '${provider}' or client not available for report generation.`);
         }
         // --- END MODIFICATION ---
 
         // --- MODIFIED: Extract content consistently ---
-        // Both Gemini and Claude (v3) responses seem to use a similar structure
+        // Response structure is adapted in each client file to be consistent
         const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
         // --- END MODIFICATION ---
 

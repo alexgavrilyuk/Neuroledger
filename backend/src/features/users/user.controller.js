@@ -41,7 +41,7 @@ const updateUserSettings = async (req, res) => {
     }
 
     // Validate preferredAiModel if provided
-    if (preferredAiModel && !['claude', 'gemini'].includes(preferredAiModel)) {
+    if (preferredAiModel && !['claude', 'gemini', 'openai'].includes(preferredAiModel)) {
         logger.warn(`[updateUserSettings] Invalid preferredAiModel value received: ${preferredAiModel}`);
         return res.status(400).json({ status: 'error', message: 'Invalid preferred AI model specified.' });
     }

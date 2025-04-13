@@ -25,6 +25,8 @@ module.exports = {
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID,
   gcsBucketName: process.env.GCS_BUCKET_NAME,
   claudeApiKey: process.env.CLAUDE_API_KEY,
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  openaiApiKey: process.env.OPENAI_API_KEY,
 
   // Cloud Tasks configuration
   projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID,
