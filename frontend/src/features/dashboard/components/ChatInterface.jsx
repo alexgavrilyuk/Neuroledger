@@ -8,6 +8,50 @@ import { useChat } from '../context/ChatContext';
 const ChatInterface = ({ messages = [], isLoading, currentSession, onViewReport }) => {
     const hasMessages = messages.length > 0;
 
+    // --- NEW: Intermediate handler for View Report --- 
+    const handleBubbleViewReport = (clickedMessage) => {
+        if (!clickedMessage || !clickedMessage.aiGeneratedCode) {
+            console.error('[ChatInterface] handleBubbleViewReport called without a message or message missing code.', clickedMessage);
+            // Call original handler with minimal info to potentially show an error
+            onViewReport({ code: null, analysisData: null });
+            return;
+        }
+
+        let analysisData = clickedMessage.reportAnalysisData; // Check current message first
+
+        if (!analysisData) {
+            console.log(`[ChatInterface] Message ${clickedMessage._id} lacks analysisData. Searching previous messages...`);
+            const clickedMessageIndex = messages.findIndex(msg => msg._id === clickedMessage._id);
+
+            if (clickedMessageIndex > 0) {
+                for (let i = clickedMessageIndex - 1; i >= 0; i--) {
+                    if (messages[i].reportAnalysisData) {
+                        console.log(`[ChatInterface] Found analysisData in previous message ${messages[i]._id}`);
+                        analysisData = messages[i].reportAnalysisData;
+                        break; // Stop searching once found
+                    }
+                }
+            }
+        }
+
+        if (!analysisData) {
+            console.warn(`[ChatInterface] Could not find analysisData for message ${clickedMessage._id} in history. Proceeding with potentially empty data.`);
+            analysisData = {}; // Fallback to empty object
+        }
+
+        // Construct the payload with code from clicked message and found analysisData
+        const payload = {
+            code: clickedMessage.aiGeneratedCode,
+            analysisData: analysisData,
+            // Optionally pass message ID for context if needed later
+            // messageId: clickedMessage._id
+        };
+
+        // Call the original handler passed from DashboardPage
+        onViewReport(payload);
+    };
+    // --- END NEW HANDLER ---
+
     return (
         <div className="relative min-h-[200px] space-y-1">
             {/* Empty state with subtle animation when no messages */}
@@ -38,7 +82,7 @@ const ChatInterface = ({ messages = [], isLoading, currentSession, onViewReport 
                     >
                         <MessageBubble
                             message={msg}
-                            onViewReport={onViewReport}
+                            onViewReport={handleBubbleViewReport}
                         />
                     </div>
                 ))}

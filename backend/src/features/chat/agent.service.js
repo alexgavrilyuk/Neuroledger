@@ -805,33 +805,16 @@ class AgentOrchestrator {
                  throw new Error(`Invalid arguments provided for tool ${toolName}. Expected an object.`);
             }
 
-            // *** MODIFICATION FOR generate_report_code ***
-            let finalArgs = args;
-            if (toolName === 'generate_report_code') {
-                const analysisResultFromContext = this.turnContext.intermediateResults.analysisResult;
-                if (!analysisResultFromContext) {
-                    logger.error(`Cannot dispatch generate_report_code: analysisResult is missing from turn context.`);
-                    return { error: 'Cannot generate report code: Analysis result is missing. Please run analysis first.' };
-                }
-                // Add the analysis result from context to the arguments passed to the implementation
-                finalArgs = {
-                    ...args, // Should contain analysis_summary from LLM
-                    analysis_result: analysisResultFromContext
-                };
-                logger.debug(`[Dispatcher] Augmented generate_report_code args with analysisResult from context.`);
-            }
-            // *** END MODIFICATION ***
+            // Pass the original args directly to the tool function
+            const toolOutput = await toolFunction.call(this, args);
 
-            // Pass the potentially modified args to the tool function
-            const result = await toolFunction.call(this, finalArgs);
-
-            // Ensure result is in the { result: ... } or { error: ... } format
-            if (result && (result.result !== undefined || result.error !== undefined)) {
-                 return result;
+            // Ensure the output is in the { result: ... } or { error: ... } format
+            if (toolOutput && (toolOutput.result !== undefined || toolOutput.error !== undefined)) {
+                 return toolOutput;
             } else {
                  logger.warn(`Tool ${toolName} did not return the expected format. Wrapping result.`);
                  // Wrap unexpected return values for consistency, assuming success if no error thrown
-                 return { result: result };
+                 return { result: toolOutput };
             }
         } catch (error) {
             logger.error(`Error executing tool ${toolName}: ${error.message}`, { args, error });

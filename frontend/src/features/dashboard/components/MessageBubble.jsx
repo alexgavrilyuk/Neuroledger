@@ -129,15 +129,12 @@ const MessageBubble = ({ message, onViewReport }) => {
                                 // ---- ADD DEBUG LOG for Click ----
                                 console.log('[MessageBubble Click - Direct Log] onViewReport clicked for Message ID:', message._id, 
                                     'Has Code:', !!message.aiGeneratedCode, 
-                                    // Log the existence of the NEW data field
                                     'Has Analysis Data:', !!message.reportAnalysisData 
                                 );
                                 // ---- END DEBUG LOG ----
-                                // Pass the analysis data instead of reportDatasets
-                                onViewReport({ 
-                                    code: message.aiGeneratedCode, 
-                                    analysisData: message.reportAnalysisData || {} // Use analysisData, provide default empty object
-                                }); 
+                                
+                                // Fix: Pass the *entire message object* to the handler in ChatInterface
+                                onViewReport(message); 
                             }}
                             leftIcon={DocumentChartBarIcon}
                             className="shadow-soft-md dark:shadow-soft-dark-md transform hover:scale-102 active:scale-98"
