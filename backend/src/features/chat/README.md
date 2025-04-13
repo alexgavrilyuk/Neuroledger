@@ -1,20 +1,21 @@
-# Chat Feature (Agent Architecture - Phase 3 + Refinements)
+# Chat Feature (Agent Architecture)
 
-This feature implements persistent, contextual chat history powered by an AI agent capable of reasoning, **summarizing conversations**, using tools to access data context, executing generated code for analysis, and **generating React code for report visualization**.
+This feature implements persistent, contextual chat history powered by an AI agent capable of reasoning, summarizing conversations, using tools to access data context, executing generated code for analysis, and generating React code for report visualization.
 
-## Overview (Phase 3)
+## Overview
 
 The chat feature allows users to:
-- Create and manage chat sessions.
-- Send messages.
-- Receive AI-generated responses orchestrated by the agent.
-- Observe agent status (thinking, using tools, generating/executing code, **generating report**) via WebSockets.
+- Create and manage chat sessions
+- Send messages with dataset context
+- Receive AI-generated responses orchestrated by the agent
+- Observe agent status (thinking, using tools, generating code, executing code, generating report) via WebSockets
 - Leverage the agent's ability to:
-  - Access data context.
-  - Generate and execute sandboxed Node.js code.
-  - **Generate React component code for visualizing analysis results.**
-- **View generated reports in a modal.**
-- View past conversations.
+  - Access dataset context through tools
+  - Parse CSV data
+  - Generate and execute sandboxed Node.js code for data extraction and analysis
+  - Generate React component code for visualizing analysis results
+- View generated reports in a modal
+- View past conversations
 
 ## Models
 
@@ -28,7 +29,7 @@ Represents a persistent conversation thread owned by a user or associated with a
   title: String,
   associatedDatasetIds: [ObjectId], // IDs of datasets associated with this session (set on first message)
   createdAt: Date,
-  lastActivityAt: Date // Renamed from updatedAt for clarity
+  updatedAt: Date // Used as lastActivityAt
 }
 ```
 
@@ -41,187 +42,234 @@ Stores messages, agent steps, and potentially generated React code.
   userId: ObjectId,
   teamId: ObjectId?,
   chatSessionId: ObjectId,
-  promptText: String?,
-  messageType: enum('user', 'ai_report'),
+  promptText: String?, // Required if messageType is 'user'
+  selectedDatasetIds: [ObjectId], // Datasets used for this message context
+  messageType: enum('user', 'ai_report', 'ai_error', 'system'),
   aiResponseText: String?, // Final text summary
-  aiGeneratedCode: String?, // Stores generated React code for the report
-  status: enum('processing', 'completed', 'error'),
+  aiGeneratedCode: String?, // Stores generated React code for visualization
+  reportAnalysisData: Mixed?, // Stores processed analysis results for report rendering
+  reportDatasets: [{ // Deprecated but still available
+    name: String,
+    content: String,
+    error: String
+  }],
+  status: enum('pending', 'processing', 'generating_code', 'fetching_data', 
+              'execution_pending', 'executing_code', 'completed', 
+              'error_generating', 'error_fetching_data', 'error_executing', 'error'),
   errorMessage: String?,
   agentSteps: [ 
     {
-      tool: String, // Includes Phase 3 tool: 'generate_report_code'
+      tool: String,
       args: Object,
-      resultSummary: String, // e.g., 'Generated React report code'
+      resultSummary: String,
+      attempt: Number, // Tracking retries
+      isForced: Boolean // Whether step was forced by system logic
     }
   ],
   createdAt: Date
 }
 ```
 
-## Key Components (Agent Architecture)
+## Key Components
 
 ### API Endpoints (`chat.routes.js`)
 
-*   **Chat Session Management:** (No changes anticipated in Phase 3)
-    *   `POST /chats`
-    *   `GET /chats`
-    *   `GET /chats/:sessionId`
-    *   `PATCH /chats/:sessionId`
-    *   `DELETE /chats/:sessionId`
-*   **Chat Messages:** (No functional change to POST, GET remains similar)
-    *   `POST /chats/:sessionId/messages` - Sends user message, queues agent task.
-    *   `GET /chats/:sessionId/messages` - Lists messages (user and final AI responses).
-    *   `GET /chats/:sessionId/messages/:messageId` - Get a specific message.
-*   **Code Generation:**
-    *   `POST /prompts` - (Likely deprecated or refactored later in favor of agent)
-*   **Asynchronous Processing:**
-    *   `POST /internal/chat-ai-worker` - Internal endpoint for Cloud Tasks worker, now triggers the Agent Orchestrator.
+* **Chat Session Management:**
+  * `POST /chats` - Create new chat session
+  * `GET /chats` - List user's chat sessions
+  * `GET /chats/:sessionId` - Get session details
+  * `PATCH /chats/:sessionId` - Update session (title)
+  * `DELETE /chats/:sessionId` - Delete session and messages
 
-### Controllers (`chat.controller.js`, `prompt.controller.js`)
-*   `chat.controller.js`: Handles HTTP requests for chat sessions and messages. `addMessage` initiates the agent task.
-*   `prompt.controller.js`: (May become less relevant).
+* **Chat Messages:**
+  * `POST /chats/:sessionId/messages` - Send user message, queue agent task
+  * `GET /chats/:sessionId/messages` - List messages (user and final AI responses)
+  * `GET /chats/:sessionId/messages/:messageId` - Get specific message
+
+* **Prompt Generation:**
+  * `POST /prompts` - Simple code generation (may be deprecated)
+
+* **Asynchronous Processing:**
+  * `POST /internal/chat-ai-worker` - Internal endpoint for Cloud Tasks worker, triggers the Agent Orchestrator
+
+### Controllers
+
+* `chat.controller.js`:
+  * `createSession`, `getSessions`, `getSession`, `updateSession`, `deleteSession` - Basic session CRUD
+  * `sendMessage` - Creates user message, queues agent task
+  * `getMessages`, `getMessage` - Retrieves message history
+  * `handleWorkerRequest` - Receives Cloud Tasks webhook, delegates to taskHandler
+
+* `prompt.controller.js`:
+  * `generatePrompt` - Simple code generation endpoint
 
 ### Services
-*   `chat.service.js`: Business logic for chat sessions (CRUD).
-*   **`agent.service.js`:** Core of the agent architecture.
-    *   Contains `AgentOrchestrator` class.
-    *   `runAgentLoop`: Manages the Reason -> Act -> Observe loop.
-    *   Calls `prompt.service.js` for LLM reasoning.
-    *   Parses LLM responses (tool calls vs. final answers).
-    *   `toolDispatcher`: Executes requested tools.
-    *   Manages agent turn state (`turnContext`).
-    *   Updates `PromptHistory` with final status, response, and `agentSteps`.
-    *   Emits detailed `agent:*` WebSocket events for frontend status updates.
-    *   **Includes implementations for Phase 1 tools (`_listDatasetsTool`, `_getDatasetSchemaTool`, `_answerUserTool`).**
-    *   **Includes implementations for Phase 2 tools:**
-        *   `_generateDataExtractionCodeTool`: Calls `promptService.generateSandboxedCode`.
-        *   `_executeBackendCodeTool`: Calls `codeExecutionService.executeSandboxedCode`.
-    *   **Added `_generateReportCodeTool`:** Calls `promptService.generateReportCode`.
-    *   `_updatePromptHistoryRecord`: Now saves `aiGeneratedCode` if present.
-    *   **`_prepareChatHistory`:** Fetches recent messages and **calls `promptService.summarizeChatHistory` if history is long.**
-*   `prompt.service.js`: Refactored for agent support.
-    *   `getLLMReasoningResponse`: Calls the LLM with context prepared by the agent, returns raw response.
-    *   `assembleContext`: (Kept for potential context gathering).
-    *   **Added `generateSandboxedCode`:** Uses a dedicated prompt template to generate Node.js code suitable for the restricted `vm` environment, instructing the AI on available context (`datasetContent`, `sendResult`) and limitations.
-    *   **Added `generateReportCode`:** Uses a dedicated prompt template to generate React component code (using `React.createElement`) suitable for the `ReportViewer`.
-    *   **Added `summarizeChatHistory`:** Uses an LLM call to generate a concise summary of provided chat messages.
-*   **`codeExecution.service.js` (from `shared/services`):** Executes sandboxed code.
-    *   `executeSandboxedCode`: Fetches dataset content (via `dataset.service.js`), prepares the minimal sandbox context, runs code using `vm`, captures results/errors, enforces timeout.
-*   `dataset.service.js`: Added data fetching capability.
-    *   Added `getRawDatasetContent`: Securely fetches raw dataset content string from GCS for the code execution service.
+
+* `chat.service.js`:
+  * Core business logic for chat sessions (CRUD)
+  * `addMessage` - Creates user message, AI placeholder, queues Cloud Task
+  * `getChatMessages` - Fetches messages with proper selection of aiGeneratedCode
+
+* `agent.service.js`:
+  * Core of the agent architecture - `AgentOrchestrator` class
+  * `runAgentLoop` - Manages the Reason → Act → Observe loop
+  * `_prepareChatHistory` - Fetches and potentially summarizes history
+  * `_emitAgentStatus` - Sends WebSocket events for frontend status updates
+  * `toolDispatcher` - Routes tool calls to implementations
+  * Tool implementations:
+    * `_listDatasetsTool` - Lists available datasets
+    * `_getDatasetSchemaTool` - Gets schema for a dataset
+    * `_parseCsvDataTool` - Parses CSV data from a dataset
+    * `_generateDataExtractionCodeTool` - Generates parser code
+    * `_executeBackendCodeTool` - Executes parser code on dataset
+    * `_generateAnalysisCodeTool` - Generates analysis code
+    * `_executeAnalysisCodeTool` - Executes analysis code on parsed data
+    * `_generateReportCodeTool` - Generates React code for visualization
+    * `_answerUserTool` - Formats final text response
+
+* `prompt.service.js`:
+  * `getLLMReasoningResponse` - Calls LLM with context for agent reasoning
+  * `assembleContext` - Gathers user/team context
+  * `generateSandboxedCode` - Generates Node.js code for data extraction/analysis
+  * `generateReportCode` - Generates React code for visualization
+  * `summarizeChatHistory` - Condenses long conversation histories
+
+* `chat.taskHandler.js`:
+  * `workerHandler` - Receives Cloud Tasks webhook
+  * Instantiates `AgentOrchestrator` with context
+  * Handles final WebSocket event emission
 
 ### System Prompt Template (`system-prompt-template.js`)
-*   Exports `generateAgentSystemPrompt`.
-*   Provides detailed instructions to the LLM about its role as a financial analyst agent.
-*   Defines the agent loop (Reason, Act, Observe).
-*   Describes available tools (Phase 1 & Phase 2) and the required JSON format for tool calls.
-*   Includes conversation history summary, current turn steps, and user/team context.
-*   **Includes usage instructions** for the new tools (`generate_data_extraction_code`, `execute_backend_code`, `generate_report_code`).
-*   Emphasizes the need to use tools sequentially (generate then execute) and highlights sandbox restrictions.
+* Exports `generateAgentSystemPrompt`
+* Structures detailed instructions to Claude about:
+  * Agent loop (Reason, Act, Observe)
+  * Available tools and their usage
+  * Formatting of tool calls and results
+  * Current turn context and progress
+  * Analysis result formatting
+  * Error handling guidelines
 
-### Task Handler (`chat.taskHandler.js`)
-*   Refactored significantly from original non-agent implementation.
-*   Handles Cloud Tasks worker requests (`POST /internal/chat-ai-worker`).
-*   **Instantiates and calls `AgentOrchestrator.runAgentLoop()`**.
-*   Fetches the final AI message state after the agent loop completes.
-*   Emits the final `chat:message:completed` or `chat:message:error` WebSocket event based on the agent's result.
-*   No longer handles intermediate status updates or data fetching directly.
+## Workflow
 
-## Workflow (Agent Architecture - Phase 3)
+1. **Session Initialization:**
+   * User creates/selects chat session (`POST /chats` or frontend UI)
+   * Session stored in `ChatSession` collection
 
-1.  User creates/selects a chat session.
-2.  User sends a message (`POST /chats/:sessionId/messages`):
-    *   User message saved (`PromptHistory`).
-    *   If first message, `selectedDatasetIds` associated with `ChatSession`.
-    *   AI response placeholder (`PromptHistory`) created (status='processing').
-    *   Cloud Task queued (`/internal/chat-ai-worker` target) with payload (`userId`, `sessionId`, `aiMessageId`, `sessionDatasetIds` etc.).
-3.  Cloud Task worker (`chat.taskHandler.js`) receives the request:
-    *   Validates payload.
-    *   Fetches user message text and session details.
-    *   Instantiates `AgentOrchestrator(userId, teamId, sessionId, aiMessageId)`.
-    *   Calls `agentOrchestrator.runAgentLoop(userMessageText)`. **Agent loop begins.**
-4.  **Inside `runAgentLoop` (`agent.service.js`):**
-    *   a. Emit `agent:thinking`.
-    *   b. **Prepare LLM context (includes fetching and potentially summarizing history via `_prepareChatHistory`).**
-    *   c. Call `prompt.service.getLLMReasoningResponse` -> LLM decides next action.
-    *   d. Parse LLM response.
-    *   e. **If Tool Call:**
-        *   **`list_datasets` / `get_dataset_schema`:** (As in Phase 1) -> Emit events, execute, summarize, loop back to 4b.
-        *   **`generate_data_extraction_code`:**
-            *   Emit `agent:using_tool`.
-            *   Execute `_generateDataExtractionCodeTool` (calls `promptService.generateSandboxedCode`).
-            *   Receive result `{ code: "..." }` or error.
-            *   Summarize result (e.g., "Generated code snippet").
-            *   Update steps, emit `agent:tool_result`.
-            *   Loop back to 4b.
-        *   **`execute_backend_code`:**
-            *   Emit `agent:using_tool`.
-            *   Execute `_executeBackendCodeTool` (calls `codeExecutionService.executeSandboxedCode` with code and `datasetId`).
-            *   `codeExecutionService` fetches data via `datasetService.getRawDatasetContent`.
-            *   `codeExecutionService` runs code in `vm` sandbox.
-            *   Receive result `{ result: ... }` or `{ error: ... }` from sandbox.
-            *   Summarize result (may include actual data if small, or just success/error type).
-            *   Update steps, emit `agent:tool_result`.
-            *   Loop back to 4b.
-        *   **`generate_report_code`:**
-            *   Emit `agent:using_tool`.
-            *   Execute `_generateReportCodeTool` (calls `promptService.generateReportCode` with analysis summary and data from previous step).
-            *   Receive result `{ react_code: "..." }` or error.
-            *   Store `react_code` in `turnContext.generatedReportCode`.
-            *   Summarize result (e.g., "Generated React report code").
-            *   Update steps, emit `agent:tool_result`.
-            *   Loop back to 4b.
-        *   **`_answerUserTool`:**
-            *   Extract final `textResponse`.
-            *   Break loop.
-    *   f. **If Error / Max Iterations:** (As in Phase 1)
-5.  **Agent loop finishes** (returns `{status: 'completed', aiResponseText: ...}` or `{status: 'error', error: ...}`).
-6.  `chat.taskHandler.js` resumes:
-    *   Fetches the final `PromptHistory` record (Agent service saved `aiResponseText` and `aiGeneratedCode` via `_updatePromptHistoryRecord`).
-    *   If agent result was `completed`:
-        *   Update `ChatSession.lastActivityAt`.
-        *   Emit `chat:message:completed` with the final `PromptHistory` object (containing `aiGeneratedCode` if created).
-    *   If agent result was `error`:
-        *   Emit `chat:message:error` with `messageId`, `sessionId`, and `error` message.
-7.  Frontend receives `agent:*` events during processing for status updates and the final `chat:message:completed`/`error` event to display the result.
-8.  **If `chat:message:completed` payload contains `aiGeneratedCode`:**
-    *   Frontend (`ChatMessage`/`MessageBubble`) displays a "View Report" button.
-    *   User clicks button -> `ChatContext.openReportModal` called with code and datasets.
-    *   `ReportViewerModal` displays, rendering the code via `ReportViewer`.
+2. **Message Submission:**
+   * User sends message (`POST /chats/:sessionId/messages`)
+   * `chat.controller.sendMessage` calls `chat.service.addMessage`
+   * User message saved in `PromptHistory` (status='completed')
+   * AI placeholder created in `PromptHistory` (status='processing')
+   * If first message, selectedDatasetIds associated with session
+   * Cloud Task queued targeting `/internal/chat-ai-worker`
 
-## Data Model Interaction
+3. **Asynchronous Processing:**
+   * Cloud Task triggers `chat.controller.handleWorkerRequest`
+   * Controller delegates to `chat.taskHandler.workerHandler`
+   * TaskHandler initializes `AgentOrchestrator` with context
 
-*   **Primary Models (Read/Write):**
-    *   `PromptHistory` - Stores messages, final AI response, agent steps.
-    *   `ChatSession` - Manages conversations, associated datasets.
-*   **Supporting Models (Read-only within Agent/Tools):**
-    *   `User` - For user settings context.
-    *   `Dataset` - For listing datasets, getting schema via tools.
-    *   `Team` - For team settings context.
-    *   `TeamMember` - To determine team context/access.
+4. **Agent Loop:**
+   * Agent emits `agent:thinking` WebSocket event
+   * Agent prepares context (including history summarization if needed)
+   * Agent enters loop of:
+     * Call LLM for reasoning/next action
+     * Parse LLM response for tool calls
+     * Execute tools as needed
+     * Emit status via WebSocket events
+     * Continue until final answer or max iterations
+
+5. **Tool Execution Flow:**
+   * **Data Context:** `list_datasets` → `get_dataset_schema`
+   * **Data Extraction:** `parse_csv_data` OR `generate_data_extraction_code` → `execute_backend_code`
+   * **Analysis:** `generate_analysis_code` → `execute_analysis_code`
+   * **Visualization:** `generate_report_code` (If user requested visualization)
+   * **Final Answer:** `_answerUserTool`
+
+6. **Response Completion:**
+   * Agent updates `PromptHistory` record with final response
+   * TaskHandler emits `chat:message:completed` or `chat:message:error`
+   * Frontend receives events and updates UI
+
+7. **Report Viewing:**
+   * If `aiGeneratedCode` present, frontend shows "View Report" button
+   * User clicks button → Frontend displays report in modal using sandboxed iframe
+
+## WebSocket Events
+
+The agent and task handler emit events to `user:{userId}` room:
+
+* **`agent:thinking`**
+  * Emitted when agent starts processing
+  * Payload: `{ messageId, sessionId }`
+
+* **`agent:using_tool`**
+  * Emitted before tool execution
+  * Payload: `{ messageId, sessionId, toolName, args }`
+
+* **`agent:tool_result`**
+  * Emitted after tool execution
+  * Payload: `{ messageId, sessionId, toolName, resultSummary }`
+
+* **`agent:error`**
+  * Emitted on agent error
+  * Payload: `{ messageId, sessionId, error }`
+
+* **`chat:message:completed`**
+  * Emitted when processing completes successfully
+  * Payload: `{ message: PromptHistory, sessionId }`
+
+* **`chat:message:error`**
+  * Emitted on final error
+  * Payload: `{ messageId, sessionId, error }`
+
+## Advanced Features
+
+### History Summarization
+When chat history exceeds `HISTORY_SUMMARIZATION_THRESHOLD` (10 messages), the agent uses the LLM to create a concise summary of previous messages to maintain context while reducing token usage.
+
+### Tool Retry Logic
+The agent implements retry logic for tool failures, attempting to recover from transient errors up to `MAX_TOOL_RETRIES` (1) times before failing.
+
+### Multi-Step Analysis Pipeline
+The agent orchestrates a multi-step analysis pipeline:
+1. Dataset parsing (extract CSV data)
+2. Analysis code generation (create code to analyze parsed data)
+3. Analysis execution (run code on parsed data)
+4. Report code generation (create visualization of analysis results)
+
+### Context Preservation
+Previous analysis results and generated code can be referenced in subsequent turns, enabling modifications to reports without re-running analysis.
 
 ## Dependencies
 
-- `cloudTasks.service.js` - For async task queueing.
-- `socket.js` - For real-time agent status and final message updates.
-- Anthropic Claude API - For LLM reasoning steps.
-- `dataset.service.js` - Used by agent tools.
-- **`codeExecution.service.js`**
+* `cloudTasks.service.js` - Async task queueing
+* `socket.js` - Real-time agent status updates
+* Claude API - LLM reasoning/code generation
+* `dataset.service.js` - Dataset access
+* `codeExecution.service.js` - Sandboxed code execution
 
-## Security
+## Security Considerations
 
-- Standard API auth, subscription checks remain.
-- Agent tools must respect user/team permissions when accessing data (e.g., `dataset.service` calls must include `userId`).
-- `internal/chat-ai-worker` endpoint protected by Cloud Tasks OIDC token validation.
-- Prompt Injection remains a consideration for LLM interactions.
-- **Code Execution (`execute_backend_code`)**: Uses Node.js `vm` which is **NOT a true sandbox**. Mitigation relies on strict context control, timeouts, and careful code generation prompts. Robust sandboxing is deferred to Phase 4.
+* Standard API auth and subscription checks for all endpoints
+* `internal/chat-ai-worker` endpoint protected by Cloud Tasks OIDC token validation
+* Code execution runs in Node.js `vm` module with strict context control
+  * Limited execution time (timeout)
+  * Restricted context (only essential objects)
+  * No filesystem/network access
+* Prompt injection risks mitigated through careful system prompt design
+* Report rendering in frontend uses sandboxed iframe
 
-## Phase 3 Scope
-- Agent can generate React code for reports.
-- Frontend displays a button to view generated reports.
-- Report rendering uses existing sandboxed `ReportViewer` infrastructure.
+## Error Handling
 
-## Phase 4 Refinements Implemented
+* Tool execution errors handled with potential retry
+* Maximum iterations safeguard prevents infinite loops
+* WebSocket events provide real-time error feedback
+* Graceful fallbacks for agent failure scenarios
 
-- **Context Management:** Basic history summarization implemented using LLM call when history exceeds a threshold.
-- **Error Handling:** Basic tool retry logic added. Fallback responses added for max iterations and unexpected loop end. 
+## Future Enhancements
+
+* Enhanced context management for even longer conversations
+* More sophisticated code execution sandboxing
+* Improved error recovery strategies
+* Support for more data formats beyond CSV
+* Multi-dataset analysis in a single query 
