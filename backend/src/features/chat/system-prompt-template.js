@@ -137,24 +137,18 @@ Tool Definitions:
     3. Use \`generate_analysis_code\` to create analysis code.
     4. Use \`execute_analysis_code\` to run the analysis code.
     5. Analyze the result from \`execute_analysis_code\`. \n    6. **If the user asked for a report AND the analysis in step 5 was successful, you MUST use \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument in your tool call JSON.** The system will use the analysis results already in context.
-*   The \`execute_analysis_code\` tool runs in a restricted sandbox. Code MUST use the \`inputData\` variable and call \`sendResult(data)\`. NO parsing allowed in this code.
+*   The \`execute_analysis_code\` tool runs in a restricted sandbox. Code MUST use the \`inputData\` variable and call \`sendResult(data)\`. \n    **IMPORTANT:** The \`inputData\` variable will contain an array of JavaScript objects, already parsed from the CSV according to the schema (e.g., numbers will be numbers, dates might be strings but typically ISO format). **Your generated analysis code MUST directly access properties on these objects (e.g., \`row.Income\`, \`row.Date\`) and SHOULD NOT include its own logic to re-parse numbers (like \`parseFloat\` or \`parseInt\`) or dates (like \`new Date()\`).** Assume the data types are correct in \`inputData\`. NO file reading or network calls allowed.\n
 *   Ensure JSON for tool calls is correctly escaped, especially code strings for \`execute_analysis_code\` (newlines \\n, quotes \\", etc.).
 *   Base analysis ONLY on history and tool results.
 *   **CRITICAL: When calling \`generate_report_code\` or \`_answerUserTool\` after successful analysis, use the figures shown in \`Actual Analysis Results\` above for your summary or final text. Do NOT use numbers from the \`Current Turn Progress\` tool result summaries for these steps.**
 *   **MODIFICATION HANDLING:** If the user asks to **modify** a previous report/analysis (e.g., change title, remove chart, add column) AND the modification **does not require new calculations**: \n    a. **REUSE** the previous analysis data (summarized under \`Previous Turn Artifacts\`). \n    b. Your primary action should be \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument describing the modification. The system will use the previous analysis data automatically.\n    c. **DO NOT** call \`list_datasets\`, \`get_dataset_schema\`, \`parse_csv_data\`, \`generate_analysis_code\`, or \`execute_analysis_code\` unless the modification clearly requires re-running the underlying data analysis.\n*   **ERROR HANDLING:** If the *last step* in 'Current Turn Progress' shows a tool call resulted in an 'Error:', DO NOT call the same tool again immediately. Instead, use the \`_answerUserTool\` to inform the user that the action failed and you cannot proceed with that specific step.
-*   Handle tool errors appropriately.\n*   Output ONLY ONE valid JSON object for a single tool call in your response. Do not include any other text, explanations, or additional JSON objects before or after the tool call JSON.\n
+*   Handle tool errors appropriately.\n
+*   Output ONLY ONE valid JSON object for a single tool call in your response. Do not include any other text, explanations, or additional JSON objects before or after the tool call JSON.\n
+*   **CODE GENERATION GUIDELINE:** When writing code (for analysis or reports), if you pass a helper function (like a formatter) as an argument to another function (like a data table renderer), ensure the helper function is called with the correct number and type of arguments it expects. If the calling function provides extra arguments that the helper doesn't handle (e.g., passing the whole data row when the formatter only needs the value), wrap the helper function call in an anonymous function (e.g., \`(value) => formatCurrency(value)\`) to ensure the correct signature is used.\n
+*   **CHART AXIS FORMATTING (CRITICAL):** When formatting numeric ticks on chart axes (e.g., using \`tickFormatter\` in Recharts): \n    a. **DO NOT EVER pass an empty string (\`''\`) as the currency code to \`formatCurrency\`. This WILL cause errors.** \n    b. **DO NOT use \`.replace()\` immediately after calling \`formatCurrency(value, '')\`. This pattern is invalid.**\n    c. **PREFERRED METHOD:** If you need numbers on an axis *without* a currency symbol, use the \`formatNumber(value)\` helper function directly in the \`tickFormatter\`. Example: \`tickFormatter: (value) => formatNumber(value)\`\n    d. (Alternative) If you must use currency formatting first, call \`formatCurrency\` correctly (e.g., \`formatCurrency(value)\`) and *then* apply string manipulation like \`.slice(1)\` to the *result*, only if absolutely necessary and you know the symbol's position.\n
 *   **FINAL STEP AFTER REPORT:** If the last step in 'Current Turn Progress' shows that the \`generate_report_code\` tool was used **successfully**, your **next and final action** for this turn MUST be to use the \`_answerUserTool\` to inform the user the report has been generated or modified. Do not call \`generate_report_code\` again in the same turn.\n
 Now, analyze the user\'s latest query which is provided as the final message in the conversation history...`;
 };
 
-// Replace the old export with the new one
 module.exports = generateAgentSystemPrompt;
 
-// Remove the old generateSystemPrompt function if it's no longer needed.
-// Or keep it if the old /prompts endpoint still needs it temporarily.
-// For now, we assume it's replaced.
-/*
-const generateSystemPrompt = (contextParams) => {
-  // ... old code ...
-};
-*/
