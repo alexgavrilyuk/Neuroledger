@@ -441,23 +441,11 @@ ${analysisSummary}
 
 **Requirements:**
 1.  **Component Definition:** Define a single functional component: \`function ReportComponent({ reportData })\`.
-2.  **React & Recharts:** Assume React and ReactDOM are available globally. Import necessary Recharts components using destructuring **at the top of the function**:
-    \`\`\`javascript
-    const { createElement } = React; // Use createElement for JSX elements
-    const { ResponsiveContainer, LineChart, BarChart, PieChart, ComposedChart, AreaChart, Line, Bar, Pie, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, LabelList } = Recharts; // MUST include all used components here, especially Area!
-    \`\`\`
+2.  **React & Recharts:** Assume React and ReactDOM are available globally. Import necessary Recharts components using destructuring **at the top of the function**:\n    \`\`\`javascript\n    const { createElement } = React; // Use createElement for JSX elements\n    const { ResponsiveContainer, LineChart, BarChart, PieChart, ComposedChart, AreaChart, Line, Bar, Pie, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, LabelList } = Recharts; // MUST include all used components here!\n    \`\`\`
 3.  **Styling:** Use inline styles ONLY. Define a \`styles\` object containing style objects for different elements (e.g., \`reportContainer\`, \`section\`, \`kpiCard\`, \`chartContainer\`). Use basic, clean styling (e.g., font sizes, padding, margins, borders, background colors).
-4.  **Data Handling:** Safely access data from the \`reportData\` prop (e.g., \`reportData?.summary?.overview?.totalIncome\`). Handle potential missing data gracefully (e.g., display 'N/A' or a placeholder message). Include helper functions for formatting (e.g., \`formatCurrency\`, \`formatPercentage\`.
-5.  **Structure:** Organize the report into logical sections using \`<div>\` elements with appropriate titles (\`<h2>\`, \`<h3>\`). Key sections might include:
-    *   Executive Summary (using the provided \`analysisSummary\`)
-    *   Key Performance Indicators (KPIs)
-    *   Income vs. Expenses Analysis (using charts)
-    *   Budget Performance (using charts/tables)
-    *   Expense Breakdown (using charts/tables)
-    *   Trend Analysis (using charts like Line or Area charts)
-    *   Anomalies (if any data is provided, otherwise state none found)
-6.  **Charts:** Use appropriate Recharts components (LineChart, BarChart, PieChart, AreaChart, ComposedChart) to visualize the data. Ensure charts are responsive using \`ResponsiveContainer\`. Use clear labels, tooltips, and legends.
-    *   **Axis Formatting:** For Y-axis ticks (using \`tickFormatter\`), use a simple number formatting function (like the \`formatNumber\` helper) to display numerical values. **Do NOT use the \`formatCurrency\` function for axis ticks**, as it can cause errors if the currency symbol is removed incorrectly.
+4.  **Data Handling:** Safely access data from the \`reportData\` prop (e.g., \`reportData?.summary?.overview?.totalIncome\`). Handle potential missing data gracefully (e.g., display 'N/A' or a placeholder message). Include helper functions for formatting (e.g., \`formatCurrency\`, \`formatPercentage\`).
+5.  **Structure:** Organize the report into logical sections using \`<div>\` elements with appropriate titles (\`<h2>\`, \`<h3>\`). Key sections might include:\n    *   Executive Summary (using the provided \`analysisSummary\`)\n    *   Key Performance Indicators (KPIs)\n    *   Income vs. Expenses Analysis (using charts)\n    *   Budget Performance (using charts/tables)\n    *   Expense Breakdown (using charts/tables)\n    *   Trend Analysis (using charts like Line or Area charts)\n    *   Anomalies (if any data is provided, otherwise state none found)
+6.  **Charts:** Use appropriate Recharts components (LineChart, BarChart, PieChart, AreaChart, ComposedChart) to visualize the data. Ensure charts are responsive using \`ResponsiveContainer\`. Use clear labels, tooltips, and legends.\n    *   **SVG Definitions (<defs>):** To define elements like gradients for charts (e.g., \`AreaChart\`), place the SVG \`<defs>\` element **directly inside** the chart component. Use \`createElement('defs', ...)\` and \`createElement('linearGradient', ...)\` correctly nested within the chart element structure. **Do NOT attempt to import or define \`defs\` as a variable or component.** Example:\n      \`\`\`javascript\n      createElement(AreaChart, { /* ...props */ },\n          createElement('defs', null,\n              createElement('linearGradient', { id: 'colorUv', x1: '0', y1: '0', x2: '0', y2: '1' },\n                  createElement('stop', { offset: '5%', stopColor: '#8884d8', stopOpacity: 0.8 }),\n                  createElement('stop', { offset: '95%', stopColor: '#8884d8', stopOpacity: 0 })\n              )\n          ),\n          /* ... other chart elements like XAxis, YAxis, Tooltip, Area ... */\n          createElement(Area, { /* ...props */ fill: 'url(#colorUv)' })\n      )\n      \`\`\`\n    *   **Axis Formatting:** For Y-axis ticks (using \`tickFormatter\`), use a simple number formatting function (like the \`formatNumber\` helper) to display numerical values. **Do NOT use the \`formatCurrency\` function for axis ticks**, as it can cause errors if the currency symbol is removed incorrectly.
 7.  **Tables:** If displaying tabular data (e.g., monthly breakdowns), use basic HTML table elements (\`<table>\`, \`<thead>\`, \`<tbody>\`, \`<tr>\`, \`<th>\`, \`<td>\`) styled using the \`styles\` object.
 8.  **Code Output:** Output ONLY the JavaScript code for the \`ReportComponent\` function. Do NOT wrap it in Markdown code fences (\`\`\`javascript ... \`\`\`). Do NOT include any other text, explanations, or imports outside the function body. The entire output must be executable JavaScript defining the component.
 9.  **Error Handling:** The component itself should handle potential missing fields in \`reportData\` gracefully. Helper functions should also handle invalid inputs (e.g., non-numeric values for formatting).
@@ -466,14 +454,22 @@ ${analysisSummary}
 \`\`\`javascript
 function ReportComponent({ reportData }) {
     const { createElement } = React;
-    const { /* Recharts components... */ Area, Line, Bar, Pie, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer /* etc. */ } = Recharts; // Ensure ALL needed components are here!
+    const { /* Recharts components... */ Area, Line, Bar, Pie, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, AreaChart /* etc. */ } = Recharts; // Ensure ALL needed components are here!
 
     const styles = { /* ... */ };
     const formatCurrency = (value) => { /* ... */ };
     // ... other helpers
 
     const renderKPIs = () => { /* ... */ };
-    const renderIncomeExpenseChart = () => { /* ... */ };
+    const renderIncomeExpenseChart = () => { /* ... example using defs */ 
+        return createElement(AreaChart, { /* chart props */ },
+             createElement('defs', null, 
+                createElement('linearGradient', { id: 'gradient1', /* gradient props */ }, /* stop elements */ )
+             ),
+             /* other chart elements */
+             createElement(Area, { /* area props */ fill: 'url(#gradient1)' })
+        );
+    };
     // ... other render functions for sections
 
     return createElement('div', { style: styles.reportContainer },

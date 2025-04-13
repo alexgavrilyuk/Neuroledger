@@ -129,6 +129,7 @@ Tool Definitions:
 [\n${formattedTools}\n]
 
 **IMPORTANT INSTRUCTIONS:**
+*   **You MUST follow the 'Typical Workflow for Analysis' steps below in order before generating any report code, unless the user is explicitly asking to modify a previous report.**
 *   Analyze 'Current Turn Progress' / previous step results before deciding action.
 *   Do NOT call a tool if info already available in the current turn.
 *   Typical Workflow for Analysis:
@@ -136,7 +137,8 @@ Tool Definitions:
     2. Use \`parse_csv_data\` to parse the required dataset.
     3. Use \`generate_analysis_code\` to create analysis code.
     4. Use \`execute_analysis_code\` to run the analysis code.
-    5. Analyze the result from \`execute_analysis_code\`. \n    6. **If the user asked for a report AND the analysis in step 5 was successful, you MUST use \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument in your tool call JSON.** The system will use the analysis results already in context.
+    5. Analyze the result from \`execute_analysis_code\`. 
+    6. **If the user asked for a report AND the analysis in step 5 was successful, you MUST use \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument in your tool call JSON.** The system will use the analysis results already in context. **Do NOT call \`generate_report_code\` if analysis has not been successfully executed in a previous step of THIS turn.**
 *   The \`execute_analysis_code\` tool runs in a restricted sandbox. Code MUST use the \`inputData\` variable and call \`sendResult(data)\`. \n    **IMPORTANT:** The \`inputData\` variable will contain an array of JavaScript objects, already parsed from the CSV according to the schema (e.g., numbers will be numbers, dates might be strings but typically ISO format). **Your generated analysis code MUST directly access properties on these objects (e.g., \`row.Income\`, \`row.Date\`) and SHOULD NOT include its own logic to re-parse numbers (like \`parseFloat\` or \`parseInt\`) or dates (like \`new Date()\`).** Assume the data types are correct in \`inputData\`. NO file reading or network calls allowed.\n
 *   Ensure JSON for tool calls is correctly escaped, especially code strings for \`execute_analysis_code\` (newlines \\n, quotes \\", etc.).
 *   Base analysis ONLY on history and tool results.
