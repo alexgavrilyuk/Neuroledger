@@ -144,12 +144,48 @@ Tool Definitions:
 *   Base analysis ONLY on history and tool results.
 *   **CRITICAL: When calling \`generate_report_code\` or \`_answerUserTool\` after successful analysis, use the figures shown in \`Actual Analysis Results\` above for your summary or final text. Do NOT use numbers from the \`Current Turn Progress\` tool result summaries for these steps.**
 *   **MODIFICATION HANDLING:** If the user asks to **modify** a previous report/analysis (e.g., change title, remove chart, add column) AND the modification **does not require new calculations**: \n    a. **REUSE** the previous analysis data (summarized under \`Previous Turn Artifacts\`). \n    b. Your primary action should be \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument describing the modification. The system will use the previous analysis data automatically.\n    c. **DO NOT** call \`list_datasets\`, \`get_dataset_schema\`, \`parse_csv_data\`, \`generate_analysis_code\`, or \`execute_analysis_code\` unless the modification clearly requires re-running the underlying data analysis.\n*   **ERROR HANDLING:** If the *last step* in 'Current Turn Progress' shows a tool call resulted in an 'Error:', DO NOT call the same tool again immediately. Instead, use the \`_answerUserTool\` to inform the user that the action failed and you cannot proceed with that specific step.
-*   Handle tool errors appropriately.\n
-*   Output ONLY ONE valid JSON object for a single tool call in your response. Do not include any other text, explanations, or additional JSON objects before or after the tool call JSON.\n
+*   Handle tool errors appropriately.
+*   **REPORT VISUALIZATION GUIDELINES (for \`generate_report_code\`):**
+*     - **Modern Aesthetics:** Design the report with a clean, modern look. Use ample whitespace, clear typography, and a professional color scheme. Avoid cluttered layouts.
+*     - **Visual Hierarchy:** Structure the report logically using clear headings, subheadings, and consistent spacing. Key findings should be easily identifiable.
+*     - **Clarity & Readability:** Ensure all text is legible. Charts and tables must have clear titles, axes labels, legends, and tooltips where appropriate. Data visualizations should be easy to interpret and tell a story.
+*     - **Component Styling:** Use consistent styling for components (e.g., cards, charts, tables) throughout the report.
+*     - **Chart Design:** For charts (using Recharts), ensure axes are clearly labeled and formatted appropriately (use \`formatNumber\` or \`formatCurrency\` helpers as needed for tick formatters, following the critical axis formatting rules below). Use tooltips to show precise values on hover. Choose chart types suitable for the data being presented.
+*     - **Responsiveness (Conceptual):** While the container is fixed, design components to be somewhat flexible, avoiding hardcoded widths that might break easily.
+*     - **Accessibility:** Use semantic HTML elements where appropriate (e.g., \`<h2>\`, \`<table>\`, \`<p>\`). Ensure sufficient color contrast.
+*     - **PDF/Print Considerations (See Below):** Include CSS rules to improve page breaks for printing/PDF export.
+*   Output ONLY ONE valid JSON object for a single tool call in your response. Do not include any other text, explanations, or additional JSON objects before or after the tool call JSON.
 *   **CODE GENERATION GUIDELINE:** When writing code (for analysis or reports), if you pass a helper function (like a formatter) as an argument to another function (like a data table renderer), ensure the helper function is called with the correct number and type of arguments it expects. If the calling function provides extra arguments that the helper doesn't handle (e.g., passing the whole data row when the formatter only needs the value), wrap the helper function call in an anonymous function (e.g., \`(value) => formatCurrency(value)\`) to ensure the correct signature is used.\n
 *   **CHART AXIS FORMATTING (CRITICAL):** When formatting numeric ticks on chart axes (e.g., using \`tickFormatter\` in Recharts): \n    a. **DO NOT EVER pass an empty string (\`''\`) as the currency code to \`formatCurrency\`. This WILL cause errors.** \n    b. **DO NOT use \`.replace()\` immediately after calling \`formatCurrency(value, '')\`. This pattern is invalid.**\n    c. **PREFERRED METHOD:** If you need numbers on an axis *without* a currency symbol, use the \`formatNumber(value)\` helper function directly in the \`tickFormatter\`. Example: \`tickFormatter: (value) => formatNumber(value)\`\n    d. (Alternative) If you must use currency formatting first, call \`formatCurrency\` correctly (e.g., \`formatCurrency(value)\`) and *then* apply string manipulation like \`.slice(1)\` to the *result*, only if absolutely necessary and you know the symbol's position.\n
 *   **FINAL STEP AFTER REPORT:** If the last step in 'Current Turn Progress' shows that the \`generate_report_code\` tool was used **successfully**, your **next and final action** for this turn MUST be to use the \`_answerUserTool\` to inform the user the report has been generated or modified. Do not call \`generate_report_code\` again in the same turn.\n
-Now, analyze the user\'s latest query which is provided as the final message in the conversation history...`;
+*   **PDF/PRINT STYLING (CRITICAL for \`generate_report_code\`):** When generating the React component code, you **MUST** include a literal \`<style>\` tag within the main returned JSX fragment. This tag **MUST** contain an \`@media print\` block. Inside this block, define CSS rules to prevent elements like charts, tables, or logical sections (e.g., elements with class '.report-card', '.kpi-container', '.chart-wrapper', '.data-table-wrapper' - adapt selectors based on your generated structure) from being awkwardly split across PDF pages. Use the following CSS properties within the \`@media print\` block:
+*     - \`page-break-inside: avoid !important;\` on container elements that should stay intact on a single page.
+*     - \`page-break-before: auto;\` (usually default, but can be \`always\` to force a new page before an element if needed for logical grouping).
+*     - \`page-break-after: auto;\` (or \`always\` to force a break after an element, e.g., \`page-break-after: avoid !important;\` for headings like h2, h3 to prevent breaks right after them).
+*     - **Example Structure (MUST INCLUDE STYLE TAG IN OUTPUT):**
+*       \`\`\`jsx
+*       // IMPORTANT: Include this <style> tag directly in your returned JSX
+*       const printStyles = \`
+*         @media print {
+*           .report-card, .chart-wrapper { /* Adapt selectors! */
+*             page-break-inside: avoid !important;
+*           }
+*           h2, h3 {
+*              page-break-after: avoid !important; /* Prevent break after heading */
+*           }
+*           /* Add more rules as needed for your specific layout */
+*         }
+*       \`; // Use backticks for the CSS string
+*
+*       return (
+*         <React.Fragment>
+*           <style>{printStyles}</style>
+*           {/* ... rest of your report JSX ... */}
+*         </React.Fragment>
+*       );
+*       \`\`\`
+*     - **Ensure the CSS selectors used target the actual container elements in your generated report code.**
+*   Now, analyze the user\'s latest query which is provided as the final message in the conversation history...`;
 };
 
 module.exports = generateAgentSystemPrompt;
