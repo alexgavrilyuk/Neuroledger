@@ -412,85 +412,89 @@ class AgentOrchestrator {
     /** Fetches and potentially summarizes chat history. */
     async _prepareChatHistory() {
         try {
-             const historyRecords = await PromptHistory.find({
-                 chatSessionId: this.sessionId,
-                 _id: { $ne: this.aiMessagePlaceholderId } // Exclude the current placeholder
-             })
-             .sort({ createdAt: 1 }) // Fetch oldest first for chronological order
-             .limit(HISTORY_FETCH_LIMIT) // Still limit to avoid excessive context
-             .select('messageType promptText aiResponseText reportAnalysisData aiGeneratedCode createdAt _id') // Added reportAnalysisData, aiGeneratedCode, _id
-             .lean();
+            // Fix 1: Update PromptHistory Query
+            const historyRecords = await PromptHistory.find({
+                chatSessionId: this.sessionId,
+                _id: { $ne: this.aiMessagePlaceholderId },
+                messageType: 'ai_report', // Target only AI reports
+                status: 'completed', // Only successful ones
+                $or: [ // Ensure either analysis data or code exists
+                    { reportAnalysisData: { $exists: true, $ne: null } },
+                    { aiGeneratedCode: { $exists: true, $ne: null } }
+                ]
+            })
+            .sort({ createdAt: -1 }) // Fetch newest first for artifact search
+            .limit(HISTORY_FETCH_LIMIT) // Limit history size
+            .select('messageType status reportAnalysisData aiGeneratedCode createdAt _id') // Select needed fields
+            .lean();
 
-             logger.debug(`[Agent History Prep] Fetched ${historyRecords.length} history records.`);
+            logger.debug(`[Agent History Prep] Fetched ${historyRecords.length} potential artifact records (newest first).`);
 
-             // Format history for LLM (chronological order)
-             const formattedHistory = historyRecords.map(msg => ({
-                 role: msg.messageType === 'user' ? 'user' : 'assistant',
-                 // Ensure content exists, provide fallback if necessary
-                 content: (msg.messageType === 'user' ? msg.promptText : msg.aiResponseText) || ''
-             })).filter(msg => msg.content); // Filter out messages with no content
+            // Fix 2: Update artifact search logic
+            let artifactData = {
+                previousAnalysisResult: null,
+                previousGeneratedCode: null,
+                analysisFoundOnMsgId: null,
+                codeFoundOnMsgId: null
+            };
 
+            // Find the most recent successful report with analysis data
+            // The query already sorts by newest and filters for completed reports
+            const lastSuccessfulReport = historyRecords.find(msg => msg.reportAnalysisData);
 
-             // Store the formatted full history in the turn context
-             this.turnContext.fullChatHistory = formattedHistory;
+            if (lastSuccessfulReport) {
+                artifactData = {
+                    previousAnalysisResult: lastSuccessfulReport.reportAnalysisData,
+                    previousGeneratedCode: lastSuccessfulReport.aiGeneratedCode, // May or may not exist, that's okay
+                    analysisFoundOnMsgId: lastSuccessfulReport._id,
+                    codeFoundOnMsgId: lastSuccessfulReport.aiGeneratedCode ? lastSuccessfulReport._id : null // Only set if code exists
+                };
 
+                logger.info(`[Agent History Prep] Found previous artifacts in message ${lastSuccessfulReport._id}`, {
+                    hasAnalysis: !!artifactData.previousAnalysisResult,
+                    hasCode: !!artifactData.previousGeneratedCode
+                });
+            } else {
+                 logger.info(`[Agent History Prep] No suitable previous completed report with analysis data found.`);
+            }
+            // --- End Fix 2 --
 
-             // --- REVISED LOGIC to find artifacts independently ---
-             // Search newest-to-oldest for artifacts
-             let previousAnalysisResult = null;
-             let previousGeneratedCode = null;
-             let analysisFoundOnMsgId = null;
-             let codeFoundOnMsgId = null;
+            // Store potentially found artifacts in intermediate results
+            // Use consistent naming: previousAnalysisResult, previousGeneratedCode
+            this.turnContext.intermediateResults.previousAnalysisResult = artifactData.previousAnalysisResult;
+            this.turnContext.intermediateResults.previousGeneratedCode = artifactData.previousGeneratedCode;
 
-             // Use the original lean objects from historyRecords for artifact search, which include the necessary fields
-             const historyRecordsForArtifactSearch = [...historyRecords].reverse(); // Create reversed copy for searching newest-first
-             logger.debug(`[Agent History Prep] Searching ${historyRecordsForArtifactSearch.length} history records (newest first) for artifacts...`);
+            logger.debug(`[Agent History Prep] Post-artifact search check:`, {
+                hasPreviousAnalysis: !!artifactData.previousAnalysisResult,
+                analysisMsgId: artifactData.analysisFoundOnMsgId,
+                hasPreviousCode: !!artifactData.previousGeneratedCode,
+                codeMsgId: artifactData.codeFoundOnMsgId,
+            });
 
+            // Fetch the full history separately for LLM context (chronological)
+            const fullHistoryRecords = await PromptHistory.find({
+                chatSessionId: this.sessionId,
+                _id: { $ne: this.aiMessagePlaceholderId }
+            })
+            .sort({ createdAt: 1 }) // Chronological for LLM
+            .limit(HISTORY_FETCH_LIMIT)
+            .select('messageType promptText aiResponseText') // Only need text content
+            .lean();
 
-             for (const msg of historyRecordsForArtifactSearch) { // Iterate newest to oldest
-                 if (msg.messageType === 'assistant') {
-                     // Find the *first* (most recent) message with analysis data
-                     if (previousAnalysisResult === null && msg.reportAnalysisData) {
-                         previousAnalysisResult = msg.reportAnalysisData;
-                         analysisFoundOnMsgId = msg._id;
-                         logger.info(`[Agent History Prep] Found previous analysis result on message ID ${analysisFoundOnMsgId}`);
-                     }
+             const formattedHistory = fullHistoryRecords.map(msg => ({
+                role: msg.messageType === 'user' ? 'user' : 'assistant',
+                content: (msg.messageType === 'user' ? msg.promptText : msg.aiResponseText) || ''
+            })).filter(msg => msg.content);
 
-                    // Find the *first* (most recent) message with generated code
-                    if (previousGeneratedCode === null && msg.aiGeneratedCode) {
-                         previousGeneratedCode = msg.aiGeneratedCode;
-                         codeFoundOnMsgId = msg._id;
-                          logger.info(`[Agent History Prep] Found previous generated code on message ID ${codeFoundOnMsgId}`);
-                    }
-                 }
-                 // Stop searching if we've found both artifacts
-                 if (previousAnalysisResult !== null && previousGeneratedCode !== null) {
-                     logger.debug('[Agent History Prep] Found both analysis and code artifacts. Stopping artifact search.');
-                     break;
-                 }
-             }
-             // --- END REVISED LOGIC --
+            this.turnContext.fullChatHistory = formattedHistory;
 
-
-             // Store potentially found artifacts in intermediate results
-             this.turnContext.intermediateResults.previousAnalysisData = previousAnalysisResult;
-             this.turnContext.intermediateResults.previousGeneratedCode = previousGeneratedCode;
-
-             logger.debug(`[Agent History Prep] Post-artifact search check:`, {
-                 hasPreviousAnalysis: !!previousAnalysisResult,
-                 analysisMsgId: analysisFoundOnMsgId,
-                 hasPreviousCode: !!previousGeneratedCode,
-                 codeMsgId: codeFoundOnMsgId,
-             });
-
-             // --- History Summarization and related fields REMOVED ---
-             // Removed: chatHistoryForSummarization, historySummary generation logic
+            // --- History Summarization and related fields REMOVED --
 
         } catch (err) {
              logger.error(`Failed to fetch chat history for session ${this.sessionId}: ${err.message}`);
              this.turnContext.fullChatHistory = []; // Ensure it's an empty array on error
              // Reset artifact state on error to avoid passing stale data
-             this.turnContext.intermediateResults.previousAnalysisData = null;
+             this.turnContext.intermediateResults.previousAnalysisResult = null;
              this.turnContext.intermediateResults.previousGeneratedCode = null;
         }
     }
@@ -504,15 +508,14 @@ class AgentOrchestrator {
         let previousAnalysisResultSummary = null;
         let hasPreviousGeneratedCode = false;
 
-        if (this.turnContext.intermediateResults.previousAnalysisData) {
-            // Simple summary indicating data is available. The LLM prompt instructs it to use this.
+        // Use the corrected field name from turnContext
+        if (this.turnContext.intermediateResults.previousAnalysisResult) {
             previousAnalysisResultSummary = "Analysis results from a previous turn are available and should be reused if applicable.";
-            // You could add more detail here if needed, e.g., extracting key figures.
         }
         if (this.turnContext.intermediateResults.previousGeneratedCode) {
             hasPreviousGeneratedCode = true;
         }
-        // --- END ADDED ---
+        // --- END ADDED --
 
         // Ensure fullChatHistory exists (it should be set by _prepareChatHistory)
         const fullChatHistory = this.turnContext.fullChatHistory || [];
@@ -1011,78 +1014,71 @@ class AgentOrchestrator {
 
     /** Tool: Generate React Report Code */
     async _generateReportCodeTool(args) {
-        logger.info(`Executing tool: generate_report_code`);
+        const { analysis_summary } = args;
+        logger.info(`Executing tool: generate_report_code with summary: "${analysis_summary}"`);
 
-        // 1. Get the analysis summary from the LLM arguments first
-        const analysisSummaryArg = args?.analysis_summary;
-
-        // 2. Determine the correct analysis data source
-        // Prioritize results from analysis run *this turn*, fallback to previous turn's results for modifications.
+        // Fix 3: Add context validation
         let analysisDataForReport = this.turnContext.intermediateResults.analysisResult;
-        let dataSourceMessage = 'current turn analysis';
 
         if (!analysisDataForReport) {
-            // No analysis run this turn, try using previous results
-            analysisDataForReport = this.turnContext.intermediateResults.previousAnalysisResult;
-            if (analysisDataForReport) {
-                dataSourceMessage = 'previous turn analysis (modification)';
-                logger.info(`[Agent Report Gen] ${dataSourceMessage}: Using previous analysis data.`);
+            logger.info('Current turn analysis data not found, checking for previous analysis data.');
+            // Try using the analysis data found during history preparation
+            analysisDataForReport = this.turnContext.intermediateResults.previousAnalysisResult; // Use the correct field name
+
+            if (!analysisDataForReport) {
+                logger.error('[Generate Report Tool] No analysis data found in current OR previous context.');
+                // Provide a clearer error message to the LLM
+                return {
+                    error: 'Cannot generate report code: Analysis result is missing. Please run analysis first or ensure a previous analysis was completed successfully.'
+                };
             }
+
+            logger.info('[Generate Report Tool] Using previous analysis data for report generation/modification.');
         } else {
-             logger.info(`[Agent Report Gen] ${dataSourceMessage}: Using analysis data from this turn.`);
+             logger.info('[Generate Report Tool] Using analysis data from the current turn.');
         }
 
-        // 3. Validate that we have *some* analysis data to proceed
-        if (!analysisDataForReport) {
-            logger.error('_generateReportCodeTool called, but no analysis result found in current OR previous context.');
-            return { error: 'Cannot generate report: Analysis results are missing.' };
+        // Ensure analysisDataForReport is actually an object/array, not just truthy
+        if (typeof analysisDataForReport !== 'object' || analysisDataForReport === null) {
+             logger.error(`[Generate Report Tool] Invalid analysis data format: ${typeof analysisDataForReport}`);
+              return {
+                error: 'Cannot generate report code: Invalid analysis data format.'
+              };
         }
 
-        // 4. Validate the summary argument provided by the LLM
-        if (!analysisSummaryArg || typeof analysisSummaryArg !== 'string') {
-            logger.warn('_generateReportCodeTool called without a valid analysis_summary argument from LLM.');
-            // If the summary is missing, we cannot reliably generate the report as instructed
-            return { error: 'Cannot generate report: Analysis summary argument is missing or invalid.' };
-        }
-
-        // 5. Prepare arguments for the prompt service, using the determined data and validated summary
-        const reportArgs = {
-            analysisSummary: analysisSummaryArg, 
-            dataJson: analysisDataForReport // Use the determined data source (current or previous)
-        };
-
-        // Call the prompt service with the CORRECT, verified data
+        // Convert analysis data to JSON string for the prompt service
+        let dataJsonString;
         try {
-            logger.debug('[Agent Report Gen] Calling promptService.generateReportCode with args:', { analysisSummary: reportArgs.analysisSummary, dataJsonKeys: Object.keys(reportArgs.dataJson || {}) });
-            const result = await promptService.generateReportCode({
+            dataJsonString = JSON.stringify(analysisDataForReport);
+        } catch (stringifyError) {
+            logger.error(`[Generate Report Tool] Failed to stringify analysis data: ${stringifyError.message}`);
+            return { error: `Internal error: Could not process analysis data.` };
+        }
+
+        try {
+            const reportResult = await promptService.generateReportCode({
                 userId: this.userId,
-                ...reportArgs // Spread the existing arguments
+                analysisSummary: analysis_summary,
+                dataJson: dataJsonString // Pass stringified data
             });
-            
-            let cleanedCode = result?.react_code;
-            if (cleanedCode && typeof cleanedCode === 'string') {
-                // console.log('[Agent Tool _generateReportCodeTool] Raw Generated React Code:', cleanedCode); 
-                const codeFenceRegex = /^```(?:javascript|js|json)?\s*([\s\S]*?)\s*```$/m;
-                const match = cleanedCode.match(codeFenceRegex);
-                if (match && match[1]) {
-                    cleanedCode = match[1].trim();
-                    // console.log('[Agent Tool _generateReportCodeTool] Cleaned React Code (fences removed):', cleanedCode);
-                } else {
-                    cleanedCode = cleanedCode.trim();
-                }
-            } else {
-                logger.warn('_generateReportCodeTool received no code from promptService.');
-                cleanedCode = null; // Ensure it's null if no code
+
+            // Fix: Extract the string from the result object
+            const generatedCodeString = reportResult?.react_code;
+
+            if (!generatedCodeString || typeof generatedCodeString !== 'string') {
+                 logger.warn('[Generate Report Tool] promptService.generateReportCode returned no valid code string.');
+                 return { error: 'Failed to generate report code. The AI might need more information or context.' };
             }
 
-            // Store the CLEANED code internally for the final DB update
-            this.turnContext.generatedReportCode = cleanedCode; 
-            // Return the cleaned code for the step result summary etc.
-            return { result: { react_code: cleanedCode } }; 
+            logger.info('[Generate Report Tool] Successfully generated React report code string.');
+            // Fix: Store the extracted STRING in turnContext
+            this.turnContext.generatedReportCode = generatedCodeString; 
+            // Fix: Return the string in the expected result structure
+            return { result: { react_code: generatedCodeString } };
 
         } catch (error) {
-             logger.error(`_generateReportCodeTool failed during promptService call: ${error.message}`, { error });
-             return { error: `Failed to generate report code: ${error.message}` };
+            logger.error(`[Generate Report Tool] Error calling promptService.generateReportCode: ${error.message}`, { error });
+            return { error: `Failed to generate report code: ${error.message}` };
         }
     }
 

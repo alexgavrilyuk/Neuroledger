@@ -143,12 +143,23 @@ const workerHandler = async (payload) => {
     } else { // agentResult.status === 'error'
         logger.warn(`Agent loop finished with error for message ${aiMessageId}: ${agentResult.error}. Emitting final error update.`);
         // The agent loop already updated the DB record status to 'error'
+
+        // Fix 5: Improve Error Handling for missing analysis data
+        if (agentResult.error?.includes('Analysis result is missing')) {
+            logger.error(`[Task Handler] Specific Error: Failed to modify report for message ${aiMessageId} because previous analysis data was missing. Error from agent: ${agentResult.error}`);
+            // NOTE: The agent loop already updated the PromptHistory record status to 'error'
+            // and set the errorMessage. We will emit this error message below.
+            // No need to call _updatePromptHistoryRecord here.
+        }
+        // End Fix 5
+
         if (io) {
             // TODO: Emit to specific user/room if implemented
             io.to(`user:${userId}`).emit('chat:message:error', {
                 messageId: aiMessageId,
                 sessionId: chatSessionId,
-                error: agentResult.error || finalAiMessage.errorMessage || 'Agent processing failed'
+                // Emit the error message provided by the agent loop
+                error: agentResult.error || finalAiMessage?.errorMessage || 'Agent processing failed' 
             });
         } else {
              logger.warn('Socket.io instance not available, cannot emit chat:message:error');

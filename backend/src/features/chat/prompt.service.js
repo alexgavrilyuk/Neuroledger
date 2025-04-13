@@ -373,12 +373,42 @@ const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
          throw new Error(`AI assistant (${provider}) is currently unavailable for report code generation.`);
     }
     
+    // Fix 4: Add validation for analysis data
     if (!analysisSummary || !dataJson) {
-        throw new Error('Missing analysis summary or data for report code generation.');
+        const error = 'Missing analysis summary or data for report code generation.';
+        logger.error(`[Report Gen] ${error}`, {
+            hasAnalysisSummary: !!analysisSummary,
+            hasDataJson: !!dataJson // Check specifically for dataJson
+        });
+        throw new Error(error);
+    }
+    // End Fix 4
+
+    // Validate that dataJson is a string (as it should be passed from agent.service)
+    if (typeof dataJson !== 'string') {
+         logger.warn(`[Report Gen] dataJson is not a string, attempting to stringify. Type: ${typeof dataJson}`);
+         try {
+             dataJson = JSON.stringify(dataJson);
+         } catch (e) {
+             logger.error(`[Report Gen] Failed to stringify non-string dataJson: ${e.message}`);
+             throw new Error('Invalid data format provided for report generation.');
+         }
+    }
+
+    let parsedDataJson;
+    try {
+        parsedDataJson = JSON.parse(dataJson);
+    } catch (parseError) {
+        logger.error(`[Report Gen] Failed to parse dataJson string: ${parseError.message}`);
+        throw new Error('Invalid JSON data provided for report generation.');
     }
 
     const startTime = Date.now();
-    logger.info('Generating React report code...');
+    logger.info('[Report Gen] Generating React report code with data:', {
+        userId,
+        // Log keys from the *parsed* object
+        dataKeys: Object.keys(parsedDataJson)
+    });
 
     // --- System Prompt for React Report Code Generation ---
     // Added detailed instructions and component import list
@@ -389,7 +419,7 @@ Your task is to generate a **single, self-contained React functional component**
 **Input Data Structure:**
 The component will receive a prop named 'reportData' which is a JSON object containing the analysis results. The structure of 'reportData' is:
 \`\`\`json
-${JSON.stringify(dataJson, null, 2)}
+${JSON.stringify(parsedDataJson, null, 2)} // Use parsed data for prompt
 \`\`\`
 
 **Analysis Summary (Context):**
