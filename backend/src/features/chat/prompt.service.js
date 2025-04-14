@@ -264,6 +264,7 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
     4.  **Filters invalid data:** After mapping, filter the processed data array to include ONLY rows where the parsed date is NOT \`null\` (if dates are relevant to this analysis).
     5.  Performs the analysis using the filtered data to achieve the goal: "${analysisGoal}"
     6.  Creates a well-structured JSON result object that BEST represents the findings of your analysis. Structure this object in the most logical way to organize the specific insights and data points relevant to addressing the analysis goal. Use clear, descriptive keys and appropriate data types. Include all necessary information to make the results complete and meaningful.
+        * **IMPORTANT:** DO NOT include metadata or processing statistics in the results (like "rowsProcessed", "rowsSkipped", "inputDataLength", etc.). Focus exclusively on analysis findings, not on information about the data processing itself.
     7.  Calls \`sendResult(result)\` with your structured result object.
     8.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
 
@@ -414,6 +415,7 @@ ${analysisSummary}
          - Multi-metric comparisons → Composed charts or grouped bars
          - Single KPI values → KPI cards with appropriate formatting
      *   For any data with significant depth or complexity, consider tables for detailed exploration
+     *   **IMPORTANT EXCLUSION:** DO NOT include any metadata or processing statistics like "Rows Processed", "Rows Skipped", "Input Data Length", or similar diagnostics in the report. Focus exclusively on the actual analysis results and insights rather than information about how the data was processed.
 5.  **Data Handling:** Safely access data from the \`reportData\` prop using optional chaining. Handle potential missing data gracefully (e.g., display 'N/A' or a placeholder message). Include helper functions for formatting (e.g., \`formatCurrency\`, \`formatPercentage\`, \`formatDate\`, \`formatNumber\`).
 6.  **Structure:** Organize the report into logical sections using \`<div>\` elements with appropriate titles (\`<h2>\`, \`<h3>\`). The exact sections will depend on the provided data structure, but typically should include:
      *   Executive Summary (using the provided \`analysisSummary\`)
