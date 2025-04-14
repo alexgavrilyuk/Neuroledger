@@ -22,12 +22,11 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
   const [error, setError] = useState(null);
   const [columns, setColumns] = useState([]);
   const [descriptions, setDescriptions] = useState({});
-  const [editingDescription, setEditingDescription] = useState(null);
-  const [tempDescription, setTempDescription] = useState('');
   const [datasetContext, setDatasetContext] = useState('');
-  const [isContextEditing, setIsContextEditing] = useState(false);
   const [tempContext, setTempContext] = useState('');
-  const [allSaved, setAllSaved] = useState(true); // Track if there are unsaved changes
+  const [tempDescriptions, setTempDescriptions] = useState({});
+  const [allSaved, setAllSaved] = useState(true);
+  const [isEditMode, setIsEditMode] = useState(false);
 
   // Fetch dataset schema and existing descriptions
   useEffect(() => {
@@ -59,53 +58,25 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
     }
   }, [datasetId]);
 
-  const handleEditDescription = (columnName) => {
-    setEditingDescription(columnName);
-    setTempDescription(descriptions[columnName] || '');
+  const handleEnterEditMode = () => {
+    setIsEditMode(true);
+    setTempContext(datasetContext);
+    setTempDescriptions({...descriptions});
     setAllSaved(false);
   };
 
   const handleCancelEdit = () => {
-    setEditingDescription(null);
-    setTempDescription('');
-    // Check if all other edits are saved
-    if (!isContextEditing) {
-      setAllSaved(true);
-    }
+    setIsEditMode(false);
+    setTempContext('');
+    setTempDescriptions({});
+    setAllSaved(true);
   };
 
-  const handleSaveDescription = (columnName) => {
-    setDescriptions(prev => ({
+  const handleUpdateTempDescription = (columnName, value) => {
+    setTempDescriptions(prev => ({
       ...prev,
-      [columnName]: tempDescription
+      [columnName]: value
     }));
-    setEditingDescription(null);
-    setTempDescription('');
-    // Still not fully saved until we save to server
-    setAllSaved(false);
-  };
-
-  const handleEditContext = () => {
-    setIsContextEditing(true);
-    setTempContext(datasetContext);
-    setAllSaved(false);
-  };
-
-  const handleCancelContextEdit = () => {
-    setIsContextEditing(false);
-    setTempContext('');
-    // Check if all other edits are saved
-    if (!editingDescription) {
-      setAllSaved(true);
-    }
-  };
-
-  const handleSaveContext = () => {
-    setDatasetContext(tempContext);
-    setIsContextEditing(false);
-    setTempContext('');
-    // Still not fully saved until we save to server
-    setAllSaved(false);
   };
 
   const handleSaveAll = async () => {
@@ -114,12 +85,15 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
       setError(null);
 
       const response = await apiClient.put(`/datasets/${datasetId}`, {
-        columnDescriptions: descriptions,
-        description: datasetContext
+        columnDescriptions: tempDescriptions,
+        description: tempContext
       });
 
       if (response.data.status === 'success') {
         logger.info('Successfully saved dataset context and column descriptions');
+        setDescriptions(tempDescriptions);
+        setDatasetContext(tempContext);
+        setIsEditMode(false);
         setAllSaved(true);
         if (onSaveSuccess) {
           onSaveSuccess(response.data.data);
@@ -182,18 +156,37 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
             <span className="font-medium">Dataset Context and Column Descriptions</span>
           </div>
 
-          {/* Save button in header for quick access */}
-          {!allSaved && (
+          {/* Global Edit/Save button */}
+          {!isEditMode ? (
             <Button
-              onClick={handleSaveAll}
-              disabled={saving}
-              isLoading={saving}
+              onClick={handleEnterEditMode}
               size="sm"
-              leftIcon={CheckIcon}
+              leftIcon={PencilIcon}
               className="shadow-soft-md hover:shadow-soft-lg"
             >
-              Save Changes
+              Edit All
             </Button>
+          ) : (
+            <div className="flex space-x-2">
+              <Button
+                onClick={handleCancelEdit}
+                size="sm"
+                variant="ghost"
+                leftIcon={XMarkIcon}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSaveAll}
+                disabled={saving}
+                isLoading={saving}
+                size="sm"
+                leftIcon={CheckIcon}
+                className="shadow-soft-md hover:shadow-soft-lg"
+              >
+                Save All
+              </Button>
+            </div>
           )}
         </div>
       </Card.Header>
@@ -219,36 +212,6 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
                 </div>
                 <h3 className="text-base font-medium text-gray-800 dark:text-gray-200">Dataset Context</h3>
               </div>
-
-              {!isContextEditing ? (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={handleEditContext}
-                  leftIcon={PencilIcon}
-                >
-                  Edit
-                </Button>
-              ) : (
-                <div className="flex space-x-2">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleCancelContextEdit}
-                    leftIcon={XMarkIcon}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    onClick={handleSaveContext}
-                    leftIcon={CheckIcon}
-                  >
-                    Save
-                  </Button>
-                </div>
-              )}
             </div>
 
             <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
@@ -257,14 +220,14 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
           </div>
 
           <div className="p-4 bg-white dark:bg-gray-800">
-            {!isContextEditing ? (
+            {!isEditMode ? (
               datasetContext ? (
                 <div className="text-gray-700 dark:text-gray-300 whitespace-pre-line p-3 bg-gray-50 dark:bg-gray-750 rounded-lg">
                   {datasetContext}
                 </div>
               ) : (
                 <div className="text-gray-400 dark:text-gray-500 italic p-3 bg-gray-50 dark:bg-gray-750 rounded-lg">
-                  No context provided. Click Edit to add a description of this dataset.
+                  No context provided. Click Edit All to add a description of this dataset.
                 </div>
               )
             ) : (
@@ -298,14 +261,15 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
               {columns.map((column) => {
                 const columnName = typeof column === 'object' ? column.name : column;
                 const columnType = typeof column === 'object' && column.type ? column.type : 'unknown';
-                const hasDescription = !!descriptions[columnName];
+                const hasDescription = !isEditMode ? !!descriptions[columnName] : !!tempDescriptions[columnName];
+                const description = isEditMode ? tempDescriptions[columnName] || '' : descriptions[columnName] || '';
 
                 return (
                   <div
                     key={columnName}
                     className={`
                       rounded-xl border transition-all duration-200 overflow-hidden shadow-soft-md dark:shadow-soft-dark-md
-                      ${editingDescription === columnName
+                      ${isEditMode
                         ? 'border-blue-300 dark:border-blue-700 shadow-soft-lg dark:shadow-soft-dark-lg'
                         : 'border-gray-200 dark:border-gray-700'}
                       ${hasDescription
@@ -330,44 +294,13 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
                           </span>
                         </div>
                       </div>
-
-                      {editingDescription !== columnName ? (
-                        <Button
-                          size="sm"
-                          variant={hasDescription ? "ghost" : "outline"}
-                          onClick={() => handleEditDescription(columnName)}
-                          leftIcon={PencilIcon}
-                          className={!hasDescription ? "animate-pulse-subtle" : ""}
-                        >
-                          {descriptions[columnName] ? 'Edit' : 'Add Description'}
-                        </Button>
-                      ) : (
-                        <div className="flex space-x-2">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={handleCancelEdit}
-                            leftIcon={XMarkIcon}
-                          >
-                            Cancel
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="primary"
-                            onClick={() => handleSaveDescription(columnName)}
-                            leftIcon={CheckIcon}
-                          >
-                            Save
-                          </Button>
-                        </div>
-                      )}
                     </div>
 
                     <div className="p-3">
-                      {editingDescription === columnName ? (
+                      {isEditMode ? (
                         <Input
-                          value={tempDescription}
-                          onChange={(e) => setTempDescription(e.target.value)}
+                          value={tempDescriptions[columnName] || ''}
+                          onChange={(e) => handleUpdateTempDescription(columnName, e.target.value)}
                           placeholder="Describe what this column represents, its data format, and its significance..."
                           className="w-full transition-all duration-300"
                         />
@@ -390,19 +323,21 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
           )}
         </div>
 
-        {/* Save button - Enhanced with better feedback */}
-        <div className="flex justify-end mt-6">
-          <Button
-            onClick={handleSaveAll}
-            disabled={saving || allSaved}
-            isLoading={saving}
-            leftIcon={CheckIcon}
-            variant="primary"
-            className="shadow-soft-md hover:shadow-soft-lg transition-all duration-200"
-          >
-            {saving ? 'Saving Changes...' : allSaved ? 'All Changes Saved' : 'Save All Changes'}
-          </Button>
-        </div>
+        {/* Save button - Only shown in edit mode for mobile users who might miss the header button */}
+        {isEditMode && (
+          <div className="flex justify-end mt-6">
+            <Button
+              onClick={handleSaveAll}
+              disabled={saving}
+              isLoading={saving}
+              leftIcon={CheckIcon}
+              variant="primary"
+              className="shadow-soft-md hover:shadow-soft-lg transition-all duration-200"
+            >
+              {saving ? 'Saving Changes...' : 'Save All Changes'}
+            </Button>
+          </div>
+        )}
       </Card.Body>
     </Card>
   );

@@ -15,6 +15,7 @@
     "date-fns": "^4.1.0",
     "dompurify": "^3.1.6",
     "firebase": "^11.5.0",
+    "framer-motion": "^12.7.2",
     "lodash": "^4.17.21",
     "papaparse": "^5.4.1",
     "react": "^19.0.0",
