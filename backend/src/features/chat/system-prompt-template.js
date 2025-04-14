@@ -71,30 +71,76 @@ const generateAgentSystemPrompt = (contextParams) => {
   if (analysisResult && typeof analysisResult === 'object') {
     formattedAnalysisResult = '**Actual Analysis Results (MUST USE for Summarization/Report Args):**\n';
     try {
-      // Extract key figures safely using optional chaining
-      const overview = analysisResult.summary?.overview;
-      const profitability = analysisResult.kpis?.profitability;
-      const budgetKpis = analysisResult.kpis?.budgetPerformance;
-      const expenseRatioKpis = analysisResult.kpis?.expenseRatio;
-
-      if (overview) {
-        formattedAnalysisResult += `- Total Income: ${formatCurrency(overview.totalIncome)}\n`;
-        formattedAnalysisResult += `- Total Expenses: ${formatCurrency(overview.totalExpenses)}\n`;
-        formattedAnalysisResult += `- Net Profit: ${formatCurrency(overview.netProfit)}\n`;
-        formattedAnalysisResult += `- Profit Margin: ${formatPercentage(overview.profitMargin, 1)}\n`;
+      // MODIFIED: Handle arbitrary JSON structure instead of assuming specific financial structure
+      // Use a recursive approach to format key-value pairs from the JSON object
+      const formatJsonValue = (value) => {
+        if (value === null || value === undefined) return 'N/A';
+        if (typeof value === 'number') {
+          // If it looks like a percentage (between 0 and 1 or ends with %)
+          if ((value >= 0 && value <= 1 && `${value}`.includes('.')) || 
+              (typeof value === 'string' && value.endsWith('%'))) {
+            return formatPercentage(value, 1);
+          }
+          // Otherwise treat as currency/number
+          return formatCurrency(value);
+        }
+        if (typeof value === 'string') return value;
+        if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+        if (Array.isArray(value)) {
+          if (value.length === 0) return '[]';
+          if (value.length <= 3) {
+            // Format small arrays inline
+            return `[${value.map(item => formatJsonValue(item)).join(', ')}]`;
+          }
+          // For larger arrays, just show count
+          return `Array with ${value.length} items`;
+        }
+        if (typeof value === 'object') {
+          // For objects, indicate it's an object with its keys
+          const keys = Object.keys(value);
+          if (keys.length === 0) return '{}';
+          if (keys.length <= 3) {
+            return `{ ${keys.join(', ')} }`;
+          }
+          return `Object with ${keys.length} properties`;
+        }
+        return String(value);
+      };
+      
+      // Build formatted result by traversing the top-level properties
+      const formatObject = (obj, prefix = '', maxDepth = 1, currentDepth = 0) => {
+        let result = '';
+        for (const key in obj) {
+          if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            const value = obj[key];
+            const formattedKey = `${prefix}${key}`;
+            
+            // Handle different value types
+            if (typeof value === 'object' && value !== null && !Array.isArray(value) && currentDepth < maxDepth) {
+              // For objects, recurse with indentation if not at max depth
+              result += `- ${formattedKey}:\n`;
+              const nestedResult = formatObject(value, '  ', maxDepth, currentDepth + 1);
+              if (nestedResult.trim() === '') {
+                result += `  (Empty object)\n`;
+              } else {
+                result += nestedResult;
+              }
+            } else {
+              // For primitive values or max depth reached, format directly
+              result += `- ${formattedKey}: ${formatJsonValue(value)}\n`;
+            }
+          }
+        }
+        return result;
+      };
+      
+      // Format the analysis result with moderate depth for proper summarization
+      const formatted = formatObject(analysisResult, '', 2);
+      if (formatted.trim() === '') {
+        formattedAnalysisResult += '(Analysis result is empty or contains no data)\n';
+      } else {
+        formattedAnalysisResult += formatted;
       }
-      if (profitability) {
-        formattedAnalysisResult += `- Return on Expense: ${formatPercentage(profitability.returnOnExpense, 1)}\n`;
-      }
-      if (budgetKpis) {
-        formattedAnalysisResult += `- Income vs Budget: ${formatPercentage(budgetKpis.incomePerformance, 2)}\n`;
-        formattedAnalysisResult += `- Expenses vs Budget: ${formatPercentage(budgetKpis.expensePerformance, 2)}\n`;
-        formattedAnalysisResult += `- Overall Budget Variance: ${formatCurrency(budgetKpis.overallBudgetVariance)}\n`;
-      }
-       if (expenseRatioKpis) {
-         formattedAnalysisResult += `- Expense-to-Income Ratio: ${formatPercentage(expenseRatioKpis.expenseToIncomeRatio, 2)}\n`;
-       }
-      // Add more key figures if needed
     } catch (e) {
       console.error('[System Prompt] Error formatting analysisResult:', e);
       formattedAnalysisResult = '**Actual Analysis Results:** Error formatting results.\n';

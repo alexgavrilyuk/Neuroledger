@@ -233,45 +233,7 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
     logger.info('Generating analysis Node.js code for goal: \\"%s...\\" using %s', analysisGoal.substring(0, 50), provider);
 
     // Construct the system prompt for ANALYSIS code generation
-    // ADDED: Explicit output structure definition
-    const requiredOutputStructure = `{
-      summary: {
-        dataRange: { start: string | null, end: string | null, totalDays: number | null },
-        overview: { totalIncome: number, totalExpenses: number, netProfit: number, profitMargin: number }
-      },
-      incomeVsExpenses: {
-        overall: { totalIncome: number, totalExpenses: number, netProfit: number },
-        monthly: [{ period: string, income: number, expenses: number, netProfit: number, profitMargin: number }],
-        quarterly: [{ period: string, income: number, expenses: number, netProfit: number, profitMargin: number }],
-        yearly: [{ period: string, income: number, expenses: number, netProfit: number, profitMargin: number }]
-      },
-      budgetPerformance: {
-        overall: { actualIncome: number, budgetedIncome: number, incomeVariance: number, incomeVariancePercentage: number, actualExpenses: number, budgetedExpenses: number, expensesVariance: number, expensesVariancePercentage: number },
-        monthly: [{ period: string, actualIncome: number, budgetedIncome: number, incomeVariance: number, incomeVariancePercentage: number, actualExpenses: number, budgetedExpenses: number, expensesVariance: number, expensesVariancePercentage: number }],
-        quarterly: [{ period: string, actualIncome: number, budgetedIncome: number, incomeVariance: number, incomeVariancePercentage: number, actualExpenses: number, budgetedExpenses: number, expensesVariance: number, expensesVariancePercentage: number }]
-      },
-      expenseBreakdown: {
-        overall: [{ category: string, amount: number, percentage: number }],
-        monthly: [{ period: string, totalExpenses: number, categories: [{ category: string, amount: number, percentage: number }] }],
-        quarterly: [{ period: string, totalExpenses: number, categories: [{ category: string, amount: number, percentage: number }] }]
-      },
-      trends: {
-        income: { monthly: [{ period: string, value: number }] },
-        expenses: { monthly: [{ period: string, value: number }] },
-        netProfit: { monthly: [{ period: string, value: number }] }
-      },
-      kpis: {
-        profitability: { netProfit: number, profitMargin: number, returnOnExpense: number },
-        budgetPerformance: { incomePerformance: number, expensePerformance: number, overallBudgetVariance: number },
-        expenseRatio: { topExpenseCategories: [{ category: string, percentage: number }], expenseToIncomeRatio: number }
-      },
-      anomalies: {
-        income: [{ period: string, value: number, average?: number, deviation?: number, type?: string, description?: string }],
-        expenses: [{ period: string, value: number, average?: number, deviation?: number, type?: string, description?: string }],
-        categories: [{ category: string, period: string, value: number, average?: number, deviation?: number, type?: string, description?: string }]
-      }
-    }`;
-
+    // MODIFIED: Removed the rigid required output structure and related instructions
     const analysisCodeGenSystemPrompt = `You are an expert Node.js developer writing analysis code for a VERY RESTRICTED sandbox (Node.js vm.runInNewContext).
 
     CONTEXT IN SANDBOX:
@@ -299,22 +261,19 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
     1.  Takes the \`inputData\` array of objects.
     2.  **Includes robust date parsing:** Create a helper function (e.g., \`parseDateRobustly\`) that attempts to parse date strings. If the input is empty, null, or cannot be parsed into a valid Date object (even after trying common formats like YYYY-MM-DD, MM/DD/YYYY), the helper function MUST return \`null\`. DO NOT default to the epoch date (1970).
     3.  Processes \`inputData\`: Map over \`inputData\`, use the robust date parser, and parse numeric values carefully. 
-    4.  **Filters invalid data:** After mapping, filter the processed data array to include ONLY rows where the parsed date is NOT \`null\`.
+    4.  **Filters invalid data:** After mapping, filter the processed data array to include ONLY rows where the parsed date is NOT \`null\` (if dates are relevant to this analysis).
     5.  Performs the analysis using the filtered data to achieve the goal: "${analysisGoal}"
-    6.  Constructs a result object that **STRICTLY ADHERES** to the REQUIRED OUTPUT STRUCTURE specified below. Include all keys, even if the value is null, 0, or an empty array, unless it is truly optional (like fields within anomalies). Use explicit key-value pairs; DO NOT use shorthand property names.
-    7.  Calls \`sendResult(result)\` with the structured result object.
+    6.  Creates a well-structured JSON result object that BEST represents the findings of your analysis. Structure this object in the most logical way to organize the specific insights and data points relevant to addressing the analysis goal. Use clear, descriptive keys and appropriate data types. Include all necessary information to make the results complete and meaningful.
+    7.  Calls \`sendResult(result)\` with your structured result object.
     8.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
-
-    **REQUIRED OUTPUT STRUCTURE (for the object passed to sendResult):**
-    ${requiredOutputStructure}
 
     OUTPUT REQUIREMENTS:
     *   Provide ONLY the raw Node.js code string, starting with \`try { ... } catch (err) { ... }\`. No markdown.
     *   The code MUST operate directly on the \`inputData\` variable. DO NOT include any CSV parsing logic.
-    *   The object passed to \`sendResult()\` MUST match the REQUIRED OUTPUT STRUCTURE exactly.`;
+    *   The object passed to \`sendResult()\` should be a well-structured JSON object that BEST represents your analysis findings for the specific user goal and dataset.`;
 
     try {
-        const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the goal and schema, ensuring the output strictly matches the required structure."}];
+        const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the goal and schema, creating a well-structured JSON result that best represents the findings of the analysis."}];
         
         // --- MODIFIED: Prepare API options - ADDED OpenAI ---
         const apiOptions = {
@@ -424,14 +383,14 @@ const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
         dataKeys: Object.keys(parsedDataJson)
     });
 
-    // --- System Prompt for React Report Code Generation ---
-    // Added detailed instructions and component import list
+    // --- MODIFIED: System Prompt for React Report Code Generation ---
+    // Updated to handle arbitrary JSON structures
     const systemPrompt = `\
 You are an expert React developer specializing in data visualization using the Recharts library.
 Your task is to generate a **single, self-contained React functional component** named 'ReportComponent' based on the provided analysis data and summary.
 
 **Input Data Structure:**
-The component will receive a prop named 'reportData' which is a JSON object containing the analysis results. The structure of 'reportData' is:
+The component will receive a prop named 'reportData' which is a JSON object containing analysis results with an ARBITRARY structure. You must INTELLIGENTLY ANALYZE this structure to create appropriate visualizations. The structure of 'reportData' provided for this specific request is:
 \`\`\`json
 ${JSON.stringify(parsedDataJson, null, 2)} // Use parsed data for prompt
 \`\`\`
@@ -443,12 +402,30 @@ ${analysisSummary}
 1.  **Component Definition:** Define a single functional component: \`function ReportComponent({ reportData })\`.
 2.  **React & Recharts:** Assume React and ReactDOM are available globally. Import necessary Recharts components using destructuring **at the top of the function**:\n    \`\`\`javascript\n    const { createElement } = React; // Use createElement for JSX elements\n    const { ResponsiveContainer, LineChart, BarChart, PieChart, ComposedChart, AreaChart, Line, Bar, Pie, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, LabelList } = Recharts; // MUST include all used components here!\n    \`\`\`
 3.  **Styling:** Use inline styles ONLY. Define a \`styles\` object containing style objects for different elements (e.g., \`reportContainer\`, \`section\`, \`kpiCard\`, \`chartContainer\`). Use basic, clean styling (e.g., font sizes, padding, margins, borders, background colors).
-4.  **Data Handling:** Safely access data from the \`reportData\` prop (e.g., \`reportData?.summary?.overview?.totalIncome\`). Handle potential missing data gracefully (e.g., display 'N/A' or a placeholder message). Include helper functions for formatting (e.g., \`formatCurrency\`, \`formatPercentage\`).
-5.  **Structure:** Organize the report into logical sections using \`<div>\` elements with appropriate titles (\`<h2>\`, \`<h3>\`). Key sections might include:\n    *   Executive Summary (using the provided \`analysisSummary\`)\n    *   Key Performance Indicators (KPIs)\n    *   Income vs. Expenses Analysis (using charts)\n    *   Budget Performance (using charts/tables)\n    *   Expense Breakdown (using charts/tables)\n    *   Trend Analysis (using charts like Line or Area charts)\n    *   Anomalies (if any data is provided, otherwise state none found)
-6.  **Charts:** Use appropriate Recharts components (LineChart, BarChart, PieChart, AreaChart, ComposedChart) to visualize the data. Ensure charts are responsive using \`ResponsiveContainer\`. Use clear labels, tooltips, and legends.\n    *   **SVG Definitions (<defs>):** To define elements like gradients for charts (e.g., \`AreaChart\`), place the SVG \`<defs>\` element **directly inside** the chart component. Use \`createElement('defs', ...)\` and \`createElement('linearGradient', ...)\` correctly nested within the chart element structure. **Do NOT attempt to import or define \`defs\` as a variable or component.** Example:\n      \`\`\`javascript\n      createElement(AreaChart, { /* ...props */ },\n          createElement('defs', null,\n              createElement('linearGradient', { id: 'colorUv', x1: '0', y1: '0', x2: '0', y2: '1' },\n                  createElement('stop', { offset: '5%', stopColor: '#8884d8', stopOpacity: 0.8 }),\n                  createElement('stop', { offset: '95%', stopColor: '#8884d8', stopOpacity: 0 })\n              )\n          ),\n          /* ... other chart elements like XAxis, YAxis, Tooltip, Area ... */\n          createElement(Area, { /* ...props */ fill: 'url(#colorUv)' })\n      )\n      \`\`\`\n    *   **Axis Formatting:** For Y-axis ticks (using \`tickFormatter\`), use a simple number formatting function (like the \`formatNumber\` helper) to display numerical values. **Do NOT use the \`formatCurrency\` function for axis ticks**, as it can cause errors if the currency symbol is removed incorrectly.
-7.  **Tables:** If displaying tabular data (e.g., monthly breakdowns), use basic HTML table elements (\`<table>\`, \`<thead>\`, \`<tbody>\`, \`<tr>\`, \`<th>\`, \`<td>\`) styled using the \`styles\` object.
-8.  **Code Output:** Output ONLY the JavaScript code for the \`ReportComponent\` function. Do NOT wrap it in Markdown code fences (\`\`\`javascript ... \`\`\`). Do NOT include any other text, explanations, or imports outside the function body. The entire output must be executable JavaScript defining the component.
-9.  **Error Handling:** The component itself should handle potential missing fields in \`reportData\` gracefully. Helper functions should also handle invalid inputs (e.g., non-numeric values for formatting).
+4.  **Data Analysis & Visualization:**
+     *   **CRITICAL:** First, analyze the 'reportData' structure to identify:
+         - What are the main data categories or dimensions? (e.g., time periods, geographical regions, product categories)
+         - What are the main metrics or values? (e.g., revenue, count, percentage)
+         - What type of data relationships are present? (e.g., time series, comparisons, breakdowns)
+     *   Based on your analysis, select the most appropriate chart types for each data segment:
+         - Time series data → Line/Area charts
+         - Category comparisons → Bar/Column charts
+         - Part-to-whole relationships → Pie/Donut charts
+         - Multi-metric comparisons → Composed charts or grouped bars
+         - Single KPI values → KPI cards with appropriate formatting
+     *   For any data with significant depth or complexity, consider tables for detailed exploration
+5.  **Data Handling:** Safely access data from the \`reportData\` prop using optional chaining. Handle potential missing data gracefully (e.g., display 'N/A' or a placeholder message). Include helper functions for formatting (e.g., \`formatCurrency\`, \`formatPercentage\`, \`formatDate\`, \`formatNumber\`).
+6.  **Structure:** Organize the report into logical sections using \`<div>\` elements with appropriate titles (\`<h2>\`, \`<h3>\`). The exact sections will depend on the provided data structure, but typically should include:
+     *   Executive Summary (using the provided \`analysisSummary\`)
+     *   Key metrics or highlights (if present in the data)
+     *   Main visualizations relevant to the analysis goal
+     *   Any detailed breakdowns or secondary analyses
+     *   Anomalies or notable findings (if present in the data)
+7.  **Charts:** Use appropriate Recharts components to visualize the data. Ensure charts are responsive using \`ResponsiveContainer\`. Use clear labels, tooltips, and legends.\n    *   **SVG Definitions (<defs>):** To define elements like gradients for charts (e.g., \`AreaChart\`), place the SVG \`<defs>\` element **directly inside** the chart component. Use \`createElement('defs', ...)\` and \`createElement('linearGradient', ...)\` correctly nested within the chart element structure. **Do NOT attempt to import or define \`defs\` as a variable or component.** Example:\n      \`\`\`javascript\n      createElement(AreaChart, { /* ...props */ },\n          createElement('defs', null,\n              createElement('linearGradient', { id: 'colorUv', x1: '0', y1: '0', x2: '0', y2: '1' },\n                  createElement('stop', { offset: '5%', stopColor: '#8884d8', stopOpacity: 0.8 }),\n                  createElement('stop', { offset: '95%', stopColor: '#8884d8', stopOpacity: 0 })\n              )\n          ),\n          /* ... other chart elements like XAxis, YAxis, Tooltip, Area ... */\n          createElement(Area, { /* ...props */ fill: 'url(#colorUv)' })\n      )\n      \`\`\`\n    *   **Axis Formatting:** For Y-axis ticks (using \`tickFormatter\`), use a simple number formatting function (like the \`formatNumber\` helper) to display numerical values. **Do NOT use the \`formatCurrency\` function for axis ticks**, as it can cause errors if the currency symbol is removed incorrectly.
+8.  **Tables:** If displaying tabular data, use basic HTML table elements (\`<table>\`, \`<thead>\`, \`<tbody>\`, \`<tr>\`, \`<th>\`, \`<td>\`) styled using the \`styles\` object.
+9.  **Code Output:** Output ONLY the JavaScript code for the \`ReportComponent\` function. Do NOT wrap it in Markdown code fences (\`\`\`javascript ... \`\`\`). Do NOT include any other text, explanations, or imports outside the function body. The entire output must be executable JavaScript defining the component.
+10. **Error Handling:** The component itself should handle potential missing fields in \`reportData\` gracefully. Helper functions should also handle invalid inputs (e.g., non-numeric values for formatting).
+11. **Print Styling:** Include CSS for print media queries as shown in the example below.
 
 **Example Structure (Conceptual):**
 \`\`\`javascript
@@ -457,33 +434,77 @@ function ReportComponent({ reportData }) {
     const { /* Recharts components... */ Area, Line, Bar, Pie, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, AreaChart /* etc. */ } = Recharts; // Ensure ALL needed components are here!
 
     const styles = { /* ... */ };
+    
+    // Helper functions for formatting
     const formatCurrency = (value) => { /* ... */ };
-    // ... other helpers
+    const formatPercentage = (value) => { /* ... */ };
+    const formatNumber = (value) => { /* ... */ };
+    
+    // Set up print styling
+    const printStyles = \`
+      @media print {
+        .chart-container, .kpi-card {
+          page-break-inside: avoid !important;
+        }
+        h2, h3 {
+          page-break-after: avoid !important;
+        }
+      }
+    \`;
 
-    const renderKPIs = () => { /* ... */ };
-    const renderIncomeExpenseChart = () => { /* ... example using defs */ 
-        return createElement(AreaChart, { /* chart props */ },
-             createElement('defs', null, 
-                createElement('linearGradient', { id: 'gradient1', /* gradient props */ }, /* stop elements */ )
-             ),
-             /* other chart elements */
-             createElement(Area, { /* area props */ fill: 'url(#gradient1)' })
-        );
+    // React component creation based on data analysis
+    const renderMainMetrics = () => {
+        // Example of intelligently determining what to render based on data structure
+        if (reportData.metrics || reportData.summary || reportData.overview) {
+            const metricsSource = reportData.metrics || reportData.summary || reportData.overview;
+            // Render appropriate KPI cards based on what's available
+            return createElement('div', { className: 'kpi-container', style: styles.kpiContainer },
+                /* Create KPI cards based on available metrics */
+            );
+        }
+        return null; // Don't render if no metrics found
     };
-    // ... other render functions for sections
+
+    const renderMainChart = () => {
+        // Example of intelligently choosing chart type based on data structure
+        if (reportData.timeSeries || (reportData.data && Array.isArray(reportData.data) && reportData.data[0]?.date)) {
+            // Render time series chart for time-based data
+            return createElement('div', { className: 'chart-container', style: styles.chartContainer },
+                createElement('h3', null, 'Trend Analysis'),
+                createElement(ResponsiveContainer, { width: '100%', height: 300 },
+                    /* Time series chart using LineChart or AreaChart */
+                )
+            );
+        } else if (reportData.categories || reportData.breakdown || (reportData.data && reportData.data[0]?.category)) {
+            // Render category breakdown chart
+            return createElement('div', { className: 'chart-container', style: styles.chartContainer },
+                createElement('h3', null, 'Category Analysis'),
+                createElement(ResponsiveContainer, { width: '100%', height: 300 },
+                    /* Category chart using BarChart or PieChart */
+                )
+            );
+        }
+        // Continue with more intelligent chart selection logic
+        return null;
+    };
 
     return createElement('div', { style: styles.reportContainer },
-        createElement('h1', null, 'Financial Analysis Report'),
-        renderKPIs(),
-        renderIncomeExpenseChart(),
-        // ... other sections
+        createElement('style', null, printStyles),
+        createElement('h1', null, 'Analysis Report'),
+        createElement('div', { style: styles.summarySection },
+            createElement('h2', null, 'Executive Summary'),
+            createElement('p', null, analysisSummary)
+        ),
+        renderMainMetrics(),
+        renderMainChart(),
+        // Other sections based on data structure
     );
 }
 \`\`\`
-Focus on creating a functional, well-structured, and visually clear report component based *strictly* on the provided \`reportData\` and \`analysisSummary\`.`;
+Focus on creating a functional, well-structured, and visually clear report component based on your intelligent analysis of the provided \`reportData\` and \`analysisSummary\`.`;
 
     try {
-        const messages = [{ role: "user", content: "Generate the robust React component code for the report based on the summary and the detailed data structure provided in the system prompt, following all requirements, especially data validation and type checking using the correct nested paths before rendering."}];
+        const messages = [{ role: "user", content: "Generate a robust React component that intelligently analyzes the arbitrary JSON structure provided and creates appropriate visualizations. The code should handle any data structure gracefully with proper type checking and error handling."}];
         // Use a capable model, maybe Sonnet is sufficient for this?
         const apiOptions = {
             model: modelToUse,
