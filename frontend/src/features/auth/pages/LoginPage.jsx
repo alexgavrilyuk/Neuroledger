@@ -1,5 +1,5 @@
 // frontend/src/features/auth/pages/LoginPage.jsx
-// ** UPDATED FILE - Add display for signup success message **
+// ** UPDATED MODERN DESIGN **
 import React, { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom'; // Import useLocation
 import LoginForm from '../components/LoginForm';
@@ -13,29 +13,33 @@ const LoginPage = () => {
   useEffect(() => {
     if (location.state?.message) {
       setSuccessMessage(location.state.message);
-      // Optional: Clear the state after displaying the message
-      // window.history.replaceState({}, document.title) // This clears state but might be too aggressive
+      
+      // Clear the message after 5 seconds
+      const timer = setTimeout(() => {
+        setSuccessMessage('');
+      }, 5000);
+      
+      return () => clearTimeout(timer);
     }
   }, [location.state]);
 
 
   return (
-    // This will be rendered inside the CenteredLayout's Outlet
     <>
-        {/* Display success message if present */}
-        {successMessage && (
-            <div className="mb-4 rounded-md bg-green-50 dark:bg-green-900/30 p-4 border border-green-200 dark:border-green-600/50">
-                <div className="flex">
-                    <div className="flex-shrink-0">
-                    <CheckCircleIcon className="h-5 w-5 text-green-400 dark:text-green-500" aria-hidden="true" />
-                    </div>
-                    <div className="ml-3">
-                    <p className="text-sm font-medium text-green-800 dark:text-green-200">{successMessage}</p>
-                    </div>
-                </div>
+      {/* Display success message with improved styling and animation */}
+      {successMessage && (
+        <div className="mb-6 rounded-lg bg-green-50 dark:bg-green-900/20 p-4 border border-green-200 dark:border-green-600/50 shadow-sm animate-slideInBottom">
+          <div className="flex items-center">
+            <div className="flex-shrink-0">
+              <CheckCircleIcon className="h-5 w-5 text-green-500 dark:text-green-400" aria-hidden="true" />
             </div>
-        )}
-        <LoginForm />
+            <div className="ml-3">
+              <p className="text-sm font-medium text-green-800 dark:text-green-200">{successMessage}</p>
+            </div>
+          </div>
+        </div>
+      )}
+      <LoginForm />
     </>
   );
 };

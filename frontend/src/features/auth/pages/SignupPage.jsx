@@ -1,12 +1,10 @@
 // frontend/src/features/auth/pages/SignupPage.jsx
+// ** UPDATED MODERN DESIGN **
 import React from 'react';
 import SignupForm from '../components/SignupForm';
 
 const SignupPage = () => {
-  return (
-     // This will be rendered inside the CenteredLayout's Outlet
-    <SignupForm />
-  );
+  return <SignupForm />;
 };
 
 export default SignupPage;

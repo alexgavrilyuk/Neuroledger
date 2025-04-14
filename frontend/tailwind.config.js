@@ -67,6 +67,32 @@ export default {
         '102': '1.02',
         '98': '0.98',
       },
+      // Add custom animations
+      animation: {
+        'fadeIn': 'fadeIn 0.5s ease-in-out',
+        'slideInBottom': 'slideInBottom 0.5s ease-out',
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+      },
+      // Define keyframes for animations
+      keyframes: {
+        fadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        slideInBottom: {
+          '0%': { transform: 'translateY(10px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
+      },
+      // Add background patterns
+      backgroundImage: {
+        'grid-white': `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(255 255 255 / 0.05)'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e")`,
+        'grid-black': `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(0 0 0 / 0.05)'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e")`,
+      },
+      // Add blur radius values
+      blur: {
+        '4xl': '128px',
+      },
     },
   },
   plugins: [
@@ -125,6 +151,13 @@ export default {
           'font-size': '3em',
           'line-height': '0.8',
           'padding-right': '0.1em',
+        },
+        // Add animation delay utility classes
+        '.animation-delay-3000': {
+          'animation-delay': '3000ms',
+        },
+        '.animation-delay-5000': {
+          'animation-delay': '5000ms',
         },
       };
       addUtilities(newUtilities, ['responsive', 'hover', 'dark']);
