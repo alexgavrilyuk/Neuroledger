@@ -1,17 +1,18 @@
+// backend/src/features/chat/agent.service.js
 const logger = require('../../shared/utils/logger');
 const datasetService = require('../datasets/dataset.service');
 const promptService = require('./prompt.service');
 const PromptHistory = require('./prompt.model');
-const { getIO } = require('../../socket'); // Corrected path
-const { assembleContext } = require('./prompt.service'); // Import assembleContext
-const codeExecutionService = require('../../shared/services/codeExecution.service'); // Import Code Execution Service
-const Papa = require('papaparse'); // Import papaparse
+const { getIO } = require('../../socket');
+const { assembleContext } = require('./prompt.service');
+const codeExecutionService = require('../../shared/services/codeExecution.service');
+const Papa = require('papaparse');
 const User = require('../users/user.model');
 
-const MAX_AGENT_ITERATIONS = 10; // Increased iterations slightly for multi-step tasks
-const MAX_TOOL_RETRIES = 1; // Allow one retry for potentially transient tool errors
-const HISTORY_SUMMARIZATION_THRESHOLD = 10; // Summarize if more than 10 messages
-const HISTORY_FETCH_LIMIT = 20; // Max messages to fetch for context/summarization
+const MAX_AGENT_ITERATIONS = 15; // Increased for multi-step analysis
+const MAX_TOOL_RETRIES = 1;
+const HISTORY_SUMMARIZATION_THRESHOLD = 10;
+const HISTORY_FETCH_LIMIT = 20;
 
 /**
  * Orchestrates the agent's reasoning loop to fulfill user requests.
@@ -19,37 +20,33 @@ const HISTORY_FETCH_LIMIT = 20; // Max messages to fetch for context/summarizati
 class AgentOrchestrator {
     constructor(userId, teamId, sessionId, aiMessagePlaceholderId, previousAnalysisData = null, previousGeneratedCode = null) {
         this.userId = userId;
-        this.teamId = teamId; // May be null for personal context
+        this.teamId = teamId;
         this.sessionId = sessionId;
         this.aiMessagePlaceholderId = aiMessagePlaceholderId;
         this.turnContext = {
             originalQuery: '',
-            chatHistoryForSummarization: [], // Store raw history for summarizer
-            steps: [], // Track tools used and results this turn
+            chatHistoryForSummarization: [],
+            steps: [],
             intermediateResults: {
-                lastSchema: null, 
-                parsedDataRef: null,
-                generatedAnalysisCode: null,
-                analysisResult: null,
-                analysisError: null,
+                lastSchema: null,
+                parsedDataRefs: {}, // Changed to an object to store multiple parsed datasets
+                analysisResults: {}, // Changed to store multiple analysis results by goal
                 previousAnalysisData: previousAnalysisData,
                 previousGeneratedCode: previousGeneratedCode,
             },
-            userContext: '', // User settings context
-            teamContext: '', // Team settings context
-            generatedReportCode: null, // NEW: Store generated React code this turn
+            userContext: '',
+            teamContext: '',
+            generatedReportCode: null,
             finalAnswer: null,
             error: null,
-            // Track tool errors/retries within a turn
-            toolErrorCounts: {}, // { [toolName]: count }
+            toolErrorCounts: {},
         };
-        this.io = getIO(); // Get socket instance
+        this.io = getIO();
     }
 
     /**
      * Emits WebSocket events to update the frontend on agent status.
-     * Targets the specific user associated with this agent instance.
-     * @param {string} eventName - The name of the event (e.g., 'agent:thinking').
+     * @param {string} eventName - The name of the event.
      * @param {object} payload - The data payload for the event.
      */
     _emitAgentStatus(eventName, payload) {
@@ -59,13 +56,12 @@ class AgentOrchestrator {
                 sessionId: this.sessionId,
                 ...payload,
             };
-            // Emit specifically to the user's room
             const userRoom = `user:${this.userId}`;
             this.io.to(userRoom).emit(eventName, eventPayload);
             logger.debug(`Agent Event Emitted to room ${userRoom}: ${eventName}`, eventPayload);
         } else {
             logger.warn('Socket.io instance, session ID, or user ID missing, cannot emit agent status.', {
-                 hasIo: !!this.io, sessionId: this.sessionId, userId: this.userId
+                hasIo: !!this.io, sessionId: this.sessionId, userId: this.userId
             });
         }
     }
@@ -78,7 +74,7 @@ class AgentOrchestrator {
     async runAgentLoop(userMessage) {
         logger.info(`[Agent Loop ${this.sessionId}] Starting for user ${this.userId}, message: "${userMessage.substring(0, 50)}..."`);
         this.turnContext.originalQuery = userMessage;
-        this.turnContext.toolErrorCounts = {}; // Reset error counts for the turn
+        this.turnContext.toolErrorCounts = {};
         let iterations = 0;
 
         try {
@@ -86,178 +82,42 @@ class AgentOrchestrator {
             this._emitAgentStatus('agent:thinking', {});
 
             // Fetch initial user/team context settings
-            const initialContext = await assembleContext(this.userId, []); // No datasets needed here
+            const initialContext = await assembleContext(this.userId, []);
             this.turnContext.userContext = initialContext.userContext;
             this.turnContext.teamContext = initialContext.teamContext;
 
-            await this._prepareChatHistory(); // Prepare history context
+            await this._prepareChatHistory();
 
             while (iterations < MAX_AGENT_ITERATIONS) {
                 iterations++;
                 logger.info(`[Agent Loop ${this.sessionId}] Iteration ${iterations}`);
                 
-                let action;
-                let forceAction = null; // null | 'execute_parser' | 'generate_analysis' | 'execute_analysis'
-                let codeToExecute = null;
-                let datasetIdForExecution = null; // Still needed for parsing
-                let parsedDataRefForExecution = null;
-                let analysisGoalForGeneration = null;
+                // Get the next action from the LLM
+                const llmContext = this._prepareLLMContext();
+                const llmResponse = await promptService.getLLMReasoningResponse(llmContext);
+                const action = this._parseLLMResponse(llmResponse);
 
-                // --- Determine if an action should be forced based on previous step --- 
-                if (this.turnContext.steps.length > 0) {
-                    const lastStep = this.turnContext.steps[this.turnContext.steps.length - 1];
-                    const lastTool = lastStep.tool;
-                    const lastResultSummary = lastStep.resultSummary || '';
-                    const lastArgs = lastStep.args || {};
-
-                    // Case 1: Generation of PARSER code succeeded -> Force execution of parser code
-                    if (lastTool === 'generate_data_extraction_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.generatedParserCode) {
-                        forceAction = 'execute_parser';
-                        let rawGeneratedCode = this.turnContext.intermediateResults.generatedParserCode;
-                        const codeBlockRegex = /^```(?:javascript|js)?\s*([\s\S]*?)\s*```$|^([\s\S]*)$/m;
-                        const match = rawGeneratedCode.match(codeBlockRegex);
-                        codeToExecute = match && (match[1] || match[2]) ? (match[1] || match[2]).trim() : rawGeneratedCode.trim();
-                        datasetIdForExecution = lastArgs.dataset_id;
-                        // Store original goal for the *next* generation step
-                        this.turnContext.intermediateResults.originalAnalysisGoal = lastArgs.analysis_goal;
-                        logger.info(`[Agent Loop ${this.sessionId}] Stage 1 Complete: Parser code generated. Forcing execution.`);
-                    }
-                    // Case 2: Execution of PARSER code succeeded -> Force generation of ANALYSIS code
-                    else if (lastTool === 'execute_backend_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.parserExecutionResult) {
-                        forceAction = 'generate_analysis';
-                        // --- OVERRIDE GOAL FOR DEBUGGING --- 
-                        // analysisGoalForGeneration = this.turnContext.intermediateResults.originalAnalysisGoal;
-                        analysisGoalForGeneration = "Calculate the total number of rows in the inputData array and return it as { rowCount: number }.";
-                        logger.info(`[Agent Loop ${this.sessionId}] Stage 2 Complete: Parser code executed. Forcing SIMPLE analysis code generation.`);
-                        // --- END OVERRIDE --- 
-                    }
-                    // Case 3: Generation of ANALYSIS code succeeded -> Force execution of analysis code
-                    else if (lastTool === 'generate_analysis_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.generatedAnalysisCode) {
-                        forceAction = 'execute_analysis';
-                        // Use the already cleaned code stored from the generation step
-                        codeToExecute = this.turnContext.intermediateResults.generatedAnalysisCode;
-                        parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
-                        logger.info(`[Agent Loop ${this.sessionId}] Stage 3 Complete: Analysis code generated. Forcing execution.`);
-                    }
-                }
-
-                // --- Determine Action --- 
-                if (forceAction === 'execute_parser') {
-                    if (!codeToExecute) {
-                        logger.error('[Agent Loop] Cannot force PARSER execution, cleaned code is empty.');
-                        action = null; // Let LLM try to recover
-                    } else {
-                        action = {
-                            tool: 'execute_backend_code', // Still uses the old executor name for now
-                            args: { code: codeToExecute, dataset_id: datasetIdForExecution }
-                        };
-                    }
-                    this.turnContext.intermediateResults.generatedParserCode = null; // Clear intermediate
-                } else if (forceAction === 'generate_analysis') {
-                     if (!analysisGoalForGeneration) {
-                         logger.error('[Agent Loop] Cannot force ANALYSIS generation, original goal not found.');
-                         action = null;
-                     } else {
-                        action = {
-                            tool: 'generate_analysis_code',
-                            args: { analysis_goal: analysisGoalForGeneration }
-                        };
-                     }
-                } else if (forceAction === 'execute_analysis') {
-                     const rawGeneratedCode = this.turnContext.intermediateResults.generatedAnalysisCode;
-                     parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
-
-                     // --- Updated Code Cleaning Logic --- 
-                     let codeToExecute = '';
-                     if (rawGeneratedCode && typeof rawGeneratedCode === 'string') {
-                         let cleanedCode = rawGeneratedCode.trim(); // 1. Trim whitespace
-                         const startFence = /^```(?:javascript|js)?\s*/; // Regex for start fence
-                         const endFence = /\s*```$/; // Regex for end fence
-                         cleanedCode = cleanedCode.replace(startFence, ''); // 2. Remove start fence
-                         cleanedCode = cleanedCode.replace(endFence, ''); // 3. Remove end fence
-                         codeToExecute = cleanedCode.trim(); // 4. Trim again
-                         logger.debug('[Agent Loop] Cleaned analysis code before execution. Length after clean: ', codeToExecute.length);
-                     } else {
-                         logger.warn('[Agent Loop] Raw generated code is missing or not a string.');
-                     }
-                     // --- End cleaning ---
-
-                     if (!codeToExecute) {
-                         logger.error('[Agent Loop] Cannot force ANALYSIS execution, cleaned code is empty.');
-                         action = null;
-                     } else if (!parsedDataRefForExecution) {
-                         logger.error('[Agent Loop] Cannot force ANALYSIS execution, parsed data reference is missing.');
-                         action = null;
-                     } else {
-                         action = {
-                             tool: 'execute_analysis_code',
-                             args: { code: codeToExecute, parsed_data_ref: parsedDataRefForExecution }
-                         };
-                     }
-                     this.turnContext.intermediateResults.generatedAnalysisCode = null; // Clear intermediate context
-                }
-                
-                // If no action forced, get from LLM
-                if (!action) { 
-                    const llmContext = this._prepareLLMContext();
-                    const llmResponse = await promptService.getLLMReasoningResponse(llmContext);
-                    action = this._parseLLMResponse(llmResponse);
-                }
-
-                // --- Action Processing --- 
+                // Process the action
                 if (action.tool === '_answerUserTool') {
-                    // Validate the extracted answer
+                    // Final answer received
                     if (typeof action.args.textResponse !== 'string' || action.args.textResponse.trim() === '') {
-                         logger.warn(`[Agent Loop ${this.sessionId}] LLM called _answerUserTool with invalid/empty textResponse. Raw response: ${llmResponse}`);
-                         // Fallback: Use the raw response, hoping it's the intended answer
-                         this.turnContext.finalAnswer = llmResponse.trim();
+                        logger.warn(`[Agent Loop ${this.sessionId}] LLM called _answerUserTool with invalid/empty textResponse.`);
+                        this.turnContext.finalAnswer = llmResponse.trim();
                     } else {
                         this.turnContext.finalAnswer = action.args.textResponse;
                     }
                     logger.info(`[Agent Loop ${this.sessionId}] LLM decided to answer.`);
                     this.turnContext.steps.push({ tool: action.tool, args: action.args, resultSummary: 'Final answer provided.' });
                     break; 
-                } else if (action.tool === 'generate_report_code') { // Handle report generation
-                    logger.info(`[Agent Loop ${this.sessionId}] LLM requested tool: ${action.tool}`);
-                    this.turnContext.steps.push({ tool: action.tool, args: action.args, resultSummary: 'Executing tool...'});
-                    this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args });
-
-                    const toolResult = await this.toolDispatcher(action.tool, action.args);
-                    const resultSummary = this._summarizeToolResult(toolResult);
-                    this.turnContext.steps[this.turnContext.steps.length - 1].resultSummary = resultSummary;
-                    this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary });
-
-                    if (toolResult.error) {
-                        logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} resulted in error: ${toolResult.error}`);
-                    } else if (toolResult.result && toolResult.result.react_code) {
-                        // Clean the code before storing
-                        let cleanedCode = toolResult.result.react_code;
-                        if (cleanedCode && typeof cleanedCode === 'string') {
-                            const codeFenceRegex = /^```(?:javascript|js|json)?\s*([\s\S]*?)\s*```$/m;
-                            const match = cleanedCode.match(codeFenceRegex);
-                            if (match && match[1]) {
-                                cleanedCode = match[1].trim();
-                                console.log('[Agent Loop Clean] Cleaned React Code (fences removed):', cleanedCode);
-                            } else {
-                                cleanedCode = cleanedCode.trim();
-                            }
-                        }
-                        // Store the CLEANED generated code in the turn context
-                        this.turnContext.generatedReportCode = cleanedCode;
-                        logger.info(`[Agent Loop ${this.sessionId}] Stored cleaned generated React report code.`);
-                    }
-                    // Loop continues after report generation attempt
                 } else if (action.tool) {
                     logger.info(`[Agent Loop ${this.sessionId}] Executing Action: Tool ${action.tool}`);
                     const currentStepIndex = this.turnContext.steps.length;
-                    // Don't add a step if it's a forced action that logically follows the previous step?
-                    // Or maybe add it to show the forced step? Let's add it.
+
                     this.turnContext.steps.push({ 
                         tool: action.tool, 
                         args: action.args, 
                         resultSummary: 'Executing tool...', 
-                        attempt: 1, 
-                        isForced: !!forceAction // Mark if step was forced
+                        attempt: 1
                     });
                     
                     this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args });
@@ -269,132 +129,75 @@ class AgentOrchestrator {
                         this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
                     }
                     
-                    // --- Retry Logic (Only for non-forced steps?) ---
-                    // If a forced step fails, retrying might not help if the input was wrong.
-                    // Let's disable retry for forced steps for now.
-                    const allowRetry = !forceAction;
-                    if (allowRetry && toolResult.error && (this.turnContext.toolErrorCounts[action.tool] || 0) < MAX_TOOL_RETRIES) {
-                         const retryCount = (this.turnContext.toolErrorCounts[action.tool] || 0) + 1;
-                         logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed. Attempting retry (${retryCount}/${MAX_TOOL_RETRIES}). Error: ${toolResult.error}`);
-                         this.turnContext.toolErrorCounts[action.tool] = retryCount;
-                         
-                         const stepSummaryWithError = `Error: ${toolResult.error}. Retrying...`;
-                         if(this.turnContext.steps[currentStepIndex]) {
-                              this.turnContext.steps[currentStepIndex].resultSummary = stepSummaryWithError;
-                              this.turnContext.steps[currentStepIndex].attempt = retryCount + 1; 
-                         }
-                         this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary: stepSummaryWithError });
+                    // Retry logic for failed tools
+                    if (toolResult.error && (this.turnContext.toolErrorCounts[action.tool] || 0) < MAX_TOOL_RETRIES) {
+                        const retryCount = (this.turnContext.toolErrorCounts[action.tool] || 0) + 1;
+                        logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed. Attempting retry (${retryCount}/${MAX_TOOL_RETRIES}). Error: ${toolResult.error}`);
+                        this.turnContext.toolErrorCounts[action.tool] = retryCount;
 
-                         this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args }); 
-                         toolResult = await this.toolDispatcher(action.tool, action.args); 
-                         resultSummary = this._summarizeToolResult(toolResult);
-                         
-                         if(this.turnContext.steps[currentStepIndex]) {
-                             this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
-                         }
-                         
-                         if (toolResult.error) {
+                        const stepSummaryWithError = `Error: ${toolResult.error}. Retrying...`;
+                        if(this.turnContext.steps[currentStepIndex]) {
+                            this.turnContext.steps[currentStepIndex].resultSummary = stepSummaryWithError;
+                            this.turnContext.steps[currentStepIndex].attempt = retryCount + 1;
+                        }
+                        this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary: stepSummaryWithError });
+
+                        this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args });
+                        toolResult = await this.toolDispatcher(action.tool, action.args);
+                        resultSummary = this._summarizeToolResult(toolResult);
+
+                        if(this.turnContext.steps[currentStepIndex]) {
+                            this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
+                        }
+
+                        if (toolResult.error) {
                             logger.error(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed on retry. Error: ${toolResult.error}`);
-                         } else {
+                        } else {
                             logger.info(`[Agent Loop ${this.sessionId}] Tool ${action.tool} succeeded on retry.`);
-                         }
-                     }
-                    // --- End Retry Logic ---
+                        }
+                    }
 
                     this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary });
 
-                    // --- ADDED: Error Check specifically for Analysis Execution Failure ---
-                    if ((action.tool === 'execute_analysis_code' || action.tool === 'execute_backend_code') && toolResult.error) {
+                    // Critical error check for code execution failures
+                    if ((action.tool === 'execute_analysis_code') && toolResult.error) {
                         logger.error(`[Agent Loop ${this.sessionId}] CRITICAL ERROR during code execution: ${toolResult.error}. Terminating loop.`);
                         this.turnContext.error = `Code Execution Failed: ${resultSummary}`; 
                         await this._updatePromptHistoryRecord('error', null, this.turnContext.error, null);
                         this._emitAgentStatus('agent:error', { error: this.turnContext.error });
-                        return { status: 'error', error: this.turnContext.error }; // Exit loop immediately
+                        return { status: 'error', error: this.turnContext.error };
                     }
-                    // --- END ADDED Error Check ---
 
-                    // --- Store Intermediate Results --- 
-                    if (action.tool === 'get_dataset_schema' && toolResult.result) {
-                        this.turnContext.intermediateResults.lastSchema = toolResult.result;
-                        logger.info(`Stored dataset schema.`);
-                    }
-                    if (action.tool === 'parse_csv_data' && toolResult.result?.parsed_data_ref) {
-                        this.turnContext.intermediateResults.parsedDataRef = toolResult.result.parsed_data_ref;
-                        logger.info(`Stored parsed data reference: ${toolResult.result.parsed_data_ref}`);
-                    }
-                    if (action.tool === 'generate_data_extraction_code' && toolResult.result?.code) {
-                        this.turnContext.intermediateResults.generatedParserCode = toolResult.result.code;
-                        logger.info(`Stored generated PARSER code for execution.`);
-                    }
-                     if (action.tool === 'generate_analysis_code' && toolResult.result?.code) {
-                         this.turnContext.intermediateResults.generatedAnalysisCode = toolResult.result.code;
-                         logger.info(`Stored generated ANALYSIS code.`);
-                    } 
-                    // Distinguish parser vs analysis execution results based on context
-                    if (action.tool === 'execute_backend_code') { // Old name used by parser exec
-                        if (toolResult.result !== undefined) {
-                             this.turnContext.intermediateResults.parserExecutionResult = toolResult.result;
-                             logger.info(`Stored PARSER execution result.`);
-                        } else if (toolResult.error) {
-                             this.turnContext.intermediateResults.parserExecutionError = toolResult.error;
-                             logger.warn(`Stored PARSER execution error.`);
-                        }
-                    }
-                     if (action.tool === 'execute_analysis_code') { // New name for analysis exec
-                         if (toolResult.result !== undefined) {
-                             // Ensure we store the *actual* result from the execution tool's {result: ...} wrapper
-                             this.turnContext.intermediateResults.analysisResult = toolResult.result;
-                             logger.info(`Stored ANALYSIS execution result.`);
-                         } else if (toolResult.error) {
-                             this.turnContext.intermediateResults.analysisError = toolResult.error;
-                             logger.warn(`Stored ANALYSIS execution error.`);
-                         }
-                    }
-                    if (action.tool === 'generate_report_code' && toolResult.result?.react_code) {
-                         this.turnContext.generatedReportCode = toolResult.result.react_code;
-                         logger.info(`Stored generated React report code.`);
-                    }
-                    // --- End Store Results ---
-                    
-                } else { 
-                    logger.warn(`[Agent Loop ${this.sessionId}] LLM response parsing failed or yielded no action. Treating raw response as final answer. Raw: ${llmResponse}`);
-                    this.turnContext.finalAnswer = llmResponse.trim();
-                    this.turnContext.steps.push({ tool: '_unknown', args: {}, resultSummary: 'LLM response unclear, using as final answer.' });
-                    break;
+                    // Store intermediate results based on the tool used
+                    this._storeToolResults(action.tool, action.args, toolResult);
                 }
-            } // End while loop
+            }
 
             if (iterations >= MAX_AGENT_ITERATIONS && !this.turnContext.finalAnswer) {
                 logger.warn(`[Agent Loop ${this.sessionId}] Agent reached maximum iterations.`);
-                // Attempt to formulate a response indicating failure due to complexity/iterations
                 this.turnContext.finalAnswer = "I apologize, but I couldn't complete the request within the allowed steps. The query might be too complex.";
                 this.turnContext.steps.push({ tool: '_maxIterations', args: {}, resultSummary: 'Reached max iterations.'});
-                // Fall through to update record and return gracefully
             }
 
             if (!this.turnContext.finalAnswer) {
-                 logger.error(`[Agent Loop ${this.sessionId}] Loop finished unexpectedly without a final answer.`);
-                 // Try to provide a generic error message if no answer was formed
-                 this.turnContext.finalAnswer = "I encountered an unexpected issue and could not complete the request.";
-                 this.turnContext.steps.push({ tool: '_internalError', args: {}, resultSummary: 'Loop ended without final answer.'});
-                 // Fall through to update record, but maybe mark as error?
-                 await this._updatePromptHistoryRecord('error', null, 'Agent loop finished without final answer', null);
-                 return { status: 'error', error: 'Agent loop finished without final answer' };
+                logger.error(`[Agent Loop ${this.sessionId}] Loop finished unexpectedly without a final answer.`);
+                this.turnContext.finalAnswer = "I encountered an unexpected issue and could not complete the request.";
+                this.turnContext.steps.push({ tool: '_internalError', args: {}, resultSummary: 'Loop ended without final answer.'});
+                await this._updatePromptHistoryRecord('error', null, 'Agent loop finished without final answer', null);
+                return { status: 'error', error: 'Agent loop finished without final answer' };
             }
 
-            // 5. Finalize: Update the PromptHistory record with the potentially corrected answer
+            // Finalize: Update the PromptHistory record
             await this._updatePromptHistoryRecord(
                 'completed',
-                this.turnContext.finalAnswer, // Use the original LLM final answer
-                null, // No error message
-                this.turnContext.generatedReportCode // Pass generated code
+                this.turnContext.finalAnswer,
+                null,
+                this.turnContext.generatedReportCode
             );
             logger.info(`[Agent Loop ${this.sessionId}] Completed successfully.`);
             return { 
                 status: 'completed', 
-                aiResponseText: this.turnContext.finalAnswer, // Return original LLM final answer
-                // Optionally return code here too? Task handler re-fetches anyway.
-                // aiGeneratedCode: this.turnContext.generatedReportCode 
+                aiResponseText: this.turnContext.finalAnswer
             };
 
         } catch (error) {
@@ -402,36 +205,78 @@ class AgentOrchestrator {
             const errorMessage = error.message || 'Unknown agent error';
             this.turnContext.error = errorMessage;
             this._emitAgentStatus('agent:error', { error: errorMessage });
-            // Ensure update happens even if placeholder ID is null somehow (shouldn't happen)
             if (this.aiMessagePlaceholderId) {
-                 await this._updatePromptHistoryRecord('error', null, errorMessage, null); 
+                await this._updatePromptHistoryRecord('error', null, errorMessage, null);
             }
             return { status: 'error', error: errorMessage };
+        }
+    }
+
+    /**
+     * Store tool results in the intermediateResults based on the tool type
+     * @param {string} toolName - The name of the tool
+     * @param {object} args - The arguments used in the tool call
+     * @param {object} toolResult - The result from the tool execution
+     */
+    _storeToolResults(toolName, args, toolResult) {
+        if (toolName === 'get_dataset_schema' && toolResult.result) {
+            this.turnContext.intermediateResults.lastSchema = toolResult.result;
+            logger.info('Stored dataset schema.');
+        }
+        else if (toolName === 'parse_csv_data' && toolResult.result?.parsed_data_ref) {
+            const parsedDataRef = toolResult.result.parsed_data_ref;
+            const datasetId = args.dataset_id;
+            // Store with dataset ID as key
+            this.turnContext.intermediateResults.parsedDataRefs[datasetId] = parsedDataRef;
+            logger.info(`Stored parsed data reference: ${parsedDataRef} for dataset ${datasetId}`);
+        }
+        else if (toolName === 'generate_analysis_code' && toolResult.result?.code) {
+            // Store the generated code with the analysis goal as a key
+            const analysisGoal = args.analysis_goal;
+            this.turnContext.intermediateResults.lastGeneratedAnalysisCode = {
+                code: toolResult.result.code,
+                goal: analysisGoal
+            };
+            logger.info(`Stored generated code for analysis goal: "${analysisGoal.substring(0, 50)}..."`);
+        }
+        else if (toolName === 'execute_analysis_code' && toolResult.result !== undefined) {
+            // Store the analysis result using the analysis goal as key
+            // Retrieve the goal from the current turn context or the args
+            const analysisGoal = this.turnContext.intermediateResults.lastGeneratedAnalysisCode?.goal || args.analysis_goal || `Analysis ${Object.keys(this.turnContext.intermediateResults.analysisResults).length + 1}`;
+
+            this.turnContext.intermediateResults.analysisResults[analysisGoal] = toolResult.result;
+            logger.info(`Stored analysis result for goal: "${analysisGoal.substring(0, 50)}..."`);
+        }
+        else if (toolName === 'generate_report_code' && toolResult.result?.react_code) {
+            this.turnContext.generatedReportCode = toolResult.result.react_code;
+            logger.info(`Stored generated React report code.`);
         }
     }
 
     /** Fetches and potentially summarizes chat history. */
     async _prepareChatHistory() {
         try {
-            // Fix 1: Update PromptHistory Query
+            // Look for previous analysis results or code
             const historyRecords = await PromptHistory.find({
                 chatSessionId: this.sessionId,
                 _id: { $ne: this.aiMessagePlaceholderId },
-                messageType: 'ai_report', // Target only AI reports
-                status: 'completed', // Only successful ones
-                $or: [ // Ensure either analysis data or code exists
+                messageType: 'ai_report',
+                status: 'completed',
+                $or: [
                     { reportAnalysisData: { $exists: true, $ne: null } },
                     { aiGeneratedCode: { $exists: true, $ne: null } }
                 ]
             })
-            .sort({ createdAt: -1 }) // Fetch newest first for artifact search
-            .limit(HISTORY_FETCH_LIMIT) // Limit history size
-            .select('messageType status reportAnalysisData aiGeneratedCode createdAt _id') // Select needed fields
+            .sort({ createdAt: -1 })
+            .limit(HISTORY_FETCH_LIMIT)
+            .select('messageType status reportAnalysisData aiGeneratedCode createdAt _id')
             .lean();
 
             logger.debug(`[Agent History Prep] Fetched ${historyRecords.length} potential artifact records (newest first).`);
 
-            // Fix 2: Update artifact search logic
+            // Find the most recent successful report with analysis data
+            const lastSuccessfulReport = historyRecords.find(msg => msg.reportAnalysisData);
+
             let artifactData = {
                 previousAnalysisResult: null,
                 previousGeneratedCode: null,
@@ -439,16 +284,12 @@ class AgentOrchestrator {
                 codeFoundOnMsgId: null
             };
 
-            // Find the most recent successful report with analysis data
-            // The query already sorts by newest and filters for completed reports
-            const lastSuccessfulReport = historyRecords.find(msg => msg.reportAnalysisData);
-
             if (lastSuccessfulReport) {
                 artifactData = {
                     previousAnalysisResult: lastSuccessfulReport.reportAnalysisData,
-                    previousGeneratedCode: lastSuccessfulReport.aiGeneratedCode, // May or may not exist, that's okay
+                    previousGeneratedCode: lastSuccessfulReport.aiGeneratedCode,
                     analysisFoundOnMsgId: lastSuccessfulReport._id,
-                    codeFoundOnMsgId: lastSuccessfulReport.aiGeneratedCode ? lastSuccessfulReport._id : null // Only set if code exists
+                    codeFoundOnMsgId: lastSuccessfulReport.aiGeneratedCode ? lastSuccessfulReport._id : null
                 };
 
                 logger.info(`[Agent History Prep] Found previous artifacts in message ${lastSuccessfulReport._id}`, {
@@ -456,12 +297,10 @@ class AgentOrchestrator {
                     hasCode: !!artifactData.previousGeneratedCode
                 });
             } else {
-                 logger.info(`[Agent History Prep] No suitable previous completed report with analysis data found.`);
+                logger.info(`[Agent History Prep] No suitable previous completed report with analysis data found.`);
             }
-            // --- End Fix 2 --
 
             // Store potentially found artifacts in intermediate results
-            // Use consistent naming: previousAnalysisResult, previousGeneratedCode
             this.turnContext.intermediateResults.previousAnalysisResult = artifactData.previousAnalysisResult;
             this.turnContext.intermediateResults.previousGeneratedCode = artifactData.previousGeneratedCode;
 
@@ -472,31 +311,28 @@ class AgentOrchestrator {
                 codeMsgId: artifactData.codeFoundOnMsgId,
             });
 
-            // Fetch the full history separately for LLM context (chronological)
+            // Fetch the full history for LLM context
             const fullHistoryRecords = await PromptHistory.find({
                 chatSessionId: this.sessionId,
                 _id: { $ne: this.aiMessagePlaceholderId }
             })
-            .sort({ createdAt: 1 }) // Chronological for LLM
+            .sort({ createdAt: 1 })
             .limit(HISTORY_FETCH_LIMIT)
-            .select('messageType promptText aiResponseText') // Only need text content
+            .select('messageType promptText aiResponseText')
             .lean();
 
-             const formattedHistory = fullHistoryRecords.map(msg => ({
+            const formattedHistory = fullHistoryRecords.map(msg => ({
                 role: msg.messageType === 'user' ? 'user' : 'assistant',
                 content: (msg.messageType === 'user' ? msg.promptText : msg.aiResponseText) || ''
             })).filter(msg => msg.content);
 
             this.turnContext.fullChatHistory = formattedHistory;
 
-            // --- History Summarization and related fields REMOVED --
-
         } catch (err) {
-             logger.error(`Failed to fetch chat history for session ${this.sessionId}: ${err.message}`);
-             this.turnContext.fullChatHistory = []; // Ensure it's an empty array on error
-             // Reset artifact state on error to avoid passing stale data
-             this.turnContext.intermediateResults.previousAnalysisResult = null;
-             this.turnContext.intermediateResults.previousGeneratedCode = null;
+            logger.error(`Failed to fetch chat history for session ${this.sessionId}: ${err.message}`);
+            this.turnContext.fullChatHistory = [];
+            this.turnContext.intermediateResults.previousAnalysisResult = null;
+            this.turnContext.intermediateResults.previousGeneratedCode = null;
         }
     }
 
@@ -505,51 +341,43 @@ class AgentOrchestrator {
      * @returns {object} - Context object for promptService.getLLMReasoningResponse.
      */
     _prepareLLMContext() {
-        // --- ADDED: Prepare previous analysis context ---
+        // Prepare previous analysis context
         let previousAnalysisResultSummary = null;
         let hasPreviousGeneratedCode = false;
 
-        // Use the corrected field name from turnContext
         if (this.turnContext.intermediateResults.previousAnalysisResult) {
             previousAnalysisResultSummary = "Analysis results from a previous turn are available and should be reused if applicable.";
         }
         if (this.turnContext.intermediateResults.previousGeneratedCode) {
             hasPreviousGeneratedCode = true;
         }
-        // --- END ADDED --
 
-        // Ensure fullChatHistory exists (it should be set by _prepareChatHistory)
+        // Ensure fullChatHistory exists
         const fullChatHistory = this.turnContext.fullChatHistory || [];
 
         return {
-            userId: this.userId, // Pass userId for model preference selection
+            userId: this.userId,
             originalQuery: this.turnContext.originalQuery,
-            // REMOVED historySummary
-            fullChatHistory: fullChatHistory, // Pass the full formatted history
+            fullChatHistory: fullChatHistory,
             currentTurnSteps: this.turnContext.steps,
-            availableTools: this._getToolDefinitions(), // Pass tool definitions
-            userContext: this.turnContext.userContext, // Pass user context
-            teamContext: this.turnContext.teamContext, // Pass team context
-            // --- ADDED: Pass previous analysis info ---
+            availableTools: this._getToolDefinitions(),
+            userContext: this.turnContext.userContext,
+            teamContext: this.turnContext.teamContext,
             previousAnalysisResultSummary: previousAnalysisResultSummary,
             hasPreviousGeneratedCode: hasPreviousGeneratedCode,
-            // --- END ADDED ---
-            // Pass current turn analysis result if available (for direct use)
-            analysisResult: this.turnContext.intermediateResults.analysisResult
+            analysisResults: this.turnContext.intermediateResults.analysisResults
         };
     }
 
     /**
      * Parses the LLM's raw response text to identify tool calls or final answers.
-     * Expected tool call format: A JSON object like {"tool": "<name>", "args": {...}}
-     * Anything else is treated as a final answer for the _answerUserTool.
      * @param {string} llmResponse - The raw text response from the LLM.
      * @returns {{tool: string|null, args: object|null}} - Parsed action.
      */
     _parseLLMResponse(llmResponse) {
         if (!llmResponse || typeof llmResponse !== 'string') {
-             logger.warn('LLM response is empty or not a string.');
-             return { tool: '_answerUserTool', args: { textResponse: 'An error occurred: Empty response from AI.' } };
+            logger.warn('LLM response is empty or not a string.');
+            return { tool: '_answerUserTool', args: { textResponse: 'An error occurred: Empty response from AI.' } };
         }
 
         const trimmedResponse = llmResponse.trim();
@@ -561,20 +389,19 @@ class AgentOrchestrator {
         if (jsonMatch) {
             const potentialJson = jsonMatch[1] || jsonMatch[2];
             if (potentialJson) {
-                 let sanitizedJsonString = null; // Declare outside the try block
-                 try {
-                    // --- SANITIZATION STEP --- 
+                let sanitizedJsonString = null;
+                try {
+                    // Sanitize the JSON string
                     sanitizedJsonString = potentialJson.replace(/("code"\s*:\s*")([\s\S]*?)("(?!\\))/gs, (match, p1, p2, p3) => {
                         const escapedCode = p2
-                            .replace(/\\/g, '\\') // Escape backslashes FIRST
-                            .replace(/"/g, '\"')  // Escape double quotes
-                            .replace(/\n/g, '\\n') // Escape newlines
-                            .replace(/\r/g, '\\r'); // Escape carriage returns
+                            .replace(/\\/g, '\\')
+                            .replace(/"/g, '\"')
+                            .replace(/\n/g, '\\n')
+                            .replace(/\r/g, '\\r');
                         return p1 + escapedCode + p3;
                     });
-                    // --- END SANITIZATION --- 
 
-                    const parsed = JSON.parse(sanitizedJsonString); // Parse the sanitized string
+                    const parsed = JSON.parse(sanitizedJsonString);
 
                     // Validate the parsed JSON structure for a tool call
                     if (parsed && typeof parsed.tool === 'string' && typeof parsed.args === 'object' && parsed.args !== null) {
@@ -583,11 +410,11 @@ class AgentOrchestrator {
                             logger.debug(`Parsed tool call via regex: ${parsed.tool}`, parsed.args);
                             // Handle _answerUserTool called via JSON
                             if (parsed.tool === '_answerUserTool') {
-                                if(typeof parsed.args.textResponse === 'string' && parsed.args.textResponse.trim() !== ''){
-                                     return { tool: parsed.tool, args: parsed.args };
+                                if(typeof parsed.args.textResponse === 'string' && parsed.args.textResponse.trim() !== '') {
+                                    return { tool: parsed.tool, args: parsed.args };
                                 } else {
-                                     logger.warn('_answerUserTool called via JSON but missing/empty textResponse.');
-                                     return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
+                                    logger.warn('_answerUserTool called via JSON but missing/empty textResponse.');
+                                    return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                                 }
                             }
                             return { tool: parsed.tool, args: parsed.args }; // Valid tool call
@@ -596,11 +423,10 @@ class AgentOrchestrator {
                             return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                         }
                     } else {
-                         logger.warn('Parsed JSON does not match expected tool structure.', parsed);
-                         return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
+                        logger.warn('Parsed JSON does not match expected tool structure.', parsed);
+                        return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                     }
                 } catch (e) {
-                    // sanitizedJsonString is now accessible here
                     logger.error(`Failed to parse extracted JSON: ${e.message}. Sanitized attempt: ${sanitizedJsonString !== null ? sanitizedJsonString : '[Sanitization failed or not reached]'}. Original JSON source: ${potentialJson}`);
                     return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
                 }
@@ -613,19 +439,19 @@ class AgentOrchestrator {
 
     /** Returns array of tool definitions the LLM can use. */
     _getToolDefinitions() {
-        // Note: Output format must match what the LLM expects.
+        // Updated tool definitions with more flexibility for dynamic analysis
         return [
             {
                 name: 'list_datasets',
                 description: 'Lists available datasets (IDs, names, descriptions).',
-                args: {}, // No arguments needed
+                args: {},
                 output: '{ "datasets": [{ "id": "...", "name": "...", "description": "..." }] }'
             },
             {
                 name: 'get_dataset_schema',
                 description: 'Gets schema (column names, types, descriptions) for a specific dataset ID.',
                 args: {
-                    dataset_id: 'string' // Specify required arguments and types
+                    dataset_id: 'string'
                 },
                 output: '{ "schemaInfo": [...], "columnDescriptions": {...}, "description": "..." }'
             },
@@ -635,32 +461,30 @@ class AgentOrchestrator {
                 args: {
                     dataset_id: 'string'
                 },
-                 output: '{ "status": "success", "parsed_data_ref": "<ref_id>", "rowCount": <number> } or { "error": "..." }'
+                output: '{ "status": "success", "parsed_data_ref": "<ref_id>", "rowCount": <number> } or { "error": "..." }'
             },
             {
                 name: 'generate_analysis_code',
-                description: 'Generates Node.js analysis code expecting pre-parsed data in `inputData` variable. Requires schema context from `get_dataset_schema`.',
+                description: 'Generates Node.js analysis code to achieve a specific analysis goal based on the available schema.',
                 args: {
-                     analysis_goal: 'string'
-                     // Removed dataset_id, as schema is retrieved separately
+                    analysis_goal: 'string'
                 },
-                 output: '{ "code": "<Node.js code string>" }'
+                output: '{ "code": "<Node.js code string>" }'
             },
             {
-                 name: 'execute_analysis_code',
-                 description: 'Executes analysis code in a sandbox with parsed data injected as `inputData`. Requires `parse_csv_data` to be called first.',
-                 args: {
-                     code: 'string', 
-                     parsed_data_ref: 'string'
-                 },
-                 output: '{ "result": <JSON result>, "error": "..." }'
+                name: 'execute_analysis_code',
+                description: 'Executes analysis code in a sandbox with parsed data injected as `inputData`. Requires `parse_csv_data` to be called first.',
+                args: {
+                    code: 'string',
+                    parsed_data_ref: 'string'
+                },
+                output: '{ "result": <JSON result specific to the analysis goal>, "error": "..." }'
             },
             {
                 name: 'generate_report_code',
-                description: 'Generates React report code based on analysis results available in the context. Use this AFTER `execute_analysis_code` succeeds.',
-                // *** REMOVED analysis_result from args presented to LLM ***
+                description: 'Generates a React report component to visualize previously executed analysis results.',
                 args: {
-                    analysis_summary: 'string' // Only require summary from LLM
+                    report_goal: 'string' // Description of what the report should show
                 },
                 output: '{ "react_code": "<React code string>" }'
             },
@@ -698,7 +522,7 @@ class AgentOrchestrator {
                 } else if (result.error.includes('sendResult')) {
                     errorSummary = 'Error: Analysis code did not produce a result correctly.';
                 } else if (result.error.includes('access denied')) {
-                     errorSummary = 'Error: Access denied to the required resource.';
+                    errorSummary = 'Error: Access denied to the required resource.';
                 }
                 // Limit length
                 const limit = 250;
@@ -709,14 +533,16 @@ class AgentOrchestrator {
             }
             // Add summary for successful parsing
             if (result.result?.status === 'success' && result.result?.parsed_data_ref) {
-                 return `Successfully parsed data (${result.result.rowCount || '?'} rows). Ref ID: ${result.result.parsed_data_ref}`;
+                return `Successfully parsed data (${result.result.rowCount || '?'} rows). Ref ID: ${result.result.parsed_data_ref}`;
             }
             // Add specific summary for report code generation
             if (result.result && typeof result.result.react_code === 'string') {
                 return 'Successfully generated React report code.';
             }
+
+            // For general results (especially analysis results)
             const resultString = JSON.stringify(result.result);
-            const limit = 500; // Shorter limit for analysis results in context
+            const limit = 500;
             if (resultString.length > limit) {
                 let summary = resultString.substring(0, limit - 3) + '...';
                 try {
@@ -724,7 +550,7 @@ class AgentOrchestrator {
                     if (Array.isArray(parsed)) summary = `Result: Array[${parsed.length}]`;
                     else if (typeof parsed === 'object' && parsed !== null) summary = `Result: Object{${Object.keys(parsed).slice(0,3).join(',')}${Object.keys(parsed).length > 3 ? ',...' : ''}}`;
                 } catch(e){ /* ignore */ }
-                 return summary;
+                return summary;
             }
             return resultString;
         } catch (e) {
@@ -736,47 +562,42 @@ class AgentOrchestrator {
     /** Updates the PromptHistory record in the database. */
     async _updatePromptHistoryRecord(status, aiResponseText = null, errorMessage = null, aiGeneratedCode = null) {
         if (!this.aiMessagePlaceholderId) {
-             logger.error('Cannot update PromptHistory: aiMessagePlaceholderId is missing.');
-             return;
+            logger.error('Cannot update PromptHistory: aiMessagePlaceholderId is missing.');
+            return;
         }
         try {
-            // Get analysis result if available (needed when completing)
-            const analysisResult = this.turnContext.intermediateResults.analysisResult;
-            // --- Get the report code DIRECTLY from the context --- 
+            // Get all analysis results
+            const analysisResults = this.turnContext.intermediateResults.analysisResults;
             const finalGeneratedCode = this.turnContext.generatedReportCode;
-            // --- Log the value directly from context --- 
-            console.log(`[_updatePromptHistoryRecord] Value of this.turnContext.generatedReportCode: ${finalGeneratedCode ? `Exists (Length: ${finalGeneratedCode.length})` : 'MISSING'}`);
 
-            // ---- ADD DEBUG LOG ----
             logger.debug(`[Agent Update DB] Preparing update for ${this.aiMessagePlaceholderId}`, { 
                 status, 
                 hasResponseText: !!aiResponseText, 
                 hasErrorMessage: !!errorMessage, 
-                // Use the potentially cleaned code for logging and saving
                 hasGeneratedCode: !!finalGeneratedCode, 
                 codeLength: finalGeneratedCode?.length,
-                hasAnalysisResult: !!analysisResult, 
+                hasAnalysisResults: !!analysisResults && Object.keys(analysisResults).length > 0,
+                analysisResultKeys: Object.keys(analysisResults || {})
             });
-            // ---- END DEBUG LOG ----
+
             const updateData = {
                 status: status,
-                // Conditionally add fields only if they have a value
                 ...(aiResponseText !== null && { aiResponseText: aiResponseText }),
                 ...(errorMessage !== null && { errorMessage: errorMessage }),
-                // Use the potentially cleaned code for saving
-                ...(finalGeneratedCode !== null && finalGeneratedCode !== undefined && { aiGeneratedCode: finalGeneratedCode }), // Check not null/undefined
-                ...(status === 'completed' && analysisResult !== null && analysisResult !== undefined && { reportAnalysisData: analysisResult }),
-                 agentSteps: this.turnContext.steps, // Store the steps taken
+                ...(finalGeneratedCode !== null && { aiGeneratedCode: finalGeneratedCode }),
+                ...(status === 'completed' && analysisResults && Object.keys(analysisResults).length > 0 &&
+                   { reportAnalysisData: analysisResults }),
+                agentSteps: this.turnContext.steps,
             };
+
             const updatedMessage = await PromptHistory.findByIdAndUpdate(this.aiMessagePlaceholderId, updateData, { new: true });
             if (updatedMessage) {
-                 logger.info(`Updated PromptHistory ${this.aiMessagePlaceholderId} with status: ${status}`);
-                 // Log if analysis data was actually saved (useful for verification)
-                 if (status === 'completed' && analysisResult !== null && analysisResult !== undefined) {
-                     logger.debug(`[Agent Update DB] Saved reportAnalysisData for ${this.aiMessagePlaceholderId}`);
-                 }
+                logger.info(`Updated PromptHistory ${this.aiMessagePlaceholderId} with status: ${status}`);
+                if (status === 'completed' && analysisResults && Object.keys(analysisResults).length > 0) {
+                    logger.debug(`[Agent Update DB] Saved analysisResults for ${this.aiMessagePlaceholderId}`);
+                }
             } else {
-                 logger.warn(`PromptHistory record ${this.aiMessagePlaceholderId} not found during update.`);
+                logger.warn(`PromptHistory record ${this.aiMessagePlaceholderId} not found during update.`);
             }
         } catch (dbError) {
             logger.error(`Failed to update PromptHistory ${this.aiMessagePlaceholderId}: ${dbError.message}`, { dbError });
@@ -798,12 +619,12 @@ class AgentOrchestrator {
         }
 
         if (toolName === '_answerUserTool') {
-             return { result: { message: 'Signal to answer user received.' } };
+            return { result: { message: 'Signal to answer user received.' } };
         }
 
         try {
             if (typeof args !== 'object' || args === null) {
-                 throw new Error(`Invalid arguments provided for tool ${toolName}. Expected an object.`);
+                throw new Error(`Invalid arguments provided for tool ${toolName}. Expected an object.`);
             }
 
             // Pass the original args directly to the tool function
@@ -811,11 +632,10 @@ class AgentOrchestrator {
 
             // Ensure the output is in the { result: ... } or { error: ... } format
             if (toolOutput && (toolOutput.result !== undefined || toolOutput.error !== undefined)) {
-                 return toolOutput;
+                return toolOutput;
             } else {
-                 logger.warn(`Tool ${toolName} did not return the expected format. Wrapping result.`);
-                 // Wrap unexpected return values for consistency, assuming success if no error thrown
-                 return { result: toolOutput };
+                logger.warn(`Tool ${toolName} did not return the expected format. Wrapping result.`);
+                return { result: toolOutput };
             }
         } catch (error) {
             logger.error(`Error executing tool ${toolName}: ${error.message}`, { args, error });
@@ -824,7 +644,7 @@ class AgentOrchestrator {
     }
 
     /** Tool: List Datasets */
-    async _listDatasetsTool(args) { // Args ignored
+    async _listDatasetsTool(args) {
         logger.info(`Executing tool: list_datasets`);
         try {
             const datasets = await datasetService.listAccessibleDatasets(this.userId, this.teamId);
@@ -851,24 +671,22 @@ class AgentOrchestrator {
         try {
             const schemaData = await datasetService.getDatasetSchema(dataset_id, this.userId);
             if (!schemaData) {
-                 return { error: `Dataset schema not found or access denied for ID: ${dataset_id}` };
+                return { error: `Dataset schema not found or access denied for ID: ${dataset_id}` };
             }
-             // Ensure the returned data matches the documented output structure
-             const resultData = {
+            const resultData = {
                 schemaInfo: schemaData.schemaInfo || [],
                 columnDescriptions: schemaData.columnDescriptions || {},
                 description: schemaData.description || ''
-             };
-            // STORE SCHEMA FOR LATER USE BY CODE GEN
+            };
+            // Store schema for later use
             this.turnContext.intermediateResults.lastSchema = resultData;
-            logger.info(`[Agent Loop ${this.sessionId}] Stored dataset schema.`);
+            logger.info(`Stored dataset schema.`);
             return { result: resultData };
         } catch (error) {
             logger.error(`_getDatasetSchemaTool failed for ${dataset_id}: ${error.message}`, { error });
-             // Handle specific errors like CastError for invalid ObjectId
-             if (error.name === 'CastError') {
-                 return { error: `Invalid dataset ID format: ${dataset_id}` };
-             }
+            if (error.name === 'CastError') {
+                return { error: `Invalid dataset ID format: ${dataset_id}` };
+            }
             return { error: `Failed to get dataset schema: ${error.message}` };
         }
     }
@@ -884,25 +702,19 @@ class AgentOrchestrator {
         try {
             const rawContent = await datasetService.getRawDatasetContent(dataset_id, this.userId);
             if (!rawContent) {
-                // Should be caught by getRawDatasetContent, but double-check
                 throw new Error('Failed to fetch dataset content or content is empty.');
             }
             
             logger.info(`Parsing CSV content for dataset ${dataset_id} (length: ${rawContent.length})`);
-            // Use PapaParse for reliable parsing
             const parseResult = Papa.parse(rawContent, {
-                header: true, // Automatically use first row as header
-                dynamicTyping: true, // Attempt to convert numbers/booleans
+                header: true,
+                dynamicTyping: true,
                 skipEmptyLines: true,
-                transformHeader: header => header.trim(), // Trim header whitespace
-                //delimiter: ",", // Default is comma
-                //newline: "", // Auto-detect
-                //quoteChar: '"', // Default
+                transformHeader: header => header.trim(),
             });
 
             if (parseResult.errors && parseResult.errors.length > 0) {
                 logger.error(`PapaParse errors for dataset ${dataset_id}:`, parseResult.errors);
-                // Report only the first few errors to avoid overwhelming context
                 const errorSummary = parseResult.errors.slice(0, 3).map(e => e.message).join('; ');
                 return { error: `CSV Parsing failed: ${errorSummary}` };
             }
@@ -912,38 +724,40 @@ class AgentOrchestrator {
             }
 
             logger.info(`Successfully parsed ${parseResult.data.length} rows for dataset ${dataset_id}.`);
-            // Store the *full* parsed data in intermediate results
-            // Generate a unique reference for this parsed data within the turn
+            // Generate a unique reference for this parsed data
             const parsedDataRef = `parsed_${dataset_id}_${Date.now()}`;
+            // Store in the intermediate results
             this.turnContext.intermediateResults[parsedDataRef] = parseResult.data; 
 
-            // Return success and the reference ID
             return { 
                 result: { 
                     status: 'success', 
                     message: `Data parsed successfully, ${parseResult.data.length} rows found.`,
-                    parsed_data_ref: parsedDataRef, // Return reference for agent
+                    parsed_data_ref: parsedDataRef,
                     rowCount: parseResult.data.length
                 } 
             };
-
         } catch (error) {
             logger.error(`_parseCsvDataTool failed for ${dataset_id}: ${error.message}`, { error });
             return { error: `Failed to parse dataset content: ${error.message}` };
         }
     }
 
+    /** Tool: Generate Analysis Code */
     async _generateAnalysisCodeTool(args) { 
         const { analysis_goal } = args; 
-        logger.info(`Executing tool: generate_analysis_code`);
-        if (!analysis_goal) {
+        logger.info(`Executing tool: generate_analysis_code with goal: "${analysis_goal?.substring(0, 50)}..."`);
+
+        if (!analysis_goal || typeof analysis_goal !== 'string') {
             return { error: 'Missing or invalid required argument: analysis_goal' };
         }
+
         // Retrieve the stored schema
         const schemaData = this.turnContext.intermediateResults.lastSchema;
         if (!schemaData) {
             return { error: 'Schema not found in context. Use get_dataset_schema first.' };
         }
+
         try {
             const generatedCodeResponse = await promptService.generateAnalysisCode({
                 userId: this.userId,
@@ -952,9 +766,9 @@ class AgentOrchestrator {
             });
 
             if (!generatedCodeResponse || !generatedCodeResponse.code) {
-                 throw new Error('AI failed to generate valid analysis code.');
+                throw new Error('AI failed to generate valid analysis code.');
             }
-            // Don't store here, just return. Agent loop stores in intermediateResults.
+
             return { result: { code: generatedCodeResponse.code } }; 
         } catch (error) {
             logger.error(`_generateAnalysisCodeTool failed: ${error.message}`, { error });
@@ -965,117 +779,111 @@ class AgentOrchestrator {
     /** Tool: Execute Analysis Code */
     async _executeAnalysisCodeTool(args) {
         const { code, parsed_data_ref } = args;
-        logger.info(`Executing tool: execute_analysis_code`);
-        if (!code || typeof code !== 'string' || !parsed_data_ref || typeof parsed_data_ref !== 'string') {
-            return { error: 'Missing or invalid arguments: code (string) and parsed_data_ref (string) are required' };
+        logger.info(`Executing tool: execute_analysis_code with parsed data ref: ${parsed_data_ref}`);
+
+        if (!code || typeof code !== 'string') {
+            return { error: 'Missing or invalid required argument: code (must be a string)' };
         }
         
-        // Retrieve the actual parsed data using the reference ID
+        if (!parsed_data_ref || typeof parsed_data_ref !== 'string') {
+            return { error: 'Missing or invalid required argument: parsed_data_ref (must be a string)' };
+        }
+
+        // Retrieve the parsed data using the reference
         const parsedData = this.turnContext.intermediateResults[parsed_data_ref];
         if (!parsedData) {
-             return { error: `Parsed data not found for ref: ${parsed_data_ref}` };
+            return { error: `Parsed data not found for ref: ${parsed_data_ref}` };
         }
+
         if (!Array.isArray(parsedData)) {
             return { error: 'Referenced parsed data is not an array.'}; 
         }
 
         try {
-            // Call the CORRECT function from the service: executeSandboxedCode
             const result = await codeExecutionService.executeSandboxedCode(code, parsedData);
             
-            // Log the full result
-            console.log('[Agent Tool _executeAnalysisCodeTool] Full analysis result:', JSON.stringify(result, null, 2));
+            if (result.error) {
+                return { error: result.error };
+            }
+
+            if (result.result === undefined) {
+                return { error: 'Analysis code execution did not return any result.' };
+            }
             
-            // Store the ACTUAL result object internally 
-            this.turnContext.intermediateResults.analysisResult = result.result; // Extract the inner 'result' object
-            return { result: result.result }; // Return the inner 'result' object
+            logger.info(`Analysis execution successful.`);
+            return { result: result.result };
+
         } catch (error) {
             logger.error(`_executeAnalysisCodeTool failed: ${error.message}`, { error });
-            this.turnContext.intermediateResults.analysisError = error.message;
             return { error: `Analysis code execution failed: ${error.message}` };
         }
     }
 
-    /** Tool: Generate React Report Code */
+    /** Tool: Generate Report Code */
     async _generateReportCodeTool(args) {
-        const { analysis_summary } = args;
-        logger.info(`Executing tool: generate_report_code with summary: "${analysis_summary}"`);
+        const { report_goal } = args;
+        logger.info(`Executing tool: generate_report_code with goal: "${report_goal?.substring(0, 50)}..."`);
 
-        // Fix 3: Add context validation
-        let analysisDataForReport = this.turnContext.intermediateResults.analysisResult;
+        if (!report_goal || typeof report_goal !== 'string') {
+            return { error: 'Missing or invalid required argument: report_goal' };
+        }
 
-        if (!analysisDataForReport) {
-            logger.info('Current turn analysis data not found, checking for previous analysis data.');
-            // Try using the analysis data found during history preparation
-            analysisDataForReport = this.turnContext.intermediateResults.previousAnalysisResult; // Use the correct field name
+        // Gather all analysis results from the current turn
+        const analysisResults = this.turnContext.intermediateResults.analysisResults;
 
-            if (!analysisDataForReport) {
-                logger.error('[Generate Report Tool] No analysis data found in current OR previous context.');
-                // Provide a clearer error message to the LLM
+        // Check if we have any analysis results
+        if (!analysisResults || Object.keys(analysisResults).length === 0) {
+            // Try using previous results if available
+            if (this.turnContext.intermediateResults.previousAnalysisData) {
+                logger.info('No current analysis results found, using previous analysis data for report generation.');
+                analysisResults = this.turnContext.intermediateResults.previousAnalysisData;
+            } else {
                 return {
-                    error: 'Cannot generate report code: Analysis result is missing. Please run analysis first or ensure a previous analysis was completed successfully.'
+                    error: 'Cannot generate report code: No analysis results available. Please perform analysis first.'
                 };
             }
-
-            logger.info('[Generate Report Tool] Using previous analysis data for report generation/modification.');
-        } else {
-             logger.info('[Generate Report Tool] Using analysis data from the current turn.');
-        }
-
-        // Ensure analysisDataForReport is actually an object/array, not just truthy
-        if (typeof analysisDataForReport !== 'object' || analysisDataForReport === null) {
-             logger.error(`[Generate Report Tool] Invalid analysis data format: ${typeof analysisDataForReport}`);
-              return {
-                error: 'Cannot generate report code: Invalid analysis data format.'
-              };
-        }
-
-        // Convert analysis data to JSON string for the prompt service
-        let dataJsonString;
-        try {
-            dataJsonString = JSON.stringify(analysisDataForReport);
-        } catch (stringifyError) {
-            logger.error(`[Generate Report Tool] Failed to stringify analysis data: ${stringifyError.message}`);
-            return { error: `Internal error: Could not process analysis data.` };
         }
 
         try {
+            // Convert analysis results to a format suitable for the report generator
+            let resultsForReport;
+            try {
+                resultsForReport = JSON.stringify(analysisResults);
+            } catch (stringifyError) {
+                logger.error(`Failed to stringify analysis results: ${stringifyError.message}`);
+                return { error: `Internal error: Could not process analysis results for report.` };
+            }
+
             const reportResult = await promptService.generateReportCode({
                 userId: this.userId,
-                analysisSummary: analysis_summary,
-                dataJson: dataJsonString // Pass stringified data
+                reportGoal: report_goal,
+                analysisResults: resultsForReport
             });
 
-            // Fix: Extract the string from the result object
             const generatedCodeString = reportResult?.react_code;
 
             if (!generatedCodeString || typeof generatedCodeString !== 'string') {
-                 logger.warn('[Generate Report Tool] promptService.generateReportCode returned no valid code string.');
-                 return { error: 'Failed to generate report code. The AI might need more information or context.' };
+                logger.warn('promptService.generateReportCode returned no valid code string.');
+                return { error: 'Failed to generate report code. The AI might need more information or context.' };
             }
 
-            logger.info('[Generate Report Tool] Successfully generated React report code string.');
-            // Fix: Store the extracted STRING in turnContext
-            this.turnContext.generatedReportCode = generatedCodeString; 
-            // Fix: Return the string in the expected result structure
+            logger.info('Successfully generated React report code string.');
             return { result: { react_code: generatedCodeString } };
 
         } catch (error) {
-            logger.error(`[Generate Report Tool] Error calling promptService.generateReportCode: ${error.message}`, { error });
+            logger.error(`_generateReportCodeTool failed: ${error.message}`, { error });
             return { error: `Failed to generate report code: ${error.message}` };
         }
     }
 
     /** Tool: Answer User Signal */
     async _answerUserTool(args) {
-       logger.info(`Executing tool: _answerUserTool`);
+        logger.info(`Executing tool: _answerUserTool`);
         const { textResponse } = args;
         if (typeof textResponse !== 'string' || textResponse.trim() === '') {
-            // This validation is technically redundant due to parsing logic, but good practice
             return { error: 'Missing or empty required argument: textResponse for _answerUserTool' };
         }
         // This tool doesn't *do* anything other than signal the end
-        // The actual textResponse is handled when the agent loop breaks
         return { result: { message: 'Answer signal processed.'} };
     }
 }
