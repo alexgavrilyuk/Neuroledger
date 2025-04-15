@@ -386,7 +386,7 @@ const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
 
     // --- MODIFIED: System Prompt for React Report Code Generation ---
     // Updated to handle arbitrary JSON structures
-    const systemPrompt = `\
+    const systemPrompt = `\\
 You are an expert React developer specializing in data visualization using the Recharts library.
 Your task is to generate a **single, self-contained React functional component** named 'ReportComponent' based on the provided analysis data and summary.
 
@@ -429,6 +429,27 @@ ${analysisSummary}
 10. **Error Handling:** The component itself should handle potential missing fields in \`reportData\` gracefully. Helper functions should also handle invalid inputs (e.g., non-numeric values for formatting).
 11. **Print Styling:** Include CSS for print media queries as shown in the example below.
 
+**CRITICAL DEFENSIVE CODING REQUIREMENTS:**
+1. **Always Validate Data Before Access:** NEVER assume data exists or has a specific structure. Always validate all data before attempting to access or use it.
+2. **Use Optional Chaining:** When accessing nested properties (especially in callbacks, formatters, and library components), ALWAYS use optional chaining instead of direct property access. Example: use 'entry?.payload?.value' instead of 'entry.payload.value'.
+3. **Defensive Recharts Callbacks:** For Recharts formatter functions (labels, tooltips, etc.), ALWAYS check if parameters exist before using them. Parameters like 'entry' or 'payload' might be undefined during certain rendering phases. Use either optional chaining or explicit null checks.
+
+   GOOD EXAMPLE 1 (with explicit checks):
+   formatter: (value, entry) => {
+     if (!entry || !entry.payload || entry.payload.year !== '2025') return null;
+     return formatPercentage(value);
+   }
+   
+   GOOD EXAMPLE 2 (with optional chaining):
+   formatter: (value, entry) => entry?.payload?.year !== '2025' ? formatPercentage(value) : null
+   
+   BAD EXAMPLE (will cause runtime errors):
+   formatter: (value, entry) => entry.payload.year !== '2025' ? formatPercentage(value) : null
+
+4. **Null Checks In All Functions:** ALL helper functions must check inputs before accessing any properties or performing operations.
+5. **Fallback Values:** Always provide fallback values or components when data might be missing.
+6. **Runtime Error Prevention:** Code must never throw exceptions due to data structure variations. Add explicit checks and error boundaries for all potentially unsafe operations.
+
 **Example Structure (Conceptual):**
 \`\`\`javascript
 function ReportComponent({ reportData }) {
@@ -457,8 +478,8 @@ function ReportComponent({ reportData }) {
     // React component creation based on data analysis
     const renderMainMetrics = () => {
         // Example of intelligently determining what to render based on data structure
-        if (reportData.metrics || reportData.summary || reportData.overview) {
-            const metricsSource = reportData.metrics || reportData.summary || reportData.overview;
+        if (reportData?.metrics || reportData?.summary || reportData?.overview) {
+            const metricsSource = reportData?.metrics || reportData?.summary || reportData?.overview;
             // Render appropriate KPI cards based on what's available
             return createElement('div', { className: 'kpi-container', style: styles.kpiContainer },
                 /* Create KPI cards based on available metrics */
@@ -469,7 +490,7 @@ function ReportComponent({ reportData }) {
 
     const renderMainChart = () => {
         // Example of intelligently choosing chart type based on data structure
-        if (reportData.timeSeries || (reportData.data && Array.isArray(reportData.data) && reportData.data[0]?.date)) {
+        if (reportData?.timeSeries || (reportData?.data && Array.isArray(reportData?.data) && reportData?.data[0]?.date)) {
             // Render time series chart for time-based data
             return createElement('div', { className: 'chart-container', style: styles.chartContainer },
                 createElement('h3', null, 'Trend Analysis'),
@@ -477,7 +498,7 @@ function ReportComponent({ reportData }) {
                     /* Time series chart using LineChart or AreaChart */
                 )
             );
-        } else if (reportData.categories || reportData.breakdown || (reportData.data && reportData.data[0]?.category)) {
+        } else if (reportData?.categories || reportData?.breakdown || (reportData?.data && reportData?.data[0]?.category)) {
             // Render category breakdown chart
             return createElement('div', { className: 'chart-container', style: styles.chartContainer },
                 createElement('h3', null, 'Category Analysis'),
