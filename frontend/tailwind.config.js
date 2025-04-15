@@ -71,7 +71,16 @@ export default {
       animation: {
         'fadeIn': 'fadeIn 0.5s ease-in-out',
         'slideInBottom': 'slideInBottom 0.5s ease-out',
-        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'pulse-slow': 'pulse-slow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'pulse-subtle': 'pulse-slow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'blink': 'blink 1s step-end infinite',
+        'typing': 'typing 1.5s steps(30, end)',
+        'zoom-fade': 'zoom-fade 0.5s ease-out',
+        'tool-appear': 'tool-appear 0.3s ease-out',
+        'tool-disappear': 'tool-disappear 0.3s ease-out',
+        'thinking-dot-1': 'thinking-dots 1.4s infinite 0.2s',
+        'thinking-dot-2': 'thinking-dots 1.4s infinite 0.4s',
+        'thinking-dot-3': 'thinking-dots 1.4s infinite 0.6s',
       },
       // Define keyframes for animations
       keyframes: {
@@ -83,11 +92,43 @@ export default {
           '0%': { transform: 'translateY(10px)', opacity: '0' },
           '100%': { transform: 'translateY(0)', opacity: '1' },
         },
+        'pulse-slow': {
+          '0%, 100%': { opacity: '1' },
+          '50%': { opacity: '0.6' },
+        },
+        blink: {
+          '0%': { opacity: 1 },
+          '49%': { opacity: 1 },
+          '50%': { opacity: 0 },
+          '100%': { opacity: 0 },
+        },
+        typing: {
+          '0%': { width: '0%' },
+          '100%': { width: '100%' }
+        },
+        'zoom-fade': {
+          '0%': { transform: 'scale(0.95)', opacity: '0' },
+          '100%': { transform: 'scale(1)', opacity: '1' },
+        },
+        'tool-appear': {
+          '0%': { opacity: 0, transform: 'translateY(-10px)' },
+          '100%': { opacity: 1, transform: 'translateY(0)' }
+        },
+        'tool-disappear': {
+          '0%': { transform: 'translateY(0)', opacity: '1' },
+          '100%': { transform: 'translateY(10px)', opacity: '0' },
+        },
+        'thinking-dots': {
+          '0%, 100%': { opacity: 0.2 },
+          '50%': { opacity: 1 }
+        },
       },
       // Add background patterns
       backgroundImage: {
         'grid-white': `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(255 255 255 / 0.05)'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e")`,
         'grid-black': `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(0 0 0 / 0.05)'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e")`,
+        'gradient-subtle-light': 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
+        'gradient-subtle-dark': 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
       },
       // Add blur radius values
       blur: {
@@ -158,6 +199,18 @@ export default {
         },
         '.animation-delay-5000': {
           'animation-delay': '5000ms',
+        },
+        // Streaming code editor style
+        '.streaming-code': {
+          'position': 'relative',
+          'border-left': '3px solid #3b82f6',
+          'padding-left': '1rem',
+          'margin-bottom': '1rem',
+        },
+        '.typewriter': {
+          'overflow': 'hidden',
+          'white-space': 'nowrap',
+          'animation': 'typing 1.5s steps(40, end)',
         },
       };
       addUtilities(newUtilities, ['responsive', 'hover', 'dark']);

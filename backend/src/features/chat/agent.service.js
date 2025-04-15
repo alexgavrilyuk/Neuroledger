@@ -7,6 +7,7 @@ const { assembleContext } = require('./prompt.service'); // Import assembleConte
 const codeExecutionService = require('../../shared/services/codeExecution.service'); // Import Code Execution Service
 const Papa = require('papaparse'); // Import papaparse
 const User = require('../users/user.model');
+const { streamLLMReasoningResponse } = require('./prompt.service'); // Ensure this is imported
 
 const MAX_AGENT_ITERATIONS = 10; // Increased iterations slightly for multi-step tasks
 const MAX_TOOL_RETRIES = 1; // Allow one retry for potentially transient tool errors
@@ -596,7 +597,7 @@ class AgentOrchestrator {
         // --- END ADDED --
 
         // Ensure fullChatHistory exists (it should be set by _prepareChatHistory)
-        const fullChatHistory = this.turnContext.fullChatHistory || [];
+        const chatHistoryForLLM = this.turnContext.fullChatHistory || []; // Use variable from context
 
         // Prepare dataset context by adding schemas and samples to the context
         const datasetSchemas = this.turnContext.intermediateResults.datasetSchemas || {};
@@ -610,24 +611,19 @@ class AgentOrchestrator {
         }
 
         return {
-            userId: this.userId, // Pass userId for model preference selection
+            userId: this.userId, 
             originalQuery: this.turnContext.originalQuery,
-            // REMOVED historySummary
-            fullChatHistory: fullChatHistory, // Pass the full formatted history
+            // --- FIX: Use 'history' key --- 
+            history: chatHistoryForLLM, // Use the standardized key 'history'
             currentTurnSteps: this.turnContext.steps,
-            availableTools: this._getToolDefinitions(), // Pass tool definitions
-            userContext: this.turnContext.userContext, // Pass user context
-            teamContext: this.turnContext.teamContext, // Pass team context
-            // --- ADDED: Pass previous analysis info ---
+            availableTools: this._getToolDefinitions(), 
+            userContext: this.turnContext.userContext, 
+            teamContext: this.turnContext.teamContext, 
             previousAnalysisResultSummary: previousAnalysisResultSummary,
             hasPreviousGeneratedCode: hasPreviousGeneratedCode,
-            // --- END ADDED ---
-            // Pass current turn analysis result if available (for direct use)
             analysisResult: this.turnContext.intermediateResults.analysisResult,
-            // --- ADDED: Pass dataset context ---
             datasetSchemas: datasetSchemas,
             datasetSamples: datasetSamples
-            // --- END ADDED ---
         };
     }
 
@@ -1232,6 +1228,351 @@ class AgentOrchestrator {
         // The actual textResponse is handled when the agent loop breaks
         return { result: { message: 'Answer signal processed.'} };
     }
+
+    /**
+     * Attempts to parse a JSON tool call from a string.
+     * Handles potential markdown fences and JSON parsing errors.
+     * @param {string} text - The text potentially containing a tool call.
+     * @returns {object|null} - The parsed tool object {tool, args} or null if no valid call found.
+     */
+    _tryParseJsonToolCall(text) {
+        if (!text || typeof text !== 'string') return null;
+        const trimmedText = text.trim();
+
+        // Regex to find a JSON object enclosed in optional markdown fences, potentially at the end
+        const jsonRegex = /(?:```(?:json)?\s*)?(\{[\s\S]*\})(?:\s*```)?$/m;
+        const jsonMatch = trimmedText.match(jsonRegex);
+
+        if (jsonMatch && jsonMatch[1]) {
+            const potentialJson = jsonMatch[1];
+            try {
+                // Basic sanitization attempt (might need refinement based on specific LLM outputs)
+                const sanitizedJsonString = potentialJson
+                    // Attempt to fix trailing commas before closing braces/brackets
+                    .replace(/,\s*([}\]])/g, '$1'); 
+
+                const parsed = JSON.parse(sanitizedJsonString);
+
+                if (parsed && typeof parsed.tool === 'string' && typeof parsed.args === 'object' && parsed.args !== null) {
+                    // Validate against known tools? Maybe not strictly necessary here.
+                    return { tool: parsed.tool, args: parsed.args };
+                }
+            } catch (e) {
+                // Ignore parsing errors - might be incomplete JSON during stream
+                 logger.debug(`[_tryParseJsonToolCall] Failed to parse potential JSON: ${e.message}`);
+            }
+        }
+        return null;
+    }
 }
 
-module.exports = { AgentOrchestrator };
+/**
+ * StreamingAgentOrchestrator extends the base AgentOrchestrator with
+ * streaming capabilities to provide real-time updates to the client.
+ */
+class StreamingAgentOrchestrator extends AgentOrchestrator {
+    /**
+     * @param {string} userId - User ID
+     * @param {string|null} teamId - Team ID
+     * @param {string} sessionId - Chat session ID
+     * @param {string} aiMessagePlaceholderId - ID of the AI message placeholder
+     * @param {Function} sendEventCallback - Callback function to send events to the client
+     * @param {Object|null} previousAnalysisData - Previous analysis data
+     * @param {string|null} previousGeneratedCode - Previously generated code
+     */
+    constructor(userId, teamId, sessionId, aiMessagePlaceholderId, sendEventCallback, previousAnalysisData = null, previousGeneratedCode = null) {
+        super(userId, teamId, sessionId, aiMessagePlaceholderId, previousAnalysisData, previousGeneratedCode);
+        this.sendEventCallback = sendEventCallback; 
+        this.accumulatedText = ''; 
+        this.currentToolCallInfo = null; 
+        this.isToolCallComplete = false; // Flag to track if a tool call is expected
+    }
+
+    _sendStreamEvent(eventType, data) {
+        if (typeof this.sendEventCallback === 'function') {
+            const eventData = { messageId: this.aiMessagePlaceholderId, sessionId: this.sessionId, ...data };
+            this.sendEventCallback(eventType, eventData);
+        } else {
+            logger.warn('Streaming event callback is not a function, cannot send event.', { eventType });
+        }
+    }
+
+    _emitAgentStatus(eventName, payload) {
+        if (eventName === 'agent:thinking') {
+            this._sendStreamEvent('thinking', {});
+            super._emitAgentStatus(eventName, payload); // Keep websocket update if needed
+        }
+    }
+
+    // Helper to format tool result for LLM history
+    _formatToolResultForLLM(toolName, toolResult) {
+        // Gemini uses 'function' role for tool calls and 'model' for responses,
+        // but expects tool results via a specific 'functionResponse' part type.
+        // We'll mimic this structure logically.
+        // Note: The actual API call in gemini.client.js handles the specific format.
+        // Here, we just structure the history entry conceptually.
+        return {
+            role: 'user', // Representing the system/tool providing the result back
+            parts: [{
+                functionResponse: {
+                    name: toolName,
+                    response: toolResult.result || { error: toolResult.error || 'Tool execution failed' },
+                }
+            }]
+        };
+    }
+
+    async runAgentLoopWithStreaming(userMessage, sessionDatasetIds = []) {
+        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Starting for user ${this.userId}`);
+        this.turnContext.originalQuery = userMessage;
+        this.accumulatedText = ''; // Reset accumulated text for the whole turn
+        this.turnContext.steps = [];
+        this.isToolCallComplete = false;
+
+        let resolveProcessing, rejectProcessing;
+        const processingCompletePromise = new Promise((resolve, reject) => {
+            resolveProcessing = resolve;
+            rejectProcessing = reject;
+        });
+
+        let finalOutcome = { status: 'unknown', error: null, aiResponseText: null };
+        let loopCount = 0; // Add loop counter to prevent infinite loops
+        const MAX_LOOPS = 10; // Set a max number of LLM <-> Tool steps
+
+        try {
+            this._sendStreamEvent('start', {});
+            this._emitAgentStatus('agent:thinking', {}); // Initial thinking
+
+            // Preload context ONCE at the start
+            await this._preloadDatasetContext(sessionDatasetIds);
+            await this._prepareChatHistory(); // Prepare initial history
+
+            // Get initial LLM context
+            const llmContext = this._prepareLLMContext();
+            let currentAccumulatedTextForStep = ''; // Track text for the current step
+
+            // --- Main Agent Loop ---
+            while (loopCount < MAX_LOOPS) {
+                loopCount++;
+                logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Starting loop iteration ${loopCount}`);
+                currentAccumulatedTextForStep = ''; // Reset text for this step
+                let currentToolCall = null; // Reset tool call for this step
+                let stepCompleted = false; // Flag for this step's completion
+
+                const stepPromise = new Promise(async (resolveStep, rejectStep) => {
+
+                    const streamCallback = async (eventType, data) => {
+                        logger.debug(`[Stream Callback - Loop ${loopCount}] Received event: ${eventType}`, data);
+                        try {
+                            switch (eventType) {
+                                case 'token':
+                                    if (data.content) {
+                                        this.accumulatedText += data.content; // Append to overall turn text
+                                        currentAccumulatedTextForStep += data.content; // Append to step text
+                                        this._sendStreamEvent('token', { content: data.content });
+                                        // Check for tool call within the step's text
+                                        const detectedTool = this._tryParseToolCall(currentAccumulatedTextForStep);
+                                        if (detectedTool) {
+                                            logger.info(`[Stream Callback - Loop ${loopCount}] Detected potential tool call: ${detectedTool.tool}`);
+                                            currentToolCall = detectedTool;
+                                        }
+                                    }
+                                    break;
+                                case 'completed':
+                                    logger.info(`[Stream Callback - Loop ${loopCount}] LLM stream for this step completed.`);
+                                    stepCompleted = true;
+                                    if (currentToolCall) {
+                                        // --- Execute Tool ---
+                                        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Executing tool: ${currentToolCall.tool} (Loop ${loopCount})`);
+                                        this.turnContext.steps.push({ tool: currentToolCall.tool, args: currentToolCall.args, resultSummary: 'Executing...', isStreaming: true });
+                                        this._sendStreamEvent('tool_call', { toolName: currentToolCall.tool, input: currentToolCall.args });
+
+                                        try {
+                                            const toolResult = await this.toolDispatcher(currentToolCall.tool, currentToolCall.args);
+                                            logger.debug(`Tool dispatch completed (Loop ${loopCount}). Result:`, toolResult);
+                                            const resultSummary = this._summarizeToolResult(toolResult);
+                                            const lastStep = this.turnContext.steps[this.turnContext.steps.length - 1];
+                                            if (lastStep) lastStep.resultSummary = resultSummary;
+                                            this._sendStreamEvent('tool_result', {
+                                                toolName: currentToolCall.tool,
+                                                status: toolResult.error ? 'error' : 'success',
+                                                output: resultSummary,
+                                                error: toolResult.error || null
+                                            });
+
+                                            if (toolResult.error) {
+                                                const toolErrorMessage = `Tool execution failed: ${toolResult.error}`;
+                                                logger.warn(`Tool ${currentToolCall.tool} returned an error state:`, toolResult.error);
+                                                finalOutcome = { status: 'error', error: toolErrorMessage, aiResponseText: this.accumulatedText };
+                                                await super._updatePromptHistoryRecord('error', this.accumulatedText, toolErrorMessage, this.turnContext.generatedReportCode);
+                                                this._sendStreamEvent('error', { message: toolErrorMessage });
+                                                resolveProcessing(); // End overall processing on tool error
+                                                rejectStep(new Error(toolErrorMessage)); // End this step with error
+                                            } else {
+                                                // --- Tool Success: Format result and prepare for next loop ---
+                                                logger.info(`[Agent Loop - STREAMING] Tool ${currentToolCall.tool} executed successfully. Preparing next step.`);
+                                                // Store results contextually (as before)
+                                                if (currentToolCall.tool === 'generate_report_code' && toolResult.result?.react_code) {
+                                                    this.turnContext.generatedReportCode = toolResult.result.react_code;
+                                                    this._sendStreamEvent('generated_code', { code: toolResult.result.react_code });
+                                                     // <<< --- SPECIAL CASE: If report code generated, maybe end the loop? --- >>>
+                                                     // For now, let's assume generating report code IS the final step.
+                                                     logger.info(`[Agent Loop - STREAMING] Report code generated. Ending agent loop.`);
+                                                     finalOutcome = { status: 'completed', error: null, aiResponseText: this.accumulatedText };
+                                                     await super._updatePromptHistoryRecord('completed', this.accumulatedText, null, this.turnContext.generatedReportCode);
+                                                     this._sendStreamEvent('completed', { finalContent: this.accumulatedText });
+                                                     resolveProcessing(); // End overall processing
+                                                     resolveStep(); // End this step successfully
+                                                     return; // Exit callback early
+
+                                                } else if (currentToolCall.tool === 'execute_analysis_code' /*...other tools...*/ ) {
+                                                    // Store intermediate results if necessary
+                                                    // ...
+                                                }
+
+                                                // Format tool result for LLM history
+                                                const toolResultForHistory = this._formatToolResultForLLM(currentToolCall.tool, toolResult);
+                                                llmContext.history.push({ role: 'model', parts: [{ text: currentAccumulatedTextForStep || '' }] }); // Add AI's part (tool call)
+                                                llmContext.history.push(toolResultForHistory); // Add tool result part
+
+                                                resolveStep(); // Resolve step promise to continue the outer loop
+                                            }
+                                        } catch (toolError) {
+                                            const toolErrorMessage = `Tool execution failed: ${toolError.message}`;
+                                            logger.error(`Error THROWN during tool execution (Loop ${loopCount}): ${currentToolCall.tool}. Message: ${toolError.message}`, { stack: toolError.stack });
+                                            this._sendStreamEvent('tool_result', { /* ... error details */ });
+                                            finalOutcome = { status: 'error', error: toolErrorMessage, aiResponseText: this.accumulatedText };
+                                            await super._updatePromptHistoryRecord('error', this.accumulatedText, toolErrorMessage, this.turnContext.generatedReportCode);
+                                            this._sendStreamEvent('error', { message: toolErrorMessage });
+                                            resolveProcessing(); // End overall processing
+                                            rejectStep(toolError); // Reject step promise
+                                        }
+                                    } else {
+                                        // --- No Tool Call: LLM finished with text response ---
+                                        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] LLM finished loop ${loopCount} without tool call. Finalizing turn.`);
+                                        finalOutcome = { status: 'completed', error: null, aiResponseText: this.accumulatedText };
+                                        await super._updatePromptHistoryRecord('completed', this.accumulatedText, null, this.turnContext.generatedReportCode);
+                                        this._sendStreamEvent('completed', { finalContent: this.accumulatedText });
+                                        resolveProcessing(); // Resolve overall promise
+                                        resolveStep(); // Resolve step promise (signals loop end)
+                                    }
+                                    break;
+                                case 'error':
+                                    const llmErrorMessage = data.message || 'Unknown streaming error from LLM';
+                                    logger.error(`[Stream Callback - Loop ${loopCount}] Received error from LLM stream: ${llmErrorMessage}`);
+                                    stepCompleted = true;
+                                    finalOutcome = { status: 'error', error: llmErrorMessage, aiResponseText: this.accumulatedText };
+                                    await super._updatePromptHistoryRecord('error', this.accumulatedText, llmErrorMessage, this.turnContext.generatedReportCode);
+                                    this._sendStreamEvent('error', { message: llmErrorMessage });
+                                    resolveProcessing(); // Resolve overall promise (with error state)
+                                    rejectStep(new Error(llmErrorMessage)); // Reject step promise
+                                    break;
+                                default:
+                                    logger.warn(`[Stream Callback - Loop ${loopCount}] Unhandled event type: ${eventType}`);
+                            }
+                        } catch (callbackError) {
+                            logger.error(`[Stream Callback - Loop ${loopCount}] Internal error: ${callbackError.message}`, { callbackError });
+                            stepCompleted = true;
+                            const internalMessage = `Internal callback error: ${callbackError.message}`;
+                            finalOutcome = { status: 'error', error: internalMessage, aiResponseText: this.accumulatedText };
+                            try {
+                                await super._updatePromptHistoryRecord('error', this.accumulatedText, internalMessage, this.turnContext.generatedReportCode);
+                                this._sendStreamEvent('error', { message: internalMessage });
+                            } catch (finalError) { logger.error(`Failed to report internal callback error: ${finalError.message}`); }
+                            rejectProcessing(callbackError); // Reject overall promise
+                            rejectStep(callbackError); // Reject step promise
+                        }
+                    }; // End streamCallback definition
+
+                    // --- Initiate LLM call for this step ---
+                    logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Calling LLM for step ${loopCount}. History length: ${llmContext.history.length}`);
+                    this._sendStreamEvent('thinking', {}); // Indicate thinking before each LLM call
+                    await promptService.streamLLMReasoningResponse(llmContext, streamCallback);
+                    logger.info(`[Agent Loop - STREAMING ${this.sessionId}] LLM stream initiated for step ${loopCount}. Callback will handle result.`);
+
+                }); // End stepPromise definition
+
+                // Await the completion of the current step (LLM response + potential tool execution)
+                try {
+                    await stepPromise;
+                    // Check if the overall process was completed/resolved within the step's callback
+                    if (finalOutcome.status === 'completed' || finalOutcome.status === 'error') {
+                         logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Loop break condition met after step ${loopCount}. Status: ${finalOutcome.status}`);
+                         break; // Exit the while loop
+                    }
+                     logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Step ${loopCount} completed successfully, continuing loop.`);
+                } catch (stepError) {
+                    logger.error(`[Agent Loop - STREAMING ${this.sessionId}] Step ${loopCount} failed: ${stepError.message}. Ending loop.`);
+                     // Ensure finalOutcome reflects the error if not already set
+                     if (finalOutcome.status !== 'error') {
+                         finalOutcome = { status: 'error', error: stepError.message, aiResponseText: this.accumulatedText };
+                     }
+                    break; // Exit the while loop on step failure
+                }
+
+            } // --- End Main Agent Loop (while) ---
+
+            if (loopCount >= MAX_LOOPS) {
+                 logger.warn(`[Agent Loop - STREAMING ${this.sessionId}] Reached max loop count (${MAX_LOOPS}). Forcing completion.`);
+                 finalOutcome = { status: 'error', error: 'Agent reached maximum steps.', aiResponseText: this.accumulatedText };
+                 await super._updatePromptHistoryRecord('error', this.accumulatedText, finalOutcome.error, this.turnContext.generatedReportCode);
+                 this._sendStreamEvent('error', { message: finalOutcome.error });
+                 resolveProcessing(); // Ensure promise is resolved
+            } else if (finalOutcome.status === 'unknown') {
+                 // Loop finished without explicit completed/error (shouldn't happen ideally)
+                 logger.warn(`[Agent Loop - STREAMING ${this.sessionId}] Loop finished unexpectedly with unknown status.`);
+                 finalOutcome = { status: 'error', error: 'Agent finished unexpectedly.', aiResponseText: this.accumulatedText };
+                 await super._updatePromptHistoryRecord('error', this.accumulatedText, finalOutcome.error, this.turnContext.generatedReportCode);
+                 this._sendStreamEvent('error', { message: finalOutcome.error });
+                 resolveProcessing();
+            }
+
+            // --- Wait for the overall completion signal ---
+            // This might be redundant now if resolveProcessing is called correctly in all end paths
+            // await processingCompletePromise;
+            logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Overall processing completion signal received. Final outcome: ${finalOutcome.status}`);
+
+
+        } catch (error) {
+            logger.error(`[Agent Loop - STREAMING ${this.sessionId}] Top-level error: ${error.message}`, { error });
+            if (finalOutcome.status === 'unknown') {
+                finalOutcome = { status: 'error', error: error.message || 'Unknown agent error', aiResponseText: this.accumulatedText };
+            }
+            if (finalOutcome.status !== 'completed') {
+                try {
+                    const errorMessage = finalOutcome.error || error.message || 'Unknown error';
+                    await super._updatePromptHistoryRecord('error', this.accumulatedText || null, errorMessage, this.turnContext.generatedReportCode);
+                    this._sendStreamEvent('error', { message: errorMessage });
+                } catch (reportingError) { logger.error(`Error reporting top-level error: ${reportingError.message}`); }
+            }
+             // Ensure promise is resolved/rejected if an error happens before it's settled
+             if (typeof rejectProcessing === 'function') { // Check if rejectProcessing is defined
+                 try { rejectProcessing(error); } catch (e) { /* ignore */ }
+             }
+
+            return finalOutcome;
+        } finally {
+            logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Reached finally block. Final Status: ${finalOutcome.status}`);
+             // Send a final 'end' event AFTER the main promise resolves/rejects
+             // Ensure this doesn't race with 'completed' or 'error' events
+             // Maybe delay slightly? Or rely on client handling?
+             // For now, let's send it to signal HTTP response end.
+             this._sendStreamEvent('end', { status: finalOutcome.status }); // Send final status
+        }
+
+        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Returning final outcome:`, finalOutcome);
+        return finalOutcome;
+    }
+
+    // --- ADD HELPER FOR STREAMING PARSE --- 
+    _tryParseToolCall(textChunk) {
+         // Use the parsing logic from the base class
+         return super._tryParseJsonToolCall(textChunk);
+    }
+}
+
+module.exports = {
+    AgentOrchestrator,
+    StreamingAgentOrchestrator
+};
+

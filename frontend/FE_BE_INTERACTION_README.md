@@ -50,6 +50,37 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ---
 
+### Feature: Chat Streaming
+
+*   **`GET /api/v1/chats/{sessionId}/stream`**
+    *   **Description:** Streams chat responses in real-time using Server-Sent Events (SSE). The connection remains open while the AI generates a response, with updates sent as events.
+    *   **Auth:** Required (Login + Active Subscription).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId).
+    *   **Query Params:** 
+        * `promptText` (string, required): The user's message text.
+        * `selectedDatasetIds` (string, optional): Comma-separated list of dataset IDs to use for context (required for first message in a session).
+    *   **Server-Sent Event Types:**
+        * `start`: Initial event when streaming begins.
+        * `user_message_created`: Confirms user message has been saved with its ID.
+        * `ai_message_created`: Provides the AI message placeholder ID.
+        * `thinking`: Indicates the AI is thinking/reasoning.
+        * `token`: Contains a chunk of generated text being streamed.
+        * `tool_call`: Indicates a tool is being called (e.g., executing code, fetching data).
+        * `tool_result`: Provides the result or error from a tool call.
+        * `generated_code`: Contains generated code (e.g., for data visualization).
+        * `completed`: Indicates successful completion with final content.
+        * `failed`: Indicates an error occurred during generation.
+        * `error`: Contains error information if something went wrong.
+        * `end`: Final event before the connection closes.
+    *   **Event Data Format:** All events have a `data` field containing a JSON-serialized object with event-specific properties.
+    *   **Errors:** 
+        * Standard HTTP errors (`400`, `401`, `403`, `404`, `500`) for initial connection issues.
+        * SSE `error` events for problems during streaming.
+    *   **Notes:**
+        * The frontend should handle reconnection for network interruptions.
+        * For clients that don't support EventSource with Auth headers, the Auth token should be included in URL params.
+        * See `frontend/src/features/dashboard/services/chat.api.js` for a reference implementation.
+
 ### Feature: Subscriptions (Dummy)
 
 *   **`GET /api/v1/subscriptions/status`**

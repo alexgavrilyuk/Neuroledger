@@ -35,7 +35,7 @@ const mapSystemPromptToGemini = (systemPrompt) => {
 
 
 /**
- * Sends a request to the Google Gemini API.
+ * Sends a NON-STREAMING request to the Google Gemini API.
  *
  * @param {object} options - The options for the API call.
  * @param {string} options.model - The Gemini model to use (e.g., 'gemini-2.5-pro').
@@ -72,6 +72,7 @@ const generateContent = async (options) => {
 
         // Use generateContent for single-turn or simple exchanges for now
         // For more complex chat, consider startChat with history
+        logger.debug(`[generateContent - Gemini] Sending NON-STREAMING request. Model: ${model}, Messages Count: ${history.length}, Config: ${JSON.stringify(generationConfig)}`);
         const result = await geminiModel.generateContent({
             contents: history,
             generationConfig: generationConfig,
@@ -113,7 +114,53 @@ const generateContent = async (options) => {
     }
 };
 
+/**
+ * Creates a STREAMING request to the Google Gemini API.
+ *
+ * @param {object} options - The options for the API call (similar to generateContent).
+ * @returns {Promise<Stream>} - An iterable stream yielding chunks of the response.
+ */
+const streamGenerateContent = async (options) => {
+    if (!genAI) {
+        throw new Error('Gemini client is not initialized.');
+    }
+
+    const { model, system, messages, max_tokens, temperature } = options;
+
+    if (!model || !messages || !Array.isArray(messages)) {
+        throw new Error('Missing required parameters: model and messages array.');
+    }
+
+    try {
+        const geminiModel = genAI.getGenerativeModel({ model });
+
+        const geminiSystemPrompt = mapSystemPromptToGemini(system);
+        const geminiMessages = mapMessagesToGemini(messages);
+        const history = geminiSystemPrompt ? [geminiSystemPrompt, ...geminiMessages] : geminiMessages;
+
+        const generationConfig = {};
+        if (max_tokens !== undefined) generationConfig.maxOutputTokens = max_tokens;
+        if (temperature !== undefined) generationConfig.temperature = temperature;
+
+        logger.debug(`[streamGenerateContent - Gemini] Sending STREAMING request. Model: ${model}, Messages Count: ${history.length}, Config: ${JSON.stringify(generationConfig)}`);
+        
+        // Use generateContentStream for streaming
+        const result = await geminiModel.generateContentStream({
+            contents: history,
+            generationConfig: generationConfig,
+        });
+
+        // Return the stream iterator directly
+        return result.stream;
+
+    } catch (error) {
+        logger.error(`Error starting Gemini stream for model ${model}: ${error.message}`, { error });
+        throw new Error(`Gemini API Streaming Error: ${error.message}`);
+    }
+};
+
 module.exports = {
     generateContent,
+    streamGenerateContent, // Export the new streaming function
     isAvailable: () => !!genAI, // Export a function to check availability
 }; 

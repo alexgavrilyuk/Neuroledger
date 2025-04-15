@@ -5,7 +5,8 @@ const {
   updateChatSession,
   deleteChatSession,
   addMessage,
-  getChatMessages
+  getChatMessages,
+  handleStreamingChatRequest
 } = require('./chat.service');
 const { workerHandler } = require('./chat.taskHandler');
 const PromptHistory = require('./prompt.model');
@@ -279,6 +280,62 @@ const handleWorkerRequest = async (req, res) => {
   }
 };
 
+/**
+ * Stream a chat message and AI response in real-time using Server-Sent Events
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @returns {Promise<void>}
+ */
+const streamMessage = async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { promptText, selectedDatasetIds = [] } = req.query;
+    
+    if (!promptText) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Message text is required as a query parameter'
+      });
+    }
+
+    // Set headers for Server-Sent Events
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    // Handle client disconnection
+    req.on('close', () => {
+      logger.info(`Client disconnected from stream for session ${sessionId}`);
+    });
+
+    // Start the streaming process
+    await handleStreamingChatRequest(
+      sessionId,
+      req.user._id,
+      promptText,
+      selectedDatasetIds.split(',').filter(id => id.trim()),
+      res // Pass the response object to write events
+    );
+    
+    // Note: The response is kept open for streaming until the agent completes
+    // or the client disconnects. handleStreamingChatRequest will close the connection.
+  } catch (error) {
+    logger.error(`Failed to stream message: ${error.message}`);
+    
+    // If headers haven't been sent yet, return an error response
+    if (!res.headersSent) {
+      return res.status(400).json({
+        status: 'error',
+        message: error.message
+      });
+    }
+    
+    // If headers have been sent (streaming started), send an error event
+    res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
+  }
+};
+
 module.exports = {
   createSession,
   getSessions,
@@ -288,5 +345,6 @@ module.exports = {
   sendMessage,
   getMessages,
   getMessage,
-  handleWorkerRequest
+  handleWorkerRequest,
+  streamMessage
 }; 

@@ -583,9 +583,119 @@ Focus on creating a functional, well-structured, and visually clear report compo
     }
 };
 
+/**
+ * [STREAMING] Calls the LLM to get the next reasoning step or final answer, yielding chunks.
+ * @param {object} agentContext - Context prepared by AgentOrchestrator.
+ * @param {Function} streamCallback - Function to call with each received chunk/event.
+ *                                      Callback signature: (eventType, data)
+ *                                      eventType: 'token', 'tool_call', 'completed', 'error'
+ */
+const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
+    const { userId } = agentContext;
+    const { provider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[LLM Reasoning - STREAMING] Using ${provider} model: ${modelToUse} for user ${userId}`);
+
+    // Check provider availability
+    if ((provider === 'claude' && !anthropic) ||
+        (provider === 'gemini' && !geminiClient.isAvailable()) ||
+        (provider === 'openai' && !openaiClient.isAvailable())) {
+        logger.error(`streamLLMReasoningResponse called for ${provider} but client is not available.`);
+        streamCallback('error', { message: `AI assistant (${provider}) is currently unavailable.` });
+        return; // Stop processing
+    }
+
+    const startTime = Date.now();
+    const { originalQuery, fullChatHistory, currentTurnSteps, availableTools, userContext, teamContext,
+            analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = agentContext;
+
+    try {
+        const systemPrompt = generateAgentSystemPrompt({
+            userContext, teamContext, currentTurnSteps, availableTools,
+            analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode,
+            datasetSchemas: agentContext.datasetSchemas || {},
+            datasetSamples: agentContext.datasetSamples || {}
+        });
+        logger.debug(`[Agent Reasoning - STREAMING] System Prompt Length: ${systemPrompt.length}`);
+
+        const messages = [
+            ...(fullChatHistory || []), 
+            { role: "user", content: originalQuery }
+        ];
+        logger.debug(`[Agent Reasoning - STREAMING] Sending ${messages.length} messages to ${provider}.`);
+
+        const apiOptions = {
+            model: modelToUse,
+            max_tokens: provider === 'gemini' ? 28192 : (provider === 'openai' ? 24096 : 24096),
+            system: systemPrompt,
+            messages,
+            temperature: 0.1,
+            stream: true // <<< Enable streaming for all providers here
+        };
+
+        let stream;
+        if (provider === 'gemini') {
+            stream = await geminiClient.streamGenerateContent(apiOptions);
+        } else if (provider === 'openai') {
+            stream = await openaiClient.streamChatCompletion(apiOptions);
+        } else { // Claude
+            stream = await anthropic.messages.create(apiOptions);
+        }
+
+        logger.info(`LLM Reasoning stream started via ${provider}.`);
+
+        // Process the stream
+        for await (const chunk of stream) {
+            // --- Chunk processing logic needs to be provider-specific --- 
+            if (provider === 'openai') {
+                const delta = chunk.choices?.[0]?.delta?.content;
+                if (delta) {
+                    streamCallback('token', { content: delta });
+                }
+                // TODO: Add OpenAI tool call stream handling if needed
+                if(chunk.choices?.[0]?.finish_reason === 'stop'){
+                     logger.info('OpenAI stream finished.');
+                 }
+            } else if (provider === 'gemini') {
+                // Gemini SDK yields chunks directly
+                try {
+                    const text = chunk.text(); // Method to get text from Gemini chunk
+                    if (text) {
+                         streamCallback('token', { content: text });
+                    }
+                } catch (e) {
+                    // Handle potential errors during text extraction from chunk
+                     logger.error(`Error processing Gemini stream chunk: ${e.message}`, chunk);
+                     streamCallback('error', { message: `Error processing AI response chunk: ${e.message}` });
+                }
+            } else { // Claude
+                 // Anthropic SDK stream events
+                 if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+                     streamCallback('token', { content: chunk.delta.text });
+                 } else if (chunk.type === 'message_stop') {
+                     logger.info('Claude stream finished.');
+                 } else if (chunk.type === 'content_block_start' && chunk.content_block.type === 'tool_use') {
+                    // Basic handling for tool calls - might need refinement
+                    streamCallback('tool_call', { toolName: chunk.content_block.name, input: chunk.content_block.input });
+                 }
+                 // Add handling for other Claude stream events if necessary
+            }
+        }
+
+        // Stream ended normally
+        const durationMs = Date.now() - startTime;
+        logger.info(`LLM Reasoning stream via ${provider} completed in ${durationMs}ms.`);
+        streamCallback('completed', { finalContent: null }); // Signal completion
+
+    } catch (error) {
+        logger.error(`Error during ${provider} LLM streaming reasoning API call: ${error.message}`, error);
+        streamCallback('error', { message: `AI assistant (${provider}) failed to generate a streaming response: ${error.message}` });
+    }
+};
+
 module.exports = {
     assembleContext, // Keep for potential future use
     getLLMReasoningResponse, // New function for the agent
+    streamLLMReasoningResponse, // Export the NEW streaming function
     generateAnalysisCode, // Export new function
     generateReportCode, // Add the new function
     // summarizeChatHistory REMOVED from exports

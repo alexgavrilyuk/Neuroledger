@@ -1,5 +1,5 @@
 // frontend/src/features/dashboard/context/ChatContext.jsx
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import {
   createChatSession as apiCreateChatSession,
   getChatSessions as apiGetChatSessions,
@@ -8,6 +8,7 @@ import {
   deleteChatSession as apiDeleteChatSession,
   sendChatMessage as apiSendChatMessage,
   getChatMessages as apiGetChatMessages,
+  streamChatMessage as apiStreamChatMessage,
 } from '../services/chat.api';
 import { useSocket } from '../hooks/useSocket';
 import logger from '../../../shared/utils/logger';
@@ -25,6 +26,14 @@ const AGENT_STATUS = {
   ERROR: 'error',
 };
 
+// Define Streaming Status types
+const STREAMING_STATUS = {
+  INACTIVE: 'inactive',
+  ACTIVE: 'active',
+  ERROR: 'error',
+  COMPLETED: 'completed',
+};
+
 /**
  * Provider component for chat state management
  */
@@ -40,9 +49,26 @@ export const ChatProvider = ({ children }) => {
   // Maps messageId to { status: AGENT_STATUS, toolName?: string, error?: string }
   const [agentMessageStatuses, setAgentMessageStatuses] = useState({});
 
+  // NEW State: Track streaming status for the current streaming response
+  const [isStreaming, setIsStreaming] = useState(false);
+  // Streaming message/token state
+  const [streamingMessageId, setStreamingMessageId] = useState(null);
+  // Streaming tool state
+  const [currentToolCall, setCurrentToolCall] = useState(null);
+  const [lastToolResult, setLastToolResult] = useState(null);
+  // Streaming code state
+  const [generatedCode, setGeneratedCode] = useState(null);
+  const [streamError, setStreamError] = useState(null);
+  // Stream controller (for cleanup)
+  const [streamController, setStreamController] = useState(null);
+  const [lastTokenTimestamp, setLastTokenTimestamp] = useState(null);
+
   // NEW State for Report Modal
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [reportModalData, setReportModalData] = useState({ code: null, datasets: null });
+
+  // --- Add Ref to track current streaming ID immediately --- 
+  const currentStreamingIdRef = useRef(null);
 
   const { connectSocket, subscribeToEvents } = useSocket();
 
@@ -53,6 +79,15 @@ export const ChatProvider = ({ children }) => {
     });
     // Note: Disconnect logic might be needed elsewhere, e.g., on logout
   }, [connectSocket]);
+
+  // Cleanup streaming on unmount or session change
+  useEffect(() => {
+    return () => {
+      if (streamController) {
+        streamController.close();
+      }
+    };
+  }, [currentSession]);
 
   /**
    * Load user's chat sessions
@@ -94,7 +129,7 @@ export const ChatProvider = ({ children }) => {
   }, []);
 
   /**
-   * Send a message in the current chat session
+   * Send a message in the current chat session using the standard API
    */
   const sendMessage = useCallback(async (promptText, selectedDatasetIds = []) => {
     if (!currentSession?._id) return null;
@@ -135,6 +170,263 @@ export const ChatProvider = ({ children }) => {
       setIsSendingMessage(false);
     }
   }, [currentSession]);
+
+  /**
+   * Send a message in the current chat session using streaming API
+   */
+  const sendStreamingMessage = useCallback(async (promptText, selectedDatasetIds = []) => {
+    if (!currentSession?._id) return null;
+    
+    if (streamController) {
+      streamController.close();
+    }
+
+    setError(null);
+    setIsSendingMessage(true);
+    setIsStreaming(true);
+    // Reset state AND ref
+    setStreamingMessageId(null);
+    currentStreamingIdRef.current = null; 
+    setCurrentToolCall(null);
+    setLastToolResult(null);
+    setGeneratedCode(null);
+    setStreamError(null);
+    setLastTokenTimestamp(null);
+
+    try {
+      const eventHandlers = {
+        onUserMessageCreated: (data) => {
+          logger.info(`User message created: ${data.messageId}`);
+          // Add the user message to the chat
+          const userMessage = {
+            _id: data.messageId,
+            messageType: 'user',
+            promptText,
+            status: 'completed',
+            createdAt: new Date()
+          };
+          setMessages(prev => [...prev, userMessage]);
+        },
+
+        onAiMessageCreated: (data) => {
+          logger.info(`AI message created: ${data.messageId}`);
+          const aiMessage = {
+            _id: data.messageId,
+            messageType: 'ai_report',
+            aiResponseText: '',
+            status: 'processing',
+            createdAt: new Date(),
+            isStreaming: true // Add flag to indicate this is a streaming message
+          };
+          setMessages(prev => [...prev, aiMessage]);
+          // --- Set both state and ref --- 
+          setStreamingMessageId(data.messageId);
+          currentStreamingIdRef.current = data.messageId;
+          logger.debug(`[ChatContext onAiMessageCreated] Set currentStreamingIdRef to: ${currentStreamingIdRef.current}`);
+        },
+
+        onThinking: () => {
+          // --- Use Ref for immediate ID access --- 
+          const currentId = currentStreamingIdRef.current;
+          if (currentId) {
+              logger.debug(`[ChatContext onThinking] Updating status for ID: ${currentId}`);
+              setMessages(prevMessages =>
+                  prevMessages.map(msg =>
+                      msg._id === currentId
+                          ? { ...msg, status: 'thinking' }
+                          : msg
+                  )
+              );
+          } else {
+              logger.warn('[ChatContext onThinking] currentStreamingIdRef is null.');
+          }
+          // Keep agentMessageStatuses for broader state if needed (using state ID is okay here)
+          if (streamingMessageId) {
+             setAgentMessageStatuses(prev => ({
+               ...prev,
+               [streamingMessageId]: { status: AGENT_STATUS.THINKING }
+             }));
+          }
+        },
+
+        onToken: (data) => {
+          // --- Use Ref for immediate ID access --- 
+          const currentId = currentStreamingIdRef.current;
+          if (currentId && data.content) {
+            logger.debug(`[ChatContext onToken] Received token for ref ID: ${currentId}. Content: "${data.content}"`);
+            setMessages(prevMessages => {
+              logger.debug(`[ChatContext onToken] Updating messages state. Prev length: ${prevMessages.length}`);
+              return prevMessages.map(msg => {
+                if (msg._id === currentId) {
+                  const oldText = msg.aiResponseText || '';
+                  const newText = oldText + data.content;
+                  const newMsg = { 
+                    ...msg, 
+                    aiResponseText: newText 
+                  };
+                  logger.debug(`[ChatContext onToken] Appending to msg ${msg._id} (via ref). Old length: ${oldText.length}, New length: ${newText.length}`);
+                  return newMsg;
+                }
+                return msg;
+              })
+            });
+            setLastTokenTimestamp(Date.now());
+          } else if (!data.content) {
+              logger.debug('[ChatContext onToken] Received token event with no content.', data);
+          } else if (!currentId) {
+              logger.warn('[ChatContext onToken] Received token but currentStreamingIdRef is null. Content:', data.content);
+          }
+        },
+
+        onToolCall: (data) => {
+          // --- Use Ref for immediate ID access --- 
+          const currentId = currentStreamingIdRef.current;
+          logger.info(`Tool call: ${data.toolName} (for ref ID: ${currentId})`);
+          if (currentId) {
+            setMessages(prevMessages =>
+              prevMessages.map(msg =>
+                msg._id === currentId
+                  ? { 
+                      ...msg, 
+                      toolName: data.toolName,
+                      toolInput: data.input,
+                      toolStatus: 'running',
+                      toolOutput: null,
+                      toolError: null,
+                      status: 'using_tool'
+                    } 
+                  : msg
+              )
+            );
+          } else {
+              logger.warn('[ChatContext onToolCall] currentStreamingIdRef is null, cannot update message state.');
+          }
+          setLastToolResult(null);
+        },
+
+        onToolResult: (data) => {
+          // --- Use Ref for immediate ID access --- 
+          const currentId = currentStreamingIdRef.current;
+          logger.info(`Tool result: ${data.toolName}, status: ${data.status} (for ref ID: ${currentId})`);
+          if (currentId) {
+            setMessages(prevMessages =>
+              prevMessages.map(msg =>
+                msg._id === currentId
+                  ? { 
+                      ...msg, 
+                      toolStatus: data.status,
+                      toolOutput: data.output,
+                      toolError: data.error,
+                    } 
+                  : msg
+              )
+            );
+          } else {
+              logger.warn('[ChatContext onToolResult] currentStreamingIdRef is null, cannot update message state.');
+          }
+        },
+
+        onGeneratedCode: (data) => {
+          // --- Use Ref for immediate ID access --- 
+          const currentId = currentStreamingIdRef.current;
+          logger.info(`Generated code for message (ref ID: ${currentId})`);
+          if (currentId) {
+            setMessages(prev => prev.map(msg => 
+              msg._id === currentId 
+                ? { ...msg, aiGeneratedCode: data.code } 
+                : msg
+            ));
+          } else {
+              logger.warn('[ChatContext onGeneratedCode] currentStreamingIdRef is null, cannot update message state.');
+          }
+          setGeneratedCode(data.code); // Keep separate state for potential direct use
+        },
+
+        onCompleted: (data) => {
+          // --- Use Ref for immediate ID access (but also use event data if available) --- 
+          const finalMsgId = data.messageId || currentStreamingIdRef.current;
+          logger.info(`Streaming completed for message: ${finalMsgId}`);
+          if (finalMsgId) {
+            setMessages(prev => prev.map(msg => 
+              msg._id === finalMsgId 
+                ? { 
+                    ...msg, 
+                    status: 'completed', 
+                    ...(data.finalContent !== undefined && { aiResponseText: data.finalContent }), 
+                    isStreaming: false,
+                    toolName: undefined, toolInput: undefined, toolStatus: undefined, toolOutput: undefined, toolError: undefined
+                  } 
+                : msg
+            ));
+          }
+          // --- Reset state and ref --- 
+          setIsStreaming(false);
+          setIsSendingMessage(false);
+          setStreamingMessageId(null); 
+          currentStreamingIdRef.current = null; 
+          setStreamController(null);
+        },
+
+        onError: (data) => {
+          // --- Use Ref for immediate ID access --- 
+           const errorMsgId = currentStreamingIdRef.current; // Use ref ID primarily
+          logger.error(`Streaming error: ${data.message} (for ref ID: ${errorMsgId})`);
+          setStreamError(data.message);
+          if (errorMsgId) {
+            setMessages(prev => prev.map(msg => 
+              msg._id === errorMsgId 
+                ? { 
+                    ...msg, 
+                    status: 'error', 
+                    errorMessage: data.message,
+                    isStreaming: false,
+                    toolName: undefined, toolInput: undefined, toolStatus: 'error', toolOutput: undefined, toolError: data.message 
+                  } 
+                : msg
+            ));
+          }
+          // --- Reset state and ref --- 
+          setIsStreaming(false);
+          setIsSendingMessage(false);
+          setStreamingMessageId(null); 
+          currentStreamingIdRef.current = null; 
+          setStreamController(null);
+        },
+
+        onEnd: () => {
+          logger.info('Streaming connection ended');
+          // --- Reset state and ref --- 
+          setIsStreaming(false);
+          setIsSendingMessage(false);
+          setStreamingMessageId(null); 
+          currentStreamingIdRef.current = null; 
+          setStreamController(null);
+        }
+      };
+
+      // Start the streaming request
+      const controller = apiStreamChatMessage(
+        currentSession._id,
+        promptText,
+        selectedDatasetIds,
+        eventHandlers
+      );
+
+      // Store the controller for cleanup
+      setStreamController(controller);
+
+      return { success: true };
+    } catch (err) {
+      logger.error('Error starting streaming chat:', err);
+      setError(err.message || 'Failed to start streaming chat.');
+      setIsStreaming(false);
+      setIsSendingMessage(false);
+      setStreamingMessageId(null); 
+      currentStreamingIdRef.current = null; 
+      setStreamController(null);
+      throw err;
+    }
+  }, [currentSession, streamController]);
 
   /**
    * Create a new chat session
@@ -368,16 +660,26 @@ export const ChatProvider = ({ children }) => {
     loadMessages,
     setCurrentSession,
     sendMessage,
+    sendStreamingMessage, // Add streaming method
     createNewSession,
     updateChatSessionTitle,
     deleteChatSession,
     agentMessageStatuses, // Expose agent statuses
     AGENT_STATUS, // Expose constants
+    // Streaming state
+    isStreaming,
+    streamingMessageId,
+    currentToolCall,
+    lastToolResult,
+    generatedCode,
+    streamError,
+    STREAMING_STATUS,
     // Expose modal state and functions
     isReportModalOpen,
     reportModalData,
     openReportModal,
     closeReportModal,
+    lastTokenTimestamp,
   };
 
   return (

@@ -8,6 +8,7 @@ The chat feature allows users to:
 - Create and manage chat sessions
 - Send messages with dataset context
 - Receive AI-generated responses orchestrated by the agent
+- **Stream AI responses in real-time** (see text being generated, tools being used, etc.)
 - Observe agent status (thinking, using tools, generating code, executing code, generating report) via WebSockets
 - Leverage the agent's ability to:
   - Access dataset context through tools
@@ -83,6 +84,7 @@ Stores messages, agent steps, and potentially generated React code.
 
 * **Chat Messages:**
   * `POST /chats/:sessionId/messages` - Send user message, queue agent task
+  * `GET /chats/:sessionId/stream` - **NEW: Stream chat responses in real-time** using Server-Sent Events (SSE)
   * `GET /chats/:sessionId/messages` - List messages (user and final AI responses)
   * `GET /chats/:sessionId/messages/:messageId` - Get specific message
 
@@ -97,6 +99,7 @@ Stores messages, agent steps, and potentially generated React code.
 * `chat.controller.js`:
   * `createSession`, `getSessions`, `getSession`, `updateSession`, `deleteSession` - Basic session CRUD
   * `sendMessage` - Creates user message, queues agent task
+  * `streamMessage` - **NEW: Handles streaming chat responses via SSE**
   * `getMessages`, `getMessage` - Retrieves message history
   * `handleWorkerRequest` - Receives Cloud Tasks webhook, delegates to taskHandler
 
@@ -109,12 +112,17 @@ Stores messages, agent steps, and potentially generated React code.
   * Core business logic for chat sessions (CRUD)
   * `addMessage` - Creates user message, AI placeholder, queues Cloud Task
   * `getChatMessages` - Fetches messages with proper selection of aiGeneratedCode
+  * `handleStreamingChatRequest` - **NEW: Handles streaming chat responses**
+  * `sendStreamEvent` - **NEW: Helper to send SSE events**
 
 * `agent.service.js`:
   * Core of the agent architecture - `AgentOrchestrator` class
+  * `StreamingAgentOrchestrator` class - **NEW: Extends AgentOrchestrator with streaming capabilities**
   * `runAgentLoop` - Manages the Reason → Act → Observe loop
+  * `runAgentLoopWithStreaming` - **NEW: Streaming version of runAgentLoop**
   * `_prepareChatHistory` - Fetches and potentially summarizes history
   * `_emitAgentStatus` - Sends WebSocket events for frontend status updates
+  * `_sendStreamEvent` - **NEW: Sends SSE events for streaming responses**
   * `toolDispatcher` - Routes tool calls to implementations
   * Tool implementations:
     * `_listDatasetsTool` - Lists available datasets
@@ -155,7 +163,7 @@ Stores messages, agent steps, and potentially generated React code.
    * User creates/selects chat session (`POST /chats` or frontend UI)
    * Session stored in `ChatSession` collection
 
-2. **Message Submission:**
+2. **Message Submission (Standard):**
    * User sends message (`POST /chats/:sessionId/messages`)
    * `chat.controller.sendMessage` calls `chat.service.addMessage`
    * User message saved in `PromptHistory` (status='completed')
@@ -163,34 +171,49 @@ Stores messages, agent steps, and potentially generated React code.
    * If first message, selectedDatasetIds associated with session
    * Cloud Task queued targeting `/internal/chat-ai-worker`
 
-3. **Asynchronous Processing:**
+3. **Message Submission (Streaming):**
+   * User sends message via streaming endpoint (`GET /chats/:sessionId/stream?promptText=...`)
+   * `chat.controller.streamMessage` calls `chat.service.handleStreamingChatRequest`
+   * User message saved in `PromptHistory` (status='completed')
+   * AI placeholder created in `PromptHistory` (status='processing')
+   * If first message, selectedDatasetIds associated with session
+   * `StreamingAgentOrchestrator` initialized and processing starts immediately
+   * SSE connection remains open for streaming events
+
+4. **Asynchronous Processing (Standard):**
    * Cloud Task triggers `chat.controller.handleWorkerRequest`
    * Controller delegates to `chat.taskHandler.workerHandler`
    * TaskHandler initializes `AgentOrchestrator` with context
 
-4. **Agent Loop:**
-   * Agent emits `agent:thinking` WebSocket event
+5. **Agent Loop (Standard or Streaming):**
+   * Agent emits `agent:thinking` WebSocket event (and corresponding SSE event if streaming)
    * Agent prepares context (including history summarization if needed)
    * Agent enters loop of:
      * Call LLM for reasoning/next action
      * Parse LLM response for tool calls
      * Execute tools as needed
-     * Emit status via WebSocket events
+     * Emit status via WebSocket events (and corresponding SSE events if streaming)
      * Continue until final answer or max iterations
 
-5. **Tool Execution Flow:**
+6. **Tool Execution Flow:**
    * **Data Context:** `list_datasets` → `get_dataset_schema`
    * **Data Extraction:** `parse_csv_data` OR `generate_data_extraction_code` → `execute_backend_code`
    * **Analysis:** `generate_analysis_code` → `execute_analysis_code`
    * **Visualization:** `generate_report_code` (If user requested visualization)
    * **Final Answer:** `_answerUserTool`
 
-6. **Response Completion:**
+7. **Response Completion (Standard):**
    * Agent updates `PromptHistory` record with final response
    * TaskHandler emits `chat:message:completed` or `chat:message:error`
    * Frontend receives events and updates UI
 
-7. **Report Viewing:**
+8. **Response Completion (Streaming):**
+   * Agent updates `PromptHistory` record with final response
+   * Agent sends final SSE events (`completed` or `failed`)
+   * SSE connection is closed
+   * Frontend has already been incrementally updating the UI during streaming
+
+9. **Report Viewing:**
    * If `aiGeneratedCode` present, frontend shows "View Report" button
    * User clicks button → Frontend displays report in modal using sandboxed iframe
 

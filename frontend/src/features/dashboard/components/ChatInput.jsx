@@ -2,16 +2,24 @@ import { useChat } from '../context/ChatContext';
 import React, { useState, useRef, useEffect } from 'react';
 import { IoMdSend } from 'react-icons/io';
 import { FiChevronDown, FiChevronUp } from 'react-icons/fi';
+import { BsLightningCharge, BsLightningChargeFill } from 'react-icons/bs';
 import { useDatasets } from '../../dataset_management/hooks/useDatasets';
 
 /**
  * Component for input area in chat interface, including dataset selection
  */
 const ChatInput = () => {
-  const { currentSession, messages, sendMessage, updateCurrentSessionData } = useChat();
+  const { 
+    currentSession, 
+    messages, 
+    sendMessage, 
+    sendStreamingMessage,
+    isStreaming
+  } = useChat();
   const [promptText, setPromptText] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
   const [selectedDatasetIds, setSelectedDatasetIds] = useState([]);
+  const [streamingEnabled, setStreamingEnabled] = useState(true); // Default to streaming mode
   const textareaRef = useRef(null);
   
   // Get datasets for selection dropdown
@@ -38,6 +46,7 @@ const ChatInput = () => {
     
     if (!promptText.trim()) return;
     if (!currentSession) return;
+    if (isStreaming) return; // Prevent submitting while already streaming
     
     // For the first message, we need to make sure datasets are selected
     if (messages.length === 0 && selectedDatasetIds.length === 0) {
@@ -47,8 +56,12 @@ const ChatInput = () => {
     }
     
     try {
-      // Send message with selected dataset IDs (only needed for first message)
-      await sendMessage(promptText, selectedDatasetIds);
+      // Use streaming or standard message sending based on user preference
+      if (streamingEnabled) {
+        await sendStreamingMessage(promptText, selectedDatasetIds);
+      } else {
+        await sendMessage(promptText, selectedDatasetIds);
+      }
       setPromptText('');
       setIsExpanded(false);
     } catch (error) {
@@ -65,6 +78,11 @@ const ChatInput = () => {
         return [...prev, datasetId];
       }
     });
+  };
+  
+  // Toggle streaming mode
+  const toggleStreamingMode = () => {
+    setStreamingEnabled(!streamingEnabled);
   };
   
   // Check if dataset selection should be disabled (after first message sent)
@@ -145,15 +163,30 @@ const ChatInput = () => {
             placeholder="Type your message..."
             className="w-full border-0 focus:ring-0 resize-none px-8 py-2 max-h-32 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white"
             rows={1}
+            disabled={isStreaming}
           />
+          
+          {/* Streaming mode toggle */}
+          <button
+            type="button"
+            onClick={toggleStreamingMode}
+            className={`absolute right-2 top-2 ${
+              streamingEnabled 
+                ? 'text-blue-500 dark:text-blue-400' 
+                : 'text-gray-500 dark:text-gray-400'
+            }`}
+            title={streamingEnabled ? "Streaming mode: ON" : "Streaming mode: OFF"}
+          >
+            {streamingEnabled ? <BsLightningChargeFill size={16} /> : <BsLightningCharge size={16} />}
+          </button>
         </div>
         
         {/* Send button */}
         <button
           type="submit"
-          disabled={!promptText.trim()}
+          disabled={!promptText.trim() || isStreaming}
           className={`ml-2 p-2 rounded-full ${
-            promptText.trim()
+            promptText.trim() && !isStreaming
               ? 'bg-blue-600 text-white hover:bg-blue-700'
               : 'bg-gray-300 text-gray-500 dark:bg-gray-700 dark:text-gray-500 cursor-not-allowed'
           }`}
@@ -161,6 +194,13 @@ const ChatInput = () => {
           <IoMdSend size={20} />
         </button>
       </form>
+      
+      {/* Streaming status indicator */}
+      {isStreaming && (
+        <div className="px-3 py-1 text-xs text-blue-600 dark:text-blue-400 animate-pulse flex items-center justify-center border-t dark:border-gray-700">
+          <BsLightningChargeFill className="mr-1" /> Streaming response in real-time...
+        </div>
+      )}
     </div>
   );
 };

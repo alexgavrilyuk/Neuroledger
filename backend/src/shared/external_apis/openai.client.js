@@ -68,7 +68,7 @@ const mapMessagesToOpenAI = (messages, systemPrompt = null) => {
 
 
 /**
- * Sends a request to the OpenAI API (Chat Completions).
+ * Sends a NON-STREAMING request to the OpenAI API (Chat Completions).
  * Mimics the interface of the Gemini/Claude clients for easier integration.
  *
  * @param {object} options - The request options.
@@ -95,12 +95,13 @@ const createChatCompletion = async (options) => {
         model: model,
         messages: openAIMessages,
         // Only include parameters if they are provided and valid
-        ...(max_tokens && { max_completion_tokens: max_tokens }),
-         // Add other parameters here conditionally
+        ...(max_tokens && { max_tokens: max_tokens }),
+        ...(temperature !== undefined && { temperature: temperature }),
+        stream: false, // Explicitly set stream to false for this non-streaming version
     };
 
     // --- DEBUG LOG: OpenAI Request ---
-    logger.debug(`[createChatCompletion] Sending request to OpenAI. Model: ${model}, Messages Count: ${openAIMessages.length}, Max Tokens: ${max_tokens}`);
+    logger.debug(`[createChatCompletion] Sending request to OpenAI. Model: ${model}, Messages Count: ${openAIMessages.length}, Max Tokens: ${max_tokens}, Stream: false`);
     // Avoid logging full messages in production if sensitive
     // logger.debug('[createChatCompletion] Request Messages:', JSON.stringify(openAIMessages));
 
@@ -146,9 +147,54 @@ const createChatCompletion = async (options) => {
   }
 };
 
+/**
+ * Creates a STREAMING chat completion request to the OpenAI API.
+ *
+ * @param {object} options - The request options (similar to createChatCompletion).
+ * @param {string} options.model - The OpenAI model to use.
+ * @param {Array<object>} options.messages - The message history.
+ * @param {string} [options.system] - The system prompt.
+ * @param {number} [options.max_tokens] - Max completion tokens.
+ * @param {number} [options.temperature] - Temperature.
+ * // Add other compatible OpenAI parameters as needed.
+ * @returns {Promise<Stream<OpenAI.Chat.Completions.ChatCompletionChunk>>} - A stream object from the OpenAI SDK.
+ */
+const streamChatCompletion = async (options) => {
+  if (!isClientAvailable) {
+    logger.error("OpenAI client is not initialized. Cannot make streaming API calls.");
+    throw new Error('OpenAI client is not available.');
+  }
+
+  const { model, messages, system, max_tokens, temperature /*, other params */ } = options;
+
+  try {
+    const openAIMessages = mapMessagesToOpenAI(messages, system);
+
+    const requestOptions = {
+      model: model,
+      messages: openAIMessages,
+      ...(max_tokens && { max_tokens: max_tokens }),
+      ...(temperature !== undefined && { temperature: temperature }),
+      // CRITICAL: Enable streaming
+      stream: true,
+    };
+
+    logger.debug(`[streamChatCompletion] Sending STREAMING request to OpenAI. Model: ${model}, Messages Count: ${openAIMessages.length}, Max Tokens: ${max_tokens}, Stream: true`);
+
+    // Call the API and return the stream directly
+    const stream = await openai.chat.completions.create(requestOptions);
+    return stream;
+
+  } catch (error) {
+    logger.error(`[streamChatCompletion] Error starting OpenAI stream for model ${model}: ${error.message}`, { error: error.response?.data || error.stack });
+    throw new Error(`OpenAI API Streaming Error: ${error.message}`);
+  }
+};
+
 module.exports = {
   isAvailable,
   createChatCompletion,
+  streamChatCompletion, // Export the new streaming function
   // Export the raw client if needed elsewhere, though usually wrapper is preferred
   // openaiClient: openai
 }; 

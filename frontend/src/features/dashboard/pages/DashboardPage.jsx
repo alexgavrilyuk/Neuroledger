@@ -27,6 +27,7 @@ const DashboardPage = () => {
         messages,
         loading: chatLoading,
         sendMessage,
+        sendStreamingMessage,
         loadMessages
     } = useChat();
 
@@ -102,12 +103,13 @@ const DashboardPage = () => {
         }
 
         try {
-            logger.debug(`Submitting prompt: "${promptText}" with ${selectedDatasetIds.length} selected datasets`);
+            logger.debug(`Submitting prompt via streaming: \"${promptText}\" with ${selectedDatasetIds.length} selected datasets`);
 
-            // This uses the chat context to send a message
-            await sendMessage(promptText, selectedDatasetIds);
+            // This uses the chat context to send a message, now using the streaming version
+            await sendStreamingMessage(promptText, selectedDatasetIds);
         } catch (error) {
-            logger.error("Error sending prompt:", error);
+            logger.error("Error sending streaming prompt:", error);
+            // Consider adding user-facing error feedback here
         }
     };
 

@@ -17,6 +17,8 @@ router.delete('/chats/:sessionId', protect, requireActiveSubscription, chatContr
 
 // Chat message routes
 router.post('/chats/:sessionId/messages', protect, requireActiveSubscription, chatController.sendMessage);
+// New streaming endpoint for chat messages
+router.get('/chats/:sessionId/stream', protect, requireActiveSubscription, chatController.streamMessage);
 router.get('/chats/:sessionId/messages', protect, requireActiveSubscription, chatController.getMessages);
 router.get('/chats/:sessionId/messages/:messageId', protect, requireActiveSubscription, chatController.getMessage);
 
