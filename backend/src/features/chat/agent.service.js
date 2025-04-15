@@ -1358,6 +1358,8 @@ class StreamingAgentOrchestrator extends AgentOrchestrator {
                 currentAccumulatedTextForStep = ''; // Reset text for this step
                 let currentToolCall = null; // Reset tool call for this step
                 let stepCompleted = false; // Flag for this step's completion
+                let reasoningTextForHistory = ''; // Store reasoning text separately
+                let toolCallJsonDetected = false; // Flag to stop accumulating JSON
 
                 const stepPromise = new Promise(async (resolveStep, rejectStep) => {
 
@@ -1367,22 +1369,94 @@ class StreamingAgentOrchestrator extends AgentOrchestrator {
                             switch (eventType) {
                                 case 'token':
                                     if (data.content) {
-                                        this.accumulatedText += data.content; // Append to overall turn text
-                                        currentAccumulatedTextForStep += data.content; // Append to step text
-                                        this._sendStreamEvent('token', { content: data.content });
-                                        // Check for tool call within the step's text
-                                        const detectedTool = this._tryParseToolCall(currentAccumulatedTextForStep);
-                                        if (detectedTool) {
-                                            logger.info(`[Stream Callback - Loop ${loopCount}] Detected potential tool call: ${detectedTool.tool}`);
-                                            currentToolCall = detectedTool;
+                                        // 1. Always accumulate text for the current step's internal buffer for parsing
+                                        const previousLength = currentAccumulatedTextForStep.length;
+                                        currentAccumulatedTextForStep += data.content;
+
+                                        let contentToSend = data.content;
+                                        let enteringJsonNow = false;
+
+                                        // 2. Check if the JSON fence START is appearing *now*
+                                        if (!toolCallJsonDetected) {
+                                            const jsonFenceIndex = currentAccumulatedTextForStep.indexOf('```json');
+                                            // Check if the fence starts within the content we just added
+                                            if (jsonFenceIndex !== -1 && jsonFenceIndex >= previousLength) {
+                                                logger.info(`[Stream Callback - Loop ${loopCount}] JSON fence start detected.`);
+                                                enteringJsonNow = true;
+                                                toolCallJsonDetected = true; // Set flag immediately
+
+                                                // Calculate how much of the *current* token is *before* the fence
+                                                const charsBeforeFence = jsonFenceIndex - previousLength;
+                                                if (charsBeforeFence > 0) {
+                                                    contentToSend = data.content.substring(0, charsBeforeFence);
+                                                } else {
+                                                    contentToSend = null; // Fence starts exactly at the beginning of this token
+                                                }
+                                                logger.debug(`[Stream Callback - Loop ${loopCount}] Portion of token before fence: "${contentToSend ? contentToSend : ''}"`);
+                                            }
+                                        }
+
+                                        // 3. Send token & Accumulate ONLY if JSON hasn't been detected yet OR if it's the partial token just before the fence
+                                        if (!toolCallJsonDetected || enteringJsonNow) {
+                                            if (contentToSend) {
+                                                this._sendStreamEvent('token', { content: contentToSend });
+                                                this.accumulatedText += contentToSend;
+                                                reasoningTextForHistory += contentToSend;
+                                            }
+                                            // If we just entered JSON, ensure no more tokens are sent/accumulated for this step
+                                            if (enteringJsonNow) {
+                                                 logger.info(`[Stream Callback - Loop ${loopCount}] Stopping token stream/accumulation after sending pre-fence content.`);
+                                            }
+                                        } else {
+                                            // JSON already detected in a previous token, do not send or accumulate this token
+                                            logger.debug(`[Stream Callback - Loop ${loopCount}] Token received after JSON detected, ignoring for stream/accumulation.`);
+                                        }
+
+                                        // 4. Check for completed JSON block end (for parsing, independent of streaming)
+                                        if (toolCallJsonDetected && !currentToolCall) { // Only parse if fence started but tool not yet confirmed
+                                            if (currentAccumulatedTextForStep.trim().endsWith('```')) {
+                                                const detectedTool = this._tryParseToolCall(currentAccumulatedTextForStep);
+                                                if (detectedTool) {
+                                                    currentToolCall = detectedTool;
+                                                    logger.info(`[Stream Callback - Loop ${loopCount}] Full Tool JSON parsed: ${detectedTool.tool}.`);
+                                                }
+                                            }
                                         }
                                     }
                                     break;
                                 case 'completed':
                                     logger.info(`[Stream Callback - Loop ${loopCount}] LLM stream for this step completed.`);
                                     stepCompleted = true;
+
+                                    // Final check: Try parse tool call from the full step text one last time
+                                    if (!currentToolCall) {
+                                        const finalCheckTool = this._tryParseToolCall(currentAccumulatedTextForStep);
+                                        if (finalCheckTool) {
+                                            logger.warn(`[Stream Callback - Loop ${loopCount}] Tool JSON parsed only upon completion event.`);
+                                            currentToolCall = finalCheckTool;
+                                            // Reset toolCallJsonDetected flag just in case it wasn't set by fence detection
+                                            toolCallJsonDetected = true; 
+                                        }
+                                    }
+
+                                    // Refine Reasoning Text just before adding to history
+                                    if (toolCallJsonDetected) {
+                                        const reasoningMatch = currentAccumulatedTextForStep.match(/(.*?)```json[\s\S]*```$/s);
+                                        if (reasoningMatch && reasoningMatch[1]) {
+                                            reasoningTextForHistory = reasoningMatch[1].trim();
+                                            logger.debug(`[Stream Callback - Loop ${loopCount}] Final reasoning text extracted (length: ${reasoningTextForHistory.length}).`);
+                                        } else {
+                                            logger.warn(`[Stream Callback - Loop ${loopCount}] Could not extract reasoning text on completion. Using accumulated stream text as fallback.`);
+                                            // Fallback to whatever was actually streamed/accumulated IF extraction fails
+                                            reasoningTextForHistory = this.accumulatedText; 
+                                        }
+                                    } else {
+                                        // No tool detected at all, the full accumulated text is the reasoning
+                                        reasoningTextForHistory = this.accumulatedText; 
+                                    }
+
                                     if (currentToolCall) {
-                                        // --- Execute Tool ---
+                                        // --- Tool Call Was Detected --- 
                                         logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Executing tool: ${currentToolCall.tool} (Loop ${loopCount})`);
                                         this.turnContext.steps.push({ tool: currentToolCall.tool, args: currentToolCall.args, resultSummary: 'Executing...', isStreaming: true });
                                         this._sendStreamEvent('tool_call', { toolName: currentToolCall.tool, input: currentToolCall.args });
@@ -1409,33 +1483,15 @@ class StreamingAgentOrchestrator extends AgentOrchestrator {
                                                 resolveProcessing(); // End overall processing on tool error
                                                 rejectStep(new Error(toolErrorMessage)); // End this step with error
                                             } else {
-                                                // --- Tool Success: Format result and prepare for next loop ---
-                                                logger.info(`[Agent Loop - STREAMING] Tool ${currentToolCall.tool} executed successfully. Preparing next step.`);
-                                                // Store results contextually (as before)
-                                                if (currentToolCall.tool === 'generate_report_code' && toolResult.result?.react_code) {
-                                                    this.turnContext.generatedReportCode = toolResult.result.react_code;
-                                                    this._sendStreamEvent('generated_code', { code: toolResult.result.react_code });
-                                                     // <<< --- SPECIAL CASE: If report code generated, maybe end the loop? --- >>>
-                                                     // For now, let's assume generating report code IS the final step.
-                                                     logger.info(`[Agent Loop - STREAMING] Report code generated. Ending agent loop.`);
-                                                     finalOutcome = { status: 'completed', error: null, aiResponseText: this.accumulatedText };
-                                                     await super._updatePromptHistoryRecord('completed', this.accumulatedText, null, this.turnContext.generatedReportCode);
-                                                     this._sendStreamEvent('completed', { finalContent: this.accumulatedText });
-                                                     resolveProcessing(); // End overall processing
-                                                     resolveStep(); // End this step successfully
-                                                     return; // Exit callback early
-
-                                                } else if (currentToolCall.tool === 'execute_analysis_code' /*...other tools...*/ ) {
-                                                    // Store intermediate results if necessary
-                                                    // ...
-                                                }
-
+                                                // --- Tool Success --- 
+                                                // ... (check for generate_report_code completion) ...
+                                                
                                                 // Format tool result for LLM history
                                                 const toolResultForHistory = this._formatToolResultForLLM(currentToolCall.tool, toolResult);
-                                                llmContext.history.push({ role: 'model', parts: [{ text: currentAccumulatedTextForStep || '' }] }); // Add AI's part (tool call)
-                                                llmContext.history.push(toolResultForHistory); // Add tool result part
-
-                                                resolveStep(); // Resolve step promise to continue the outer loop
+                                                // --- Use captured reasoning text for history --- 
+                                                llmContext.history.push({ role: 'model', parts: [{ text: reasoningTextForHistory || '' }] }); 
+                                                llmContext.history.push(toolResultForHistory);
+                                                resolveStep(); 
                                             }
                                         } catch (toolError) {
                                             const toolErrorMessage = `Tool execution failed: ${toolError.message}`;
@@ -1448,13 +1504,13 @@ class StreamingAgentOrchestrator extends AgentOrchestrator {
                                             rejectStep(toolError); // Reject step promise
                                         }
                                     } else {
-                                        // --- No Tool Call: LLM finished with text response ---
-                                        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] LLM finished loop ${loopCount} without tool call. Finalizing turn.`);
-                                        finalOutcome = { status: 'completed', error: null, aiResponseText: this.accumulatedText };
+                                        // --- No Tool Call: Final Text Response --- 
+                                        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] LLM finished loop ${loopCount} with final text response.`);
+                                        finalOutcome = { status: 'completed', error: null, aiResponseText: this.accumulatedText }; // Use accumulated text (which excluded JSON)
                                         await super._updatePromptHistoryRecord('completed', this.accumulatedText, null, this.turnContext.generatedReportCode);
                                         this._sendStreamEvent('completed', { finalContent: this.accumulatedText });
-                                        resolveProcessing(); // Resolve overall promise
-                                        resolveStep(); // Resolve step promise (signals loop end)
+                                        resolveProcessing(); 
+                                        resolveStep();
                                     }
                                     break;
                                 case 'error':

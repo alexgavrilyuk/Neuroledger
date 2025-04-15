@@ -130,141 +130,151 @@ const MessageBubble = ({ message, onViewReport }) => {
             );
         }
 
-        let toolBanner = null;
-        if (isThinking) {
-            toolBanner = (
-                <div className="flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-600 mb-2 pb-2">
-                    <FaMicrochip className={`h-4 w-4 animate-pulse`}/>
-                    <span className="italic font-medium">
-                        Thinking...
-                    </span>
-                </div>
-            );
-        } else if (isUsingTool) {
-            const toolInfo = toolDisplayMap[message.toolName] || toolDisplayMap.default;
-            let bannerContent = null;
-            if (message.toolStatus === 'running') {
-                bannerContent = (
-                    <div className="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800/50 rounded-lg p-2 flex items-center gap-2 text-blue-700 dark:text-blue-300">
-                        <toolInfo.Icon className="h-4 w-4 animate-spin" />
-                        <span className="text-xs font-medium">{toolInfo.text}</span>
-                    </div>
-                );
-            } else if (message.toolStatus === 'success') {
-                bannerContent = (
-                    <div className={`bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800/50 text-green-700 dark:text-green-300 border rounded-lg p-2 flex items-center gap-2`}>
-                        <FaCheckCircle className="h-4 w-4 flex-shrink-0" />
-                        <span className="text-xs font-medium truncate" title={message.toolOutput}>
-                            {message.toolName} completed: {message.toolOutput}
-                        </span>
-                    </div>
-                );
-            } else if (message.toolStatus === 'error') {
-                bannerContent = (
-                    <div className={`bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-700/50 text-red-700 dark:text-red-300 border rounded-lg p-2 flex items-center gap-2`}>
-                        <FaTimesCircle className="h-4 w-4 flex-shrink-0" />
-                        <span className="text-xs font-medium truncate" title={message.toolError}>
-                            {message.toolName} failed: {message.toolError}
-                        </span>
-                    </div>
-                );
-            }
-            if (bannerContent) {
-                toolBanner = (
-                     <div className="border-b border-gray-200 dark:border-gray-600 mb-2 pb-2">
-                         {bannerContent}
-                     </div>
-                 );
-            }
-        }
-
         const renderMarkdownContent = () => {
+             if (!textWithoutCode && codeBlocks.length === 0) return null; // Handle empty case
+
              const parts = textWithoutCode.split(/<CODE_BLOCK_(\d+)>/);
              return parts.map((part, index) => {
                  if (index % 2 === 0) {
-                     return <ReactMarkdown key={index}>{part}</ReactMarkdown>;
+                     // Only render markdown if part is not empty or just whitespace
+                     return part.trim() ? <ReactMarkdown key={index}>{part}</ReactMarkdown> : null;
                  } else {
                      const codeBlockIndex = parseInt(part, 10);
                      if (codeBlocks[codeBlockIndex]) {
                          return <CodeBlock key={index} language={codeBlocks[codeBlockIndex].language} code={codeBlocks[codeBlockIndex].code} />;
                      } else {
-                         return null;
+                         return null; // Should not happen if regex is correct
                      }
                  }
-             });
+             }).filter(Boolean); // Filter out nulls from empty markdown parts
         };
 
-        if (isCompleted) {
-            if (isReportAvailable) {
-                return (
-                    <div className="space-y-3">
-                        {message.aiResponseText && (
-                             <div className="prose prose-sm dark:prose-invert max-w-none mb-3">
-                                 {renderMarkdownContent()} 
-                             </div>
-                         )} 
-                        <div className="flex items-center">
-                            <Button
-                                variant="primary"
-                                size="sm"
-                                onClick={() => onViewReport(message)}
-                                leftIcon={DocumentChartBarIcon}
-                                className="shadow-soft-md dark:shadow-soft-dark-md transform hover:scale-102 active:scale-98"
-                            >
-                                View Report
-                            </Button>
-                        </div>
-                    </div>
+        let mainContentElement = null;
+        const renderedMarkdown = renderMarkdownContent();
+
+        if (message.aiResponseText || codeBlocks.length > 0) {
+             mainContentElement = (
+                 <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
+                     {renderedMarkdown}
+                     {/* Show blinking cursor only if actively streaming and not yet complete */}
+                     {message.isStreaming && !isCompleted && <span className="inline-block w-2 h-4 bg-gray-700 dark:bg-gray-300 ml-1 animate-blink"></span>}
+                 </div>
+             );
+        } else if (isProcessing && message.isStreaming) {
+             // Show indicator if processing but no text received yet
+             mainContentElement = (
+                 <div className="flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400">
+                     <FaCircleNotch className={`h-4 w-4 animate-spin`}/>
+                     <span className="italic font-medium">
+                         Receiving response...
+                     </span>
+                 </div>
+             );
+         } else if (isCompleted && !isReportAvailable && !message.aiResponseText) {
+             // Handle completed but empty response (not a report)
+            mainContentElement = <p className="italic text-gray-500 dark:text-gray-400">No response content.</p>;
+         }
+
+        // --- Build Tool Status Indicator (if applicable) ---
+        let toolStatusIndicator = null;
+        // Show indicator only when actively using a tool OR if the status is thinking
+         if (isThinking) {
+             toolStatusIndicator = (
+                 <div className="mt-2 flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-600 pt-2">
+                     <FaMicrochip className={`h-4 w-4 animate-pulse`}/>
+                     <span className="italic font-medium">
+                         Thinking...
+                     </span>
+                 </div>
+             );
+         } else if (isUsingTool && message.toolName) {
+            const toolInfo = toolDisplayMap[message.toolName] || toolDisplayMap.default;
+            let bannerClasses = "mt-2 border rounded-lg p-2 flex items-center gap-2 text-xs font-medium"; // Base classes
+            let specificBannerContent = null;
+
+            if (message.toolStatus === 'running') {
+                bannerClasses += " bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800/50 text-blue-700 dark:text-blue-300";
+                specificBannerContent = (
+                    <>
+                        <toolInfo.Icon className="h-4 w-4 animate-spin flex-shrink-0" />
+                        <span>{toolInfo.text}</span>
+                    </>
                 );
-            } else if (message.aiResponseText) {
-                return (
-                    <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
-                         {renderMarkdownContent()}
-                    </div>
-                );
-            } else {
-                return <p className="italic text-gray-500 dark:text-gray-400">No response content.</p>;
+            } else if (message.toolStatus === 'success') {
+                bannerClasses += " bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800/50 text-green-700 dark:text-green-300";
+                specificBannerContent = (
+                     <>
+                         <FaCheckCircle className="h-4 w-4 flex-shrink-0" />
+                         <span className="truncate" title={message.toolOutput}>
+                             {message.toolName} completed: {message.toolOutput}
+                         </span>
+                     </>
+                 );
+            } else if (message.toolStatus === 'error') {
+                 bannerClasses += " bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-700/50 text-red-700 dark:text-red-300";
+                 specificBannerContent = (
+                     <>
+                         <FaTimesCircle className="h-4 w-4 flex-shrink-0" />
+                         <span className="truncate" title={message.toolError}>
+                             {message.toolName} failed: {message.toolError}
+                         </span>
+                     </>
+                 );
+            }
+
+            if (specificBannerContent) {
+                toolStatusIndicator = <div className={bannerClasses}>{specificBannerContent}</div>;
             }
         }
 
-        if (isProcessing) {
-            return (
-                <div className="space-y-2">
-                    {toolBanner}
-                    {message.aiResponseText && (
-                        <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
-                            {renderMarkdownContent()}
-                            {message.isStreaming && <span className="inline-block w-2 h-4 bg-gray-700 dark:bg-gray-300 ml-1 animate-blink"></span>}
-                        </div>
-                    )}
-                    {!message.aiResponseText && message.isStreaming && (
-                        <div className="flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400">
-                             <FaCircleNotch className={`h-4 w-4 animate-spin`}/>
-                             <span className="italic font-medium">
-                                 Receiving response...
-                             </span>
-                         </div>
-                     )}
+        // --- Build Report Button (if applicable) ---
+        let reportButton = null;
+        if (isReportAvailable) {
+            reportButton = (
+                <div className="mt-3 flex items-center border-t border-gray-200 dark:border-gray-600 pt-3">
+                    <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => onViewReport(message)}
+                        leftIcon={DocumentChartBarIcon}
+                        className="shadow-soft-md dark:shadow-soft-dark-md transform hover:scale-102 active:scale-98"
+                    >
+                        View Report
+                    </Button>
                 </div>
             );
         }
 
-        return <p className="italic text-gray-500 dark:text-gray-400">Unknown state.</p>;
+        // --- Combine Elements ---
+        // Render the container only if there's something to show
+        if (mainContentElement || toolStatusIndicator || reportButton) {
+            return (
+                 <div> {/* Use simple div, remove space-y-2 if not needed */}
+                    {mainContentElement}
+                    {toolStatusIndicator}
+                    {reportButton}
+                 </div>
+            );
+        } else {
+            // Fallback if somehow nothing is rendered (e.g., empty completed message)
+             return <p className="italic text-gray-500 dark:text-gray-400">...</p>; 
+        }
+
     };
 
     return (
-        <div className={`flex items-start gap-x-3 ${bubbleAlignment} mb-4 animate-slideUp`} ref={bubbleRef}>
+        <div className={`flex items-start gap-x-3 my-3 lg:my-4`} ref={bubbleRef}>
             {!isUser && (
                 <div className={`${iconBaseStyle} ${aiIconColor}`}>
-                    {isError ? <ExclamationCircleIcon /> : <CpuChipIcon />}
+                    <CpuChipIcon className="h-full w-full" />
                 </div>
             )}
-            <div className={`${bubbleBaseStyle} ${bubbleColor}`}>
+            <div className={`${bubbleBaseStyle} ${bubbleAlignment} ${bubbleColor}`}>
                 {renderContent()}
             </div>
             {isUser && (
                 <div className={`${iconBaseStyle} ${userIconColor}`}>
-                    <UserIcon />
+                    <UserIcon className="h-full w-full" />
                 </div>
             )}
         </div>
