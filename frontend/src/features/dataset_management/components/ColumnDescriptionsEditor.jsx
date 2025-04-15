@@ -11,10 +11,21 @@ import {
   InformationCircleIcon,
   TableCellsIcon,
   ExclamationCircleIcon,
-  ArrowPathIcon
+  ArrowPathIcon,
+  ChevronDownIcon
 } from '@heroicons/react/24/outline';
 import apiClient from '../../../shared/services/apiClient';
 import logger from '../../../shared/utils/logger';
+
+// Define available data types
+const DATA_TYPES = [
+  { value: 'string', label: 'String' },
+  { value: 'number', label: 'Number' },
+  { value: 'boolean', label: 'Boolean' },
+  { value: 'date', label: 'Date' },
+  { value: 'object', label: 'Object' },
+  { value: 'array', label: 'Array' }
+];
 
 const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
   const [loading, setLoading] = useState(true);
@@ -25,6 +36,7 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
   const [datasetContext, setDatasetContext] = useState('');
   const [tempContext, setTempContext] = useState('');
   const [tempDescriptions, setTempDescriptions] = useState({});
+  const [tempColumnTypes, setTempColumnTypes] = useState({});
   const [allSaved, setAllSaved] = useState(true);
   const [isEditMode, setIsEditMode] = useState(false);
 
@@ -42,6 +54,15 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
           setColumns(schemaInfo || []);
           setDescriptions(columnDescriptions || {});
           setDatasetContext(description || '');
+          
+          // Initialize column types from schema
+          const types = {};
+          schemaInfo.forEach(column => {
+            if (typeof column === 'object' && column.name) {
+              types[column.name] = column.type || 'string';
+            }
+          });
+          setTempColumnTypes(types);
         } else {
           throw new Error(response.data.message || 'Failed to fetch dataset schema');
         }
@@ -79,20 +100,43 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
     }));
   };
 
+  const handleUpdateColumnType = (columnName, type) => {
+    setTempColumnTypes(prev => ({
+      ...prev,
+      [columnName]: type
+    }));
+  };
+
   const handleSaveAll = async () => {
     try {
       setSaving(true);
       setError(null);
 
+      // Prepare updated schema info
+      const updatedSchemaInfo = columns.map(column => {
+        const columnName = typeof column === 'object' ? column.name : column;
+        const columnType = tempColumnTypes[columnName] || 'string';
+        
+        return {
+          name: columnName,
+          type: columnType
+        };
+      });
+
       const response = await apiClient.put(`/datasets/${datasetId}`, {
         columnDescriptions: tempDescriptions,
-        description: tempContext
+        description: tempContext,
+        schemaInfo: updatedSchemaInfo
       });
 
       if (response.data.status === 'success') {
-        logger.info('Successfully saved dataset context and column descriptions');
+        logger.info('Successfully saved dataset context, column descriptions, and data types');
         setDescriptions(tempDescriptions);
         setDatasetContext(tempContext);
+        
+        // Update columns with the new schema info
+        setColumns(response.data.data.schemaInfo || []);
+        
         setIsEditMode(false);
         setAllSaved(true);
         if (onSaveSuccess) {
@@ -245,7 +289,7 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
         <div className="mb-6">
           <div className="flex items-center mb-4">
             <TableCellsIcon className="h-5 w-5 mr-2 text-blue-500" />
-            <h3 className="text-base font-medium text-gray-800 dark:text-gray-200">Column Descriptions</h3>
+            <h3 className="text-base font-medium text-gray-800 dark:text-gray-200">Column Descriptions and Data Types</h3>
           </div>
 
           {columns.length === 0 ? (
@@ -260,7 +304,7 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
             <div className="space-y-4 mb-4">
               {columns.map((column) => {
                 const columnName = typeof column === 'object' ? column.name : column;
-                const columnType = typeof column === 'object' && column.type ? column.type : 'unknown';
+                const columnType = tempColumnTypes[columnName] || 'string';
                 const hasDescription = !isEditMode ? !!descriptions[columnName] : !!tempDescriptions[columnName];
                 const description = isEditMode ? tempDescriptions[columnName] || '' : descriptions[columnName] || '';
 
@@ -289,9 +333,28 @@ const ColumnDescriptionsEditor = ({ datasetId, onSaveSuccess }) => {
                         </div>
                         <div>
                           <span className="font-medium text-gray-800 dark:text-gray-200">{columnName}</span>
-                          <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
-                            {columnType}
-                          </span>
+                          {!isEditMode ? (
+                            <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
+                              {columnType}
+                            </span>
+                          ) : (
+                            <div className="relative inline-block ml-2">
+                              <select
+                                value={columnType}
+                                onChange={(e) => handleUpdateColumnType(columnName, e.target.value)}
+                                className="appearance-none text-xs py-0.5 pl-2 pr-6 rounded-full bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                              >
+                                {DATA_TYPES.map(type => (
+                                  <option key={type.value} value={type.value}>
+                                    {type.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-1">
+                                <ChevronDownIcon className="h-3 w-3 text-blue-500" />
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>

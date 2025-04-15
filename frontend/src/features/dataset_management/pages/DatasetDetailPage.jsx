@@ -295,8 +295,18 @@ const DatasetDetailPage = () => {
   const FileTypeIcon = dataset ? getFileTypeIcon(dataset.originalFilename) : DocumentIcon;
 
   const handleDescriptionsSaved = (updatedDataset) => {
-    // Update the dataset state with the new information
-    setDataset(updatedDataset);
+    // Update the dataset state with the new information including schema
+    setDataset(prev => {
+      if (!prev) return updatedDataset;
+      
+      return {
+        ...prev,
+        description: updatedDataset.description,
+        columnDescriptions: updatedDataset.columnDescriptions,
+        schemaInfo: updatedDataset.schemaInfo,
+        lastUpdatedAt: updatedDataset.lastUpdatedAt
+      };
+    });
   };
 
   if (loading) {

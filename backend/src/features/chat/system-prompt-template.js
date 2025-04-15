@@ -35,10 +35,22 @@ const formatPercentage = (value, decimals = 1) => {
  * @param {object|null} [contextParams.analysisResult] - The actual result object from a previous code execution step.
  * @param {string|null} [contextParams.previousAnalysisResultSummary] - Summary of analysis result from the relevant previous turn.
  * @param {boolean} [contextParams.hasPreviousGeneratedCode] - Flag indicating if code was generated in the relevant previous turn.
+ * @param {Object} [contextParams.datasetSchemas] - Schemas for datasets preloaded for the session.
+ * @param {Object} [contextParams.datasetSamples] - Sample data for datasets preloaded for the session.
  * @returns {string} - The formatted system prompt.
  */
 const generateAgentSystemPrompt = (contextParams) => {
-  const { userContext, teamContext, currentTurnSteps, availableTools, analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = contextParams;
+  const { 
+    userContext, 
+    teamContext, 
+    currentTurnSteps, 
+    availableTools, 
+    analysisResult, 
+    previousAnalysisResultSummary, 
+    hasPreviousGeneratedCode,
+    datasetSchemas = {},
+    datasetSamples = {}
+  } = contextParams;
 
   // Format the tool definitions clearly for the LLM
   const formattedTools = availableTools.map(tool => (
@@ -65,6 +77,45 @@ const generateAgentSystemPrompt = (contextParams) => {
       previousArtifactsText += `- Generated Code Exists: ${hasPreviousGeneratedCode ? 'Yes' : 'No'}\n`;
   }
   // --- End Previous Artifacts Info ---
+
+  // --- Add Dataset Information --- 
+  let datasetInfoText = '';
+  const datasetIds = Object.keys(datasetSchemas);
+  
+  if (datasetIds.length > 0) {
+    datasetInfoText = '\n**AVAILABLE DATASETS - CRITICAL INFORMATION:**\n';
+    datasetInfoText += '\n⚠️ **CRITICAL: YOU MUST USE THE EXACT DATASET IDs LISTED BELOW WITH THE `parse_csv_data` TOOL** ⚠️\n';
+    datasetInfoText += '\n**DO NOT MAKE UP DATASET IDs. ONLY USE THE MONGODB OBJECTID VALUES SHOWN BELOW.**\n\n';
+    
+    datasetIds.forEach(datasetId => {
+      const schema = datasetSchemas[datasetId];
+      const samples = datasetSamples[datasetId];
+      
+      // Dataset header and description
+      datasetInfoText += `\n## Dataset ID: ${datasetId}\n`;
+      datasetInfoText += `Description: ${schema.description || 'No description available'}\n\n`;
+      datasetInfoText += `**CRITICAL WARNING: When using the \`parse_csv_data\` tool, you MUST use this EXACT MongoDB ObjectId: \`${datasetId}\`**\n`;
+      datasetInfoText += `**DO NOT use any other identifier, name, or a made-up ID. Only the exact 24-character hex string above will work.**\n\n`;
+      
+      // Column schema information
+      datasetInfoText += `### Schema Information:\n`;
+      if (schema.schemaInfo && schema.schemaInfo.length > 0) {
+        schema.schemaInfo.forEach(column => {
+          const description = schema.columnDescriptions ? (schema.columnDescriptions[column.name] || 'No description') : 'No description';
+          datasetInfoText += `- **${column.name}** (${column.type || 'unknown type'}): ${description}\n`;
+        });
+      } else {
+        datasetInfoText += `No schema information available.\n`;
+      }
+      
+      // Sample data
+      if (samples && samples.sampleRows && samples.sampleRows.length > 0) {
+        datasetInfoText += `\n### Sample Data (Last ${samples.sampleRows.length} rows of ${samples.totalRows} total):\n`;
+        datasetInfoText += `\`\`\`json\n${JSON.stringify(samples.sampleRows, null, 2)}\n\`\`\`\n`;
+      }
+    });
+  }
+  // --- End Dataset Information ---
 
   // --- Format Actual Analysis Results (if available) --- 
   let formattedAnalysisResult = 'No analysis has been performed yet this turn.';
@@ -156,6 +207,8 @@ const generateAgentSystemPrompt = (contextParams) => {
 
 You operate in a loop: Reason -> Act -> Observe.
 
+**⚠️ CRITICAL INSTRUCTION: WHEN USING THE \`parse_csv_data\` TOOL, YOU MUST USE THE EXACT MONGODB OBJECTID PROVIDED IN THE DATASETS SECTION BELOW. DO NOT CREATE OR INVENT DATASET IDs. ⚠️**
+
 **Current Turn Progress:**
 ${turnStepsText}
 
@@ -165,6 +218,7 @@ ${previousArtifactsText}
 
 **User/Team Context:**
 ${userContext || teamContext ? `User Context: ${userContext || 'Not set.'}\nTeam Context: ${teamContext || 'Not set.'}` : 'No specific user or team context provided.'}
+${datasetInfoText}
 
 **Available Tools:**
 You have access to the following tools. To use a tool, output ONLY a single JSON object in the following format:
@@ -175,16 +229,15 @@ Tool Definitions:
 [\n${formattedTools}\n]
 
 **IMPORTANT INSTRUCTIONS:**
-*   **You MUST follow the 'Typical Workflow for Analysis' steps below in order before generating any report code, unless the user is explicitly asking to modify a previous report.**
+*   **Dataset schema and sample data are already provided above. You do NOT need to use the list_datasets or get_dataset_schema tools.**
 *   Analyze 'Current Turn Progress' / previous step results before deciding action.
 *   Do NOT call a tool if info already available in the current turn.
 *   Typical Workflow for Analysis:
-    1. Use \`list_datasets\` / \`get_dataset_schema\` to understand data.
-    2. Use \`parse_csv_data\` to parse the required dataset.
-    3. Use \`generate_analysis_code\` to create analysis code.
-    4. Use \`execute_analysis_code\` to run the analysis code.
-    5. Analyze the result from \`execute_analysis_code\`. 
-    6. **If the user asked for a report AND the analysis in step 5 was successful, you MUST use \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument in your tool call JSON.** The system will use the analysis results already in context. **Do NOT call \`generate_report_code\` if analysis has not been successfully executed in a previous step of THIS turn.**
+    1. Use \`parse_csv_data\` to parse the required dataset.
+    2. Use \`generate_analysis_code\` to create analysis code.
+    3. Use \`execute_analysis_code\` to run the analysis code.
+    4. Analyze the result from \`execute_analysis_code\`. 
+    5. **If the user asked for a report AND the analysis in step 4 was successful, you MUST use \`generate_report_code\`. Provide ONLY the \`analysis_summary\` argument in your tool call JSON.** The system will use the analysis results already in context. **Do NOT call \`generate_report_code\` if analysis has not been successfully executed in a previous step of THIS turn.**
 *   The \`execute_analysis_code\` tool runs in a restricted sandbox. Code MUST use the \`inputData\` variable and call \`sendResult(data)\`. \n    **IMPORTANT:** The \`inputData\` variable will contain an array of JavaScript objects, already parsed from the CSV according to the schema (e.g., numbers will be numbers, dates might be strings but typically ISO format). **Your generated analysis code MUST directly access properties on these objects (e.g., \`row.Income\`, \`row.Date\`) and SHOULD NOT include its own logic to re-parse numbers (like \`parseFloat\` or \`parseInt\`) or dates (like \`new Date()\`).** Assume the data types are correct in \`inputData\`. NO file reading or network calls allowed.\n
 *   Ensure JSON for tool calls is correctly escaped, especially code strings for \`execute_analysis_code\` (newlines \\n, quotes \\", etc.).
 *   Base analysis ONLY on history and tool results.
@@ -208,29 +261,29 @@ Tool Definitions:
 *     - \`page-break-inside: avoid !important;\` on container elements that should stay intact on a single page.
 *     - \`page-break-before: auto;\` (usually default, but can be \`always\` to force a new page before an element if needed for logical grouping).
 *     - \`page-break-after: auto;\` (or \`always\` to force a break after an element, e.g., \`page-break-after: avoid !important;\` for headings like h2, h3 to prevent breaks right after them).
-*     - **Example Structure (MUST INCLUDE STYLE TAG IN OUTPUT):**
-*       \`\`\`jsx
-*       // IMPORTANT: Include this <style> tag directly in your returned JSX
-*       const printStyles = \`
-*         @media print {
-*           .report-card, .chart-wrapper { /* Adapt selectors! */
-*             page-break-inside: avoid !important;
-*           }
-*           h2, h3 {
-*              page-break-after: avoid !important; /* Prevent break after heading */
-*           }
-*           /* Add more rules as needed for your specific layout */
+*   **Example Structure (MUST INCLUDE STYLE TAG IN OUTPUT):**
+*     \`\`\`jsx
+*     // IMPORTANT: Include this <style> tag directly in your returned JSX
+*     const printStyles = \`
+*       @media print {
+*         .report-card, .chart-wrapper { /* Adapt selectors! */
+*           page-break-inside: avoid !important;
 *         }
-*       \`; // Use backticks for the CSS string
+*         h2, h3 {
+*            page-break-after: avoid !important; /* Prevent break after heading */
+*         }
+*         /* Add more rules as needed for your specific layout */
+*       }
+*     \`; // Use backticks for the CSS string
 *
-*       return (
-*         <React.Fragment>
-*           <style>{printStyles}</style>
-*           {/* ... rest of your report JSX ... */}
-*         </React.Fragment>
-*       );
-*       \`\`\`
-*     - **Ensure the CSS selectors used target the actual container elements in your generated report code.**
+*     return (
+*       <React.Fragment>
+*         <style>{printStyles}</style>
+*         {/* ... rest of your report JSX ... */}
+*       </React.Fragment>
+*     );
+*     \`\`\`
+*   **Ensure the CSS selectors used target the actual container elements in your generated report code.**
 *   Now, analyze the user\'s latest query which is provided as the final message in the conversation history...`;
 };
 

@@ -136,7 +136,10 @@ const getLLMReasoningResponse = async (agentContext) => {
             availableTools,
             analysisResult,
             previousAnalysisResultSummary,
-            hasPreviousGeneratedCode
+            hasPreviousGeneratedCode,
+            // ADD DATASET CONTEXT - This was missing!
+            datasetSchemas: agentContext.datasetSchemas || {},
+            datasetSamples: agentContext.datasetSamples || {}
         });
         // Log the length, maybe log the prompt itself if needed for debugging (as before)
         logger.debug(`Agent System Prompt generated. Length: ${systemPrompt.length}`);

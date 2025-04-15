@@ -28,6 +28,8 @@ class AgentOrchestrator {
             steps: [], // Track tools used and results this turn
             intermediateResults: {
                 lastSchema: null, 
+                datasetSchemas: {}, // Store schemas for all datasets
+                datasetSamples: {}, // Store sample rows for all datasets
                 parsedDataRef: null,
                 generatedAnalysisCode: null,
                 analysisResult: null,
@@ -71,11 +73,81 @@ class AgentOrchestrator {
     }
 
     /**
+     * Pre-fetches dataset schemas and sample data for all datasets in the session.
+     * @param {Array<string>} datasetIds - Array of dataset IDs in the session
+     * @return {Promise<void>}
+     */
+    async _preloadDatasetContext(datasetIds) {
+        if (!datasetIds || datasetIds.length === 0) {
+            logger.info(`[Agent Loop ${this.sessionId}] No datasets to preload.`);
+            return;
+        }
+
+        logger.info(`[Agent Loop ${this.sessionId}] Preloading context for ${datasetIds.length} datasets.`);
+        // Add detailed logging of exact dataset IDs
+        logger.info(`[Agent Loop ${this.sessionId}] DATASET IDs RECEIVED: ${JSON.stringify(datasetIds)}`);
+        
+        // Process each dataset ID sequentially to avoid overwhelming the DB
+        for (const datasetId of datasetIds) {
+            try {
+                // Log each dataset ID being processed
+                logger.info(`[Agent Loop ${this.sessionId}] Processing dataset ID: ${datasetId} (Type: ${typeof datasetId})`);
+                
+                // 1. Fetch schema
+                const schemaData = await datasetService.getDatasetSchema(datasetId, this.userId);
+                if (schemaData) {
+                    this.turnContext.intermediateResults.datasetSchemas[datasetId] = schemaData;
+                    // Also store in lastSchema for backward compatibility
+                    this.turnContext.intermediateResults.lastSchema = schemaData;
+                    logger.info(`[Agent Loop ${this.sessionId}] Preloaded schema for dataset ${datasetId}`);
+                }
+
+                // 2. Fetch and parse sample data (last 20 rows)
+                const rawContent = await datasetService.getRawDatasetContent(datasetId, this.userId);
+                if (rawContent) {
+                    // Parse the CSV content
+                    const parseResult = Papa.parse(rawContent, {
+                        header: true,
+                        dynamicTyping: true,
+                        skipEmptyLines: true,
+                        transformHeader: header => header.trim()
+                    });
+
+                    if (parseResult.data && parseResult.data.length > 0) {
+                        // Get the last 20 rows (or all if fewer than 20)
+                        const sampleSize = 20;
+                        const totalRows = parseResult.data.length;
+                        const startIndex = Math.max(0, totalRows - sampleSize);
+                        const sampleRows = parseResult.data.slice(startIndex);
+                        
+                        // Store the sample
+                        this.turnContext.intermediateResults.datasetSamples[datasetId] = {
+                            totalRows,
+                            sampleRows
+                        };
+                        
+                        // Also store the parsed data reference for backward compatibility
+                        const parsedDataRef = `parsed_${datasetId}_${Date.now()}`;
+                        this.turnContext.intermediateResults[parsedDataRef] = parseResult.data;
+                        this.turnContext.intermediateResults.parsedDataRef = parsedDataRef;
+                        
+                        logger.info(`[Agent Loop ${this.sessionId}] Preloaded ${sampleRows.length} sample rows from ${totalRows} total rows for dataset ${datasetId}`);
+                    }
+                }
+            } catch (error) {
+                logger.error(`[Agent Loop ${this.sessionId}] Error preloading context for dataset ${datasetId}: ${error.message}`, { error });
+                // Continue with next dataset, don't fail the whole operation
+            }
+        }
+    }
+
+    /**
      * Runs the main agent loop: Reason -> Act -> Observe.
      * @param {string} userMessage - The user's current message/query.
+     * @param {Array<string>} sessionDatasetIds - Array of dataset IDs in the session
      * @returns {Promise<{status: string, aiResponseText?: string, error?: string}>} - Final status and result.
      */
-    async runAgentLoop(userMessage) {
+    async runAgentLoop(userMessage, sessionDatasetIds = []) {
         logger.info(`[Agent Loop ${this.sessionId}] Starting for user ${this.userId}, message: "${userMessage.substring(0, 50)}..."`);
         this.turnContext.originalQuery = userMessage;
         this.turnContext.toolErrorCounts = {}; // Reset error counts for the turn
@@ -89,6 +161,11 @@ class AgentOrchestrator {
             const initialContext = await assembleContext(this.userId, []); // No datasets needed here
             this.turnContext.userContext = initialContext.userContext;
             this.turnContext.teamContext = initialContext.teamContext;
+
+            // Preload dataset schemas and samples (if session has datasets)
+            if (sessionDatasetIds && sessionDatasetIds.length > 0) {
+                await this._preloadDatasetContext(sessionDatasetIds);
+            }
 
             await this._prepareChatHistory(); // Prepare history context
 
@@ -521,6 +598,17 @@ class AgentOrchestrator {
         // Ensure fullChatHistory exists (it should be set by _prepareChatHistory)
         const fullChatHistory = this.turnContext.fullChatHistory || [];
 
+        // Prepare dataset context by adding schemas and samples to the context
+        const datasetSchemas = this.turnContext.intermediateResults.datasetSchemas || {};
+        const datasetSamples = this.turnContext.intermediateResults.datasetSamples || {};
+        
+        // Log the exact dataset IDs being sent to the LLM
+        const datasetIds = Object.keys(datasetSchemas);
+        logger.info(`[_prepareLLMContext] Sending the following dataset IDs to LLM: ${JSON.stringify(datasetIds)}`);
+        if (datasetIds.length > 0) {
+            logger.info(`[_prepareLLMContext] First dataset ID type: ${typeof datasetIds[0]}, length: ${datasetIds[0].length}`);
+        }
+
         return {
             userId: this.userId, // Pass userId for model preference selection
             originalQuery: this.turnContext.originalQuery,
@@ -535,7 +623,11 @@ class AgentOrchestrator {
             hasPreviousGeneratedCode: hasPreviousGeneratedCode,
             // --- END ADDED ---
             // Pass current turn analysis result if available (for direct use)
-            analysisResult: this.turnContext.intermediateResults.analysisResult
+            analysisResult: this.turnContext.intermediateResults.analysisResult,
+            // --- ADDED: Pass dataset context ---
+            datasetSchemas: datasetSchemas,
+            datasetSamples: datasetSamples
+            // --- END ADDED ---
         };
     }
 
@@ -616,20 +708,6 @@ class AgentOrchestrator {
         // Note: Output format must match what the LLM expects.
         return [
             {
-                name: 'list_datasets',
-                description: 'Lists available datasets (IDs, names, descriptions).',
-                args: {}, // No arguments needed
-                output: '{ "datasets": [{ "id": "...", "name": "...", "description": "..." }] }'
-            },
-            {
-                name: 'get_dataset_schema',
-                description: 'Gets schema (column names, types, descriptions) for a specific dataset ID.',
-                args: {
-                    dataset_id: 'string' // Specify required arguments and types
-                },
-                output: '{ "schemaInfo": [...], "columnDescriptions": {...}, "description": "..." }'
-            },
-            {
                 name: 'parse_csv_data',
                 description: 'Parses the raw CSV content of a dataset using PapaParse. Returns a reference ID to the parsed data.',
                 args: {
@@ -676,8 +754,8 @@ class AgentOrchestrator {
     /** Returns mapping of tool names to their implementation functions. */
     _getToolImplementations() {
         return {
-            'list_datasets': this._listDatasetsTool,
-            'get_dataset_schema': this._getDatasetSchemaTool,
+            'list_datasets': this._listDatasetsTool, // Keep for backward compatibility
+            'get_dataset_schema': this._getDatasetSchemaTool, // Keep for backward compatibility
             'parse_csv_data': this._parseCsvDataTool, 
             'generate_analysis_code': this._generateAnalysisCodeTool, 
             'execute_analysis_code': this._executeAnalysisCodeTool, 
@@ -877,14 +955,94 @@ class AgentOrchestrator {
     async _parseCsvDataTool(args) {
         const { dataset_id } = args;
         logger.info(`Executing tool: parse_csv_data for dataset ${dataset_id}`);
+        
+        // Add detailed logging about the dataset ID
+        logger.info(`[_parseCsvDataTool] DATASET ID DEBUG: Value: "${dataset_id}", Type: ${typeof dataset_id}, Length: ${dataset_id ? dataset_id.length : 'N/A'}`);
+        
         if (!dataset_id || typeof dataset_id !== 'string') {
             return { error: 'Missing or invalid required argument: dataset_id' };
         }
-
+        
+        // Check for common non-ObjectId values that might be attempted by the AI
+        if (['implicit_revenue_data', 'revenue_data', 'sales_data', 'financial_data', 'dataset', 'ds_f697a53475'].includes(dataset_id)) {
+            logger.warn(`[_parseCsvDataTool] AI attempted to use a literal name "${dataset_id}" instead of the ObjectId`);
+            
+            // FALLBACK MECHANISM: Get the first valid dataset ID from context
+            const availableDatasetIds = Object.keys(this.turnContext.intermediateResults.datasetSchemas || {});
+            if (availableDatasetIds.length > 0) {
+                const correctDatasetId = availableDatasetIds[0];
+                logger.info(`[_parseCsvDataTool] FALLBACK: Using correct dataset ID: ${correctDatasetId} instead of invalid ID: ${dataset_id}`);
+                
+                // Proceed with the correct ID
+                try {
+                    const rawContent = await datasetService.getRawDatasetContent(correctDatasetId, this.userId);
+                    if (!rawContent) {
+                        throw new Error('Failed to fetch dataset content or content is empty.');
+                    }
+                    
+                    logger.info(`Parsing CSV content for dataset ${correctDatasetId} (length: ${rawContent.length})`);
+                    // Continue with parsing as normal...
+                    const parseResult = Papa.parse(rawContent, {
+                        header: true,
+                        dynamicTyping: true,
+                        skipEmptyLines: true,
+                        transformHeader: header => header.trim()
+                    });
+                    
+                    if (parseResult.errors && parseResult.errors.length > 0) {
+                        logger.error(`PapaParse errors for dataset ${correctDatasetId}:`, parseResult.errors);
+                        const errorSummary = parseResult.errors.slice(0, 3).map(e => e.message).join('; ');
+                        return { error: `CSV Parsing failed: ${errorSummary}` };
+                    }
+                    
+                    if (!parseResult.data || parseResult.data.length === 0) {
+                        return { error: 'CSV Parsing resulted in no data.' };
+                    }
+                    
+                    logger.info(`Successfully parsed ${parseResult.data.length} rows for dataset ${correctDatasetId}.`);
+                    const parsedDataRef = `parsed_${correctDatasetId}_${Date.now()}`;
+                    this.turnContext.intermediateResults[parsedDataRef] = parseResult.data;
+                    
+                    return {
+                        result: {
+                            status: 'success',
+                            message: `Data parsed successfully, ${parseResult.data.length} rows found. Note: Used correct dataset ID: ${correctDatasetId}`,
+                            parsed_data_ref: parsedDataRef,
+                            rowCount: parseResult.data.length
+                        }
+                    };
+                } catch (error) {
+                    logger.error(`_parseCsvDataTool fallback failed for ${correctDatasetId}: ${error.message}`, { error });
+                    return { error: `Failed to parse dataset content: ${error.message}` };
+                }
+            } else {
+                return { 
+                    error: `Invalid dataset ID: '${dataset_id}'. You must use the exact MongoDB ObjectId (24-character hex string) provided in the system prompt, not a descriptive name.` 
+                };
+            }
+        }
+        
+        // NORMAL PATH FOR VALID DATASET IDs
         try {
+            // Add ObjectId validation check
+            const mongoose = require('mongoose');
+            const isValidObjectId = mongoose.Types.ObjectId.isValid(dataset_id);
+            logger.info(`[_parseCsvDataTool] Is valid MongoDB ObjectId: ${isValidObjectId}`);
+            
+            if (!isValidObjectId) {
+                // Check if we have any available datasets to use as fallback
+                const availableDatasetIds = Object.keys(this.turnContext.intermediateResults.datasetSchemas || {});
+                if (availableDatasetIds.length > 0) {
+                    logger.info(`[_parseCsvDataTool] Invalid ObjectId but fallback available. Will retry.`);
+                    // Recursively call this method with the first dataset ID
+                    return this._parseCsvDataTool({ dataset_id: availableDatasetIds[0] });
+                } else {
+                    return { error: `Invalid dataset ID format: '${dataset_id}'. Dataset ID must be a valid MongoDB ObjectId (24-character hex string).` };
+                }
+            }
+            
             const rawContent = await datasetService.getRawDatasetContent(dataset_id, this.userId);
             if (!rawContent) {
-                // Should be caught by getRawDatasetContent, but double-check
                 throw new Error('Failed to fetch dataset content or content is empty.');
             }
             
@@ -895,9 +1053,6 @@ class AgentOrchestrator {
                 dynamicTyping: true, // Attempt to convert numbers/booleans
                 skipEmptyLines: true,
                 transformHeader: header => header.trim(), // Trim header whitespace
-                //delimiter: ",", // Default is comma
-                //newline: "", // Auto-detect
-                //quoteChar: '"', // Default
             });
 
             if (parseResult.errors && parseResult.errors.length > 0) {
@@ -926,7 +1081,6 @@ class AgentOrchestrator {
                     rowCount: parseResult.data.length
                 } 
             };
-
         } catch (error) {
             logger.error(`_parseCsvDataTool failed for ${dataset_id}: ${error.message}`, { error });
             return { error: `Failed to parse dataset content: ${error.message}` };

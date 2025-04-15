@@ -176,7 +176,7 @@ const getSchema = async (req, res, next) => {
 const updateDataset = async (req, res, next) => {
     const { id } = req.params;
     const userId = req.user._id;
-    const { columnDescriptions, description } = req.body;
+    const { columnDescriptions, description, schemaInfo } = req.body;
 
     // Validate MongoDB ObjectId
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -214,12 +214,55 @@ const updateDataset = async (req, res, next) => {
             dataset.description = description;
         }
 
+        // Update schema information if provided
+        if (schemaInfo !== undefined) {
+            // Validate schemaInfo structure
+            if (!Array.isArray(schemaInfo)) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'schemaInfo must be an array'
+                });
+            }
+
+            // Ensure each item has the required fields
+            for (const item of schemaInfo) {
+                if (!item.name || typeof item.name !== 'string') {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'Each schema item must have a name property of type string'
+                    });
+                }
+                
+                if (!item.type || typeof item.type !== 'string') {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'Each schema item must have a type property of type string'
+                    });
+                }
+            }
+
+            // Verify all original column names are preserved (we don't want to lose columns)
+            const originalColumnNames = dataset.schemaInfo.map(col => col.name);
+            const newColumnNames = schemaInfo.map(col => col.name);
+            
+            const missingColumns = originalColumnNames.filter(name => !newColumnNames.includes(name));
+            if (missingColumns.length > 0) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: `Cannot remove existing columns. Missing columns: ${missingColumns.join(', ')}`
+                });
+            }
+
+            // Update the schema info
+            dataset.schemaInfo = schemaInfo;
+        }
+
         // Update lastUpdatedAt timestamp
         dataset.lastUpdatedAt = new Date();
 
         await dataset.save();
 
-        logger.info(`User ${userId} updated dataset ${id} with context and/or column descriptions`);
+        logger.info(`User ${userId} updated dataset ${id} with context, column descriptions, and/or schema info`);
         res.status(200).json({ status: 'success', data: dataset });
     } catch (error) {
         logger.error(`Error updating dataset ${id} for user ${userId}: ${error.message}`);

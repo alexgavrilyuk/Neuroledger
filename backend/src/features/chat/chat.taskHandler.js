@@ -104,8 +104,11 @@ const workerHandler = async (payload) => {
         // --- END ADDED ---
     );
 
+    // Log dataset IDs to verify exactly what's being passed to the AI
+    logger.info(`[Task Handler] Passing exact dataset IDs to AI agent: ${JSON.stringify(sessionDatasetIds)}`);
+    
     // The agent loop handles internal state updates (DB) and agent:* websocket events
-    const agentResult = await agentOrchestrator.runAgentLoop(userMessage.promptText);
+    const agentResult = await agentOrchestrator.runAgentLoop(userMessage.promptText, sessionDatasetIds);
 
     // --- Agent Loop Finished --- 
 
