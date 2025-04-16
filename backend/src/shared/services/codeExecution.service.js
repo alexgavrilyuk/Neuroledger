@@ -16,35 +16,47 @@ const CODE_EXECUTION_TIMEOUT_MS = 5000; // 5 seconds timeout for script executio
  * A robust sandboxing solution (Docker, gVisor, Firecracker) is REQUIRED before production use (Phase 4).
  *
  * @param {string} code - The Node.js analysis code string to execute.
- * @param {Array<Object>} parsedData - The pre-parsed data (array of objects) to be injected.
- * @returns {Promise<{result: any | null, error: string | null}>} - An object containing the result or an error message.
+ * @param {object} inputData - The pre-parsed data array to inject into the sandbox.
+ * @returns {Promise<{result: any, error: string|null}>} Object containing result or error.
  */
-const executeSandboxedCode = async (code, parsedData) => {
-  logger.info(`Attempting sandboxed code execution with pre-parsed data.`);
+const executeSandboxedCode = async (code, inputData) => {
+  if (!inputData) {
+    logger.error('executeSandboxedCode called without inputData.');
+    return { result: null, error: 'Internal error: Input data was not provided for execution.' };
+  }
+  logger.info(`Attempting sandboxed code execution with ${Array.isArray(inputData) ? 'pre-parsed' : 'INVALID'} data.`);
+  if (Array.isArray(inputData)) {
+     logger.debug(`Executing code with ${inputData.length} pre-parsed data rows.`);
+  }
+
   let capturedResult = null;
   let capturedError = null;
 
-  // 1. Validate Input Data
-  if (!Array.isArray(parsedData)) {
-      logger.error('executeSandboxedCode called without a valid parsedData array.');
-      return { result: null, error: 'Invalid input: parsedData must be an array.' };
-  }
-  logger.debug(`Executing code with ${parsedData.length} pre-parsed data rows.`);
-
-  // 2. Prepare Sandbox Context
-  const sendResult = (data) => {
-    logger.debug('sendResult called within sandbox.');
-    if (capturedResult === null) { 
-      capturedResult = data;
-    } else {
-      logger.warn('sendResult called multiple times in sandbox. Only the first result is captured.');
-    }
-  };
-
+  // 2. Define Sandbox Context (Globals accessible within the VM)
   const sandboxContext = {
-    // Inject the PARSED data as inputData
-    inputData: parsedData, 
-    sendResult: sendResult,        
+    // Function for the sandboxed code to return results
+    sendResult: (result) => {
+      if (capturedResult !== null) {
+          logger.warn('Sandbox code called sendResult multiple times. Only the first call is used.');
+          return;
+      }
+       if (typeof result === 'undefined') {
+           logger.warn('Sandbox code called sendResult with undefined. This might indicate an issue.');
+           // Allow undefined for now, but might revisit
+       }
+       // Basic check for non-serializable types (like functions) - VERY basic
+       try {
+           JSON.stringify(result); // Throws on circular references, functions, etc.
+           capturedResult = result;
+           logger.info('sendResult called successfully by sandbox code.');
+       } catch (e) {
+           logger.error(`sendResult called with non-serializable data: ${e.message}. Result cannot be captured.`);
+           capturedResult = { error: `Result could not be serialized: ${e.message}` }; // Send error back
+       }
+    },
+    // Provide the input data directly
+    inputData: inputData,
+    // Wrapped console for capturing logs (optional)
     console: {
        log: (...args) => {
          logger.debug('Sandbox console.log:', ...args);

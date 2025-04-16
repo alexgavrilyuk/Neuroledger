@@ -147,7 +147,17 @@ export const streamChatMessage = (sessionId, promptText, selectedDatasetIds = []
                  if (eventHandlers.onGeneratedCode) eventHandlers.onGeneratedCode(data);
                  break;
                 case 'thinking':
+                case 'agent:thinking':
                   if (eventHandlers.onThinking) eventHandlers.onThinking(data);
+                  break;
+                case 'agent:using_tool':
+                  if (eventHandlers.onUsingTool) eventHandlers.onUsingTool(data);
+                  break;
+                case 'agent:tool_result':
+                  if (eventHandlers.onAgentToolResult) eventHandlers.onAgentToolResult(data);
+                  break;
+                case 'agent:error':
+                  if (eventHandlers.onError) eventHandlers.onError(data);
                   break;
                 case 'user_message_created':
                   if (eventHandlers.onUserMessageCreated) eventHandlers.onUserMessageCreated(data);

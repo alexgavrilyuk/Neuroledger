@@ -249,6 +249,38 @@ export const ChatProvider = ({ children }) => {
           }
         },
 
+        onUsingTool: (data) => {
+          // --- Use Ref for immediate ID access --- 
+          const currentId = currentStreamingIdRef.current;
+          logger.info(`[ChatContext onUsingTool] Agent using tool: ${data.toolName} (for ref ID: ${currentId})`);
+          if (currentId) {
+            setMessages(prevMessages =>
+              prevMessages.map(msg =>
+                msg._id === currentId
+                  ? { 
+                      ...msg, 
+                      toolName: data.toolName,
+                      toolInput: data.args,
+                      toolStatus: 'running',
+                      toolOutput: null,
+                      toolError: null,
+                      status: 'using_tool'
+                    } 
+                  : msg
+              )
+            );
+            // Update agent message statuses too
+            if (currentId) {
+              setAgentMessageStatuses(prev => ({
+                ...prev,
+                [currentId]: { status: AGENT_STATUS.USING_TOOL, toolName: data.toolName, error: null },
+              }));
+            }
+          } else {
+            logger.warn('[ChatContext onUsingTool] currentStreamingIdRef is null, cannot update message state.');
+          }
+        },
+
         onToken: (data) => {
           // --- Use Ref for immediate ID access --- 
           const currentId = currentStreamingIdRef.current;
@@ -326,6 +358,35 @@ export const ChatProvider = ({ children }) => {
           }
         },
 
+        onAgentToolResult: (data) => {
+          // --- Use Ref for immediate ID access --- 
+          const currentId = currentStreamingIdRef.current;
+          logger.info(`[ChatContext onAgentToolResult] Agent tool result: ${data.toolName}, resultSummary: ${data.resultSummary} (for ref ID: ${currentId})`);
+          if (currentId) {
+            // Return to thinking state but keep tool result information
+            setMessages(prevMessages =>
+              prevMessages.map(msg =>
+                msg._id === currentId
+                  ? { 
+                      ...msg, 
+                      status: 'thinking',
+                      toolStatus: data.status || 'completed', // Default to 'completed' if not provided
+                      toolOutput: data.resultSummary,
+                    } 
+                  : msg
+              )
+            );
+            
+            // Update agent message statuses
+            setAgentMessageStatuses(prev => ({
+              ...prev,
+              [currentId]: { status: AGENT_STATUS.THINKING, toolName: null, error: null }, // Back to thinking
+            }));
+          } else {
+            logger.warn('[ChatContext onAgentToolResult] currentStreamingIdRef is null, cannot update message state.');
+          }
+        },
+
         onGeneratedCode: (data) => {
           // --- Use Ref for immediate ID access --- 
           const currentId = currentStreamingIdRef.current;
@@ -369,22 +430,34 @@ export const ChatProvider = ({ children }) => {
 
         onError: (data) => {
           // --- Use Ref for immediate ID access --- 
-           const errorMsgId = currentStreamingIdRef.current; // Use ref ID primarily
-          logger.error(`Streaming error: ${data.message} (for ref ID: ${errorMsgId})`);
-          setStreamError(data.message);
+          const errorMsgId = currentStreamingIdRef.current; // Use ref ID primarily
+          
+          // Extract error message from either agent:error or regular error event
+          const errorMessage = data.error || data.message;
+          
+          logger.error(`Streaming error: ${errorMessage} (for ref ID: ${errorMsgId})`);
+          setStreamError(errorMessage);
+          
           if (errorMsgId) {
             setMessages(prev => prev.map(msg => 
               msg._id === errorMsgId 
                 ? { 
                     ...msg, 
                     status: 'error', 
-                    errorMessage: data.message,
+                    errorMessage: errorMessage,
                     isStreaming: false,
-                    toolName: undefined, toolInput: undefined, toolStatus: 'error', toolOutput: undefined, toolError: data.message 
+                    toolName: undefined, toolInput: undefined, toolStatus: 'error', toolOutput: undefined, toolError: errorMessage 
                   } 
                 : msg
             ));
+            
+            // Update agent message statuses
+            setAgentMessageStatuses(prev => ({
+              ...prev,
+              [errorMsgId]: { status: AGENT_STATUS.ERROR, toolName: null, error: errorMessage },
+            }));
           }
+          
           // --- Reset state and ref --- 
           setIsStreaming(false);
           setIsSendingMessage(false);

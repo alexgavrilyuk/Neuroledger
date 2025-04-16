@@ -208,88 +208,109 @@ const getLLMReasoningResponse = async (agentContext) => {
 };
 
 /**
- * Generates Node.js code for execution in a restricted sandbox environment.
+ * Generates the system prompt for analysis code generation.
+ * @param {object} params - Parameters for prompt generation.
+ * @param {string} params.analysisGoal - The specific goal the code should achieve.
+ * @param {object} params.datasetSchema - Schema information ({schemaInfo, columnDescriptions, description}).
+ * @returns {string} - The generated system prompt string.
+ */
+const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
+    if (!analysisGoal || !datasetSchema) {
+        throw new Error('Missing analysis goal or dataset schema for analysis code prompt generation.');
+    }
+
+    // Construct the system prompt for ANALYSIS code generation
+    const analysisCodeGenSystemPrompt = `You are an expert Javascript data analyst. Your task is to write Javascript code to analyze the provided dataset based on the user's goal.
+
+    **Input Data:**
+    The data will be provided to your code as a Javascript variable named \`inputData\`. This variable will hold an array of objects, where each object represents a row from the original CSV data. You **MUST** access the data using \`inputData\`. **DO NOT** attempt to access it via \`global.inputData\`.
+
+    **Dataset Schema:**
+    The structure of the objects within the \`inputData\` array is as follows:
+    \`\`\`json
+    ${JSON.stringify(datasetSchema, null, 2)}
+    \`\`\`
+
+    **Analysis Goal:**
+    ${analysisGoal}
+
+    **Code Requirements:**
+    1.  Write clean, efficient, and correct Javascript code.
+    2.  Your code MUST process the data available ONLY in the \`inputData\` variable.
+    3.  **CRITICAL:** Your code MUST conclude by calling the special function \`sendResult(resultObject)\` exactly once, passing the final analysis result as a single JSON-serializable object. Do NOT log the result to the console instead of calling sendResult.
+    4.  The \`resultObject\` should contain the key findings based on the analysis goal. Structure it logically.
+    5.  You can use standard Javascript built-in objects and functions (Date, Math, Array methods, etc.).
+    6.  **DO NOT** include any code for parsing CSV data (like \`.split("\n")\`), as the data is already parsed and provided in \`inputData\`.
+    7.  **DO NOT** define functions or variables outside the main script body unless necessary for clarity (helper functions are okay).
+    8.  Handle potential data issues gracefully (e.g., missing values, unexpected types) using checks and default values where appropriate.
+    9.  Output ONLY the raw Javascript code. Do not include any explanations, comments outside the code, or markdown formatting.
+
+    **Example (Conceptual):**
+    \`\`\`javascript
+    // Access the pre-parsed data
+    const data = inputData;
+
+    // Perform calculations...
+    let total = 0;
+    data.forEach(row => {
+      // Safely access properties and perform calculations
+      const value = parseFloat(row?.['some_column']); // Example of safe access
+      if (!isNaN(value)) {
+        total += value;
+      }
+    });
+
+    // Prepare the result object
+    const result = {
+      calculatedTotal: total,
+      numberOfRows: data.length
+    };
+
+    // Send the result back
+    sendResult(result);
+    \`\`\`
+    `;
+
+    return analysisCodeGenSystemPrompt;
+};
+
+/**
+ * Generates Node.js analysis code using the LLM based on a goal and schema.
  * @param {object} params - Parameters for code generation.
  * @param {string} params.userId - The ID of the user requesting the code.
  * @param {string} params.analysisGoal - The specific goal the code should achieve.
- * @param {object} params.datasetSchema - Schema information ({schemaInfo, columnDescriptions, description}).
+ * @param {object} params.datasetSchema - Schema information.
  * @returns {Promise<{code: string | null}>} - The generated code string or null on failure.
  */
 const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => {
-    // --- MODIFIED: Get user preference ---
     const { provider, model: modelToUse } = await getUserModelPreference(userId);
     logger.info(`[Analysis Code Gen] Using ${provider} model: ${modelToUse} for user ${userId}`);
 
-    // Check availability - ADDED OpenAI check
+    // Check availability
     if ((provider === 'claude' && !anthropic) ||
         (provider === 'gemini' && !geminiClient.isAvailable()) ||
         (provider === 'openai' && !openaiClient.isAvailable())) {
-         logger.error(`generateAnalysisCode called but selected provider (${provider}) client is not available.`);
-         throw new Error(`AI assistant (${provider}) is currently unavailable for code generation.`);
-    }
-    
-    if (!analysisGoal || !datasetSchema) {
-        throw new Error('Missing analysis goal or dataset schema for analysis code generation.');
+        logger.error(`generateAnalysisCode called but selected provider (${provider}) client is not available.`);
+        throw new Error(`AI assistant (${provider}) is currently unavailable for code generation.`);
     }
 
     const startTime = Date.now();
-    logger.info('Generating analysis Node.js code for goal: \\"%s...\\" using %s', analysisGoal.substring(0, 50), provider);
+    logger.info('Generating analysis Node.js code for goal: \"%s...\" using %s', analysisGoal.substring(0, 50), provider);
 
-    // Construct the system prompt for ANALYSIS code generation
-    // MODIFIED: Removed the rigid required output structure and related instructions
-    const analysisCodeGenSystemPrompt = `You are an expert Node.js developer writing analysis code for a VERY RESTRICTED sandbox (Node.js vm.runInNewContext).
-
-    CONTEXT IN SANDBOX:
-    1.  \`inputData\`: A JavaScript variable already populated with the PARSED dataset as an array of objects. Do NOT try to parse it again.
-    2.  \`sendResult(data)\`: Function to return ONE JSON-serializable result of your analysis.
-    3.  Standard JS built-ins ONLY (String, Array, Object, Math, JSON, Date, etc.).
-    4.  \`console.log/warn/error\` for debugging.
-
-    RESTRICTIONS (CRITICAL):
-    *   NO \`require()\`. NO external libraries.
-    *   NO Node.js globals (process, Buffer, fs, etc.).
-    *   NO \`async/await\`.
-    *   MUST use the provided \`inputData\` variable directly.
-    *   MUST call \`sendResult(result)\` exactly once with the final analysis result (or \`{ error: ... }\` on failure).
-    *   MUST complete within ~5 seconds.
-    *   MUST use ES5 syntax ONLY. DO NOT use ES6+ features such as template literals (e.g., \`string \${variable}\`), arrow functions (=>), let, or const. Use traditional string concatenation (+) and var for variable declarations.
-    *   **Execution Flow:** The generated code will be executed directly. **Do NOT use top-level \`return\` statements.** The script should run to completion and use the provided \`sendResult(result)\` function to return the final JSON analysis object. Errors should be allowed to throw naturally (they will be caught).
-
-    DATASET SCHEMA (for context on properties within inputData objects):
-    *   Description: ${datasetSchema.description || '(No description provided)'}
-    *   Columns: ${(datasetSchema.schemaInfo || []).map(col => `    - ${col.name} (Type: ${col.type || 'unknown'})`).join('\n') || '    (No schema info available)'}
-
-    **TASK:**
-    Write a Node.js script that:
-    1.  Takes the \`inputData\` array of objects.
-    2.  **Includes robust date parsing:** Create a helper function (e.g., \`parseDateRobustly\`) that attempts to parse date strings. If the input is empty, null, or cannot be parsed into a valid Date object (even after trying common formats like YYYY-MM-DD, MM/DD/YYYY), the helper function MUST return \`null\`. DO NOT default to the epoch date (1970).
-    3.  Processes \`inputData\`: Map over \`inputData\`, use the robust date parser, and parse numeric values carefully. 
-    4.  **Filters invalid data:** After mapping, filter the processed data array to include ONLY rows where the parsed date is NOT \`null\` (if dates are relevant to this analysis).
-    5.  Performs the analysis using the filtered data to achieve the goal: "${analysisGoal}"
-    6.  Creates a well-structured JSON result object that BEST represents the findings of your analysis. Structure this object in the most logical way to organize the specific insights and data points relevant to addressing the analysis goal. Use clear, descriptive keys and appropriate data types. Include all necessary information to make the results complete and meaningful.
-        * **IMPORTANT:** DO NOT include metadata or processing statistics in the results (like "rowsProcessed", "rowsSkipped", "inputDataLength", etc.). Focus exclusively on analysis findings, not on information about the data processing itself.
-    7.  Calls \`sendResult(result)\` with your structured result object.
-    8.  Wrap **all** logic in a single top-level \`try...catch\` block. Call \`sendResult({ error: err.message || 'Unknown execution error' })\` in the catch block.
-
-    OUTPUT REQUIREMENTS:
-    *   Provide ONLY the raw Node.js code string, starting with \`try { ... } catch (err) { ... }\`. No markdown.
-    *   The code MUST operate directly on the \`inputData\` variable. DO NOT include any CSV parsing logic.
-    *   The object passed to \`sendResult()\` should be a well-structured JSON object that BEST represents your analysis findings for the specific user goal and dataset.`;
+    // Generate the system prompt using the renamed function
+    const systemPrompt = generateAnalysisCodePrompt({ analysisGoal, datasetSchema });
 
     try {
-        const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the goal and schema, creating a well-structured JSON result that best represents the findings of the analysis."}];
-        
-        // --- MODIFIED: Prepare API options - ADDED OpenAI ---
+        const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the provided TASK and OUTPUT REQUIREMENTS in the system prompt."}]; // Simplified user message
+
         const apiOptions = {
             model: modelToUse,
-             // Adjusted token limits - ADDED OpenAI
-            max_tokens: provider === 'gemini' ? 18192 : (provider === 'openai' ? 8192 : 14096), // OpenAI gets 8k tokens
-            system: analysisCodeGenSystemPrompt,
+            max_tokens: provider === 'gemini' ? 18192 : (provider === 'openai' ? 8192 : 14096),
+            system: systemPrompt,
             messages,
             temperature: 0.0 // Low temp for code gen
         };
 
-        // --- MODIFIED: Call appropriate API - ADDED OpenAI ---
         let apiResponse;
         if (provider === 'gemini') {
             apiResponse = await geminiClient.generateContent(apiOptions);
@@ -299,7 +320,6 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
             apiResponse = await anthropic.messages.create(apiOptions);
         }
 
-        // --- MODIFIED: Extract code (structure should be consistent) ---
         const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
 
         if (!generatedCode) {
@@ -307,24 +327,21 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
             throw new Error(`AI assistant (${provider}) failed to generate analysis code.`);
         }
 
-        // Check if code includes calls to sendResult (basic validation)
+        // Basic code validation
         if (!generatedCode.includes('sendResult(')) {
-             logger.warn('Generated analysis code might be missing sendResult() call.');
+            logger.warn('Generated analysis code might be missing sendResult() call.');
         }
         if (generatedCode.includes('.split(') || generatedCode.includes('datasetContent')) {
-             logger.warn('Generated analysis code unexpectedly contains parsing logic!');
-             // Potentially throw error here?
+            logger.warn('Generated analysis code unexpectedly contains parsing logic!');
         }
-        
-        // Now modelToUse should be defined for the log
-        const currentModel = modelToUse; // Assign to different variable just in case of weird scope issue
-        logger.info(`Analysis code generated successfully using ${currentModel}. Length: ${generatedCode.length}`);
+
+        const durationMs = Date.now() - startTime;
+        logger.info(`Analysis code generated successfully using ${modelToUse}. Length: ${generatedCode.length}, Time: ${durationMs}ms`);
         return { code: generatedCode };
 
     } catch (error) {
-        // Use the same variable name as defined in the try block for error logging
-        const errorModel = modelToUse;
-        logger.error(`Error during ${provider} analysis code generation API call with model ${errorModel}: ${error.message}`, error);
+        const durationMs = Date.now() - startTime;
+        logger.error(`Error during ${provider} analysis code generation API call with model ${modelToUse}: ${error.message}. Time: ${durationMs}ms`, error);
         throw new Error(`AI assistant (${provider}) failed to generate analysis code: ${error.message}`);
     }
 };
@@ -632,6 +649,9 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
             stream: true // <<< Enable streaming for all providers here
         };
 
+        // ADDED: Log the attempt to start streaming
+        logger.debug(`[Agent Reasoning - STREAMING] Starting ${provider} stream with model ${modelToUse}`);
+        
         let stream;
         if (provider === 'gemini') {
             stream = await geminiClient.streamGenerateContent(apiOptions);
@@ -642,25 +662,43 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
         }
 
         logger.info(`LLM Reasoning stream started via ${provider}.`);
+        
+        // ADDED: Track chunk count to help debug stream completion issues
+        let chunkCount = 0;
+        let lastChunkTime = Date.now();
 
         // Process the stream
         for await (const chunk of stream) {
+            // Update tracking variables
+            chunkCount++;
+            lastChunkTime = Date.now();
+            
             // --- Chunk processing logic needs to be provider-specific --- 
             if (provider === 'openai') {
                 const delta = chunk.choices?.[0]?.delta?.content;
                 if (delta) {
                     streamCallback('token', { content: delta });
                 }
-                // TODO: Add OpenAI tool call stream handling if needed
-                if(chunk.choices?.[0]?.finish_reason === 'stop'){
-                     logger.info('OpenAI stream finished.');
-                 }
+                // ADDED: More detailed finish tracking
+                if(chunk.choices?.[0]?.finish_reason) {
+                    const reason = chunk.choices?.[0]?.finish_reason;
+                    logger.info(`OpenAI stream finished. Reason: ${reason}, Total chunks: ${chunkCount}`);
+                    // Signal completion with finish reason
+                    streamCallback('finish', { finishReason: reason });
+                }
             } else if (provider === 'gemini') {
                 // Gemini SDK yields chunks directly
                 try {
                     const text = chunk.text(); // Method to get text from Gemini chunk
                     if (text) {
                          streamCallback('token', { content: text });
+                    }
+                    
+                    // ADDED: Check for finish info in Gemini response
+                    if (chunk.candidates && chunk.candidates[0] && chunk.candidates[0].finishReason) {
+                        const reason = chunk.candidates[0].finishReason;
+                        logger.info(`Gemini stream chunk has finish info. Reason: ${reason}, Total chunks: ${chunkCount}`);
+                        streamCallback('finish', { finishReason: reason });
                     }
                 } catch (e) {
                     // Handle potential errors during text extraction from chunk
@@ -672,18 +710,29 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
                  if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
                      streamCallback('token', { content: chunk.delta.text });
                  } else if (chunk.type === 'message_stop') {
-                     logger.info('Claude stream finished.');
+                     logger.info(`Claude stream finished. Total chunks: ${chunkCount}`);
+                     streamCallback('finish', { finishReason: 'stop' });
                  } else if (chunk.type === 'content_block_start' && chunk.content_block.type === 'tool_use') {
                     // Basic handling for tool calls - might need refinement
                     streamCallback('tool_call', { toolName: chunk.content_block.name, input: chunk.content_block.input });
                  }
-                 // Add handling for other Claude stream events if necessary
+                 // ADDED: Log other event types we're not handling
+                 else {
+                    logger.debug(`Unhandled Claude stream event type: ${chunk.type}`);
+                 }
             }
         }
 
         // Stream ended normally
         const durationMs = Date.now() - startTime;
-        logger.info(`LLM Reasoning stream via ${provider} completed in ${durationMs}ms.`);
+        logger.info(`LLM Reasoning stream via ${provider} completed in ${durationMs}ms. Total chunks: ${chunkCount}, Last chunk received ${Date.now() - lastChunkTime}ms ago`);
+        
+        // Check if we received a finish signal
+        if (chunkCount > 0) {
+            // Only if we actually got chunks but no finish event was sent yet
+            streamCallback('finish', { finishReason: 'end_of_stream' });
+        }
+        
         streamCallback('completed', { finalContent: null }); // Signal completion
 
     } catch (error) {

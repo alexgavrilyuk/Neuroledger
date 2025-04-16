@@ -1,1634 +1,946 @@
-const logger = require('../../shared/utils/logger');
-const datasetService = require('../datasets/dataset.service');
-const promptService = require('./prompt.service');
-const PromptHistory = require('./prompt.model');
-const { getIO } = require('../../socket'); // Corrected path
-const { assembleContext } = require('./prompt.service'); // Import assembleContext
-const codeExecutionService = require('../../shared/services/codeExecution.service'); // Import Code Execution Service
-const Papa = require('papaparse'); // Import papaparse
-const User = require('../users/user.model');
-const { streamLLMReasoningResponse } = require('./prompt.service'); // Ensure this is imported
+/**
+ * @fileoverview This service manages the agent execution loop.
+ * It dynamically loads available tools, prepares context using AgentContextService,
+ * orchestrates the interaction with the LLM (streaming), executes tool calls,
+ * manages intermediate state, handles retries, and updates the database record.
+ * The primary export is the `runAgent` function.
+ */
 
-const MAX_AGENT_ITERATIONS = 10; // Increased iterations slightly for multi-step tasks
-const MAX_TOOL_RETRIES = 1; // Allow one retry for potentially transient tool errors
-const HISTORY_SUMMARIZATION_THRESHOLD = 10; // Summarize if more than 10 messages
-const HISTORY_FETCH_LIMIT = 20; // Max messages to fetch for context/summarization
+const logger = require('../../shared/utils/logger');
+const PromptHistory = require('./prompt.model');
+// Removed getIO import - using sendEventCallback directly
+const { streamLLMReasoningResponse } = require('./prompt.service');
+const { toolDefinitions } = require('./tools/tool.definitions');
+const AgentContextService = require('./agentContext.service');
+const { summarizeToolResult, formatToolResultForLLM } = require('./agent.utils');
+const path = require('path');
+const fs = require('fs');
+
+// Constants
+const MAX_AGENT_ITERATIONS = 10;
+const MAX_TOOL_RETRIES = 1;
+
+// --- Dynamic Tool Loading ---
+/**
+ * @description Loads tool implementation functions dynamically from the ./tools directory.
+ * Skips tool.definitions.js and hidden files.
+ * Maps filenames to tool names (e.g., answer_user.js -> _answerUserTool).
+ * @type {Object<string, Function>}
+ */
+const toolsDirectory = path.join(__dirname, 'tools');
+const toolImplementations = {};
+
+try {
+    fs.readdirSync(toolsDirectory)
+        .filter(file => file.endsWith('.js') && file !== 'tool.definitions.js' && !file.startsWith('.')) // Exclude hidden files
+        .forEach(file => {
+            const toolName = path.basename(file, '.js');
+            // Adjust tool name if filename differs (e.g., answer_user.js -> _answerUserTool)
+            const adjustedToolName = toolName === 'answer_user' ? '_answerUserTool' : toolName;
+            try {
+                const toolModule = require(path.join(toolsDirectory, file));
+                if (typeof toolModule === 'function') {
+                    toolImplementations[adjustedToolName] = toolModule;
+                    logger.info(`[Agent] Loaded tool: ${adjustedToolName} from ${file}`);
+                } else {
+                     logger.warn(`[Agent] Failed to load tool ${adjustedToolName}: Module from ${file} does not export a function.`);
+                }
+            } catch (error) {
+                logger.error(`[Agent] Failed to load tool ${adjustedToolName} from ${file}: ${error.message}`, { stack: error.stack });
+            }
+        });
+} catch (error) {
+     logger.error(`[Agent] Failed to read tools directory ${toolsDirectory}: ${error.message}`, { stack: error.stack });
+     // Potentially throw here if tools are critical? Or proceed without tools?
+}
+logger.info(`[Agent] Available tools: ${Object.keys(toolImplementations).join(', ')}`);
+// --- End Tool Loading ---
 
 /**
- * Orchestrates the agent's reasoning loop to fulfill user requests.
+ * Orchestrates the agent's reasoning loop with streaming capabilities.
+ * Handles fetching context, interacting with the LLM, executing tools, managing state,
+ * and streaming results back via a callback.
  */
-class AgentOrchestrator {
-    constructor(userId, teamId, sessionId, aiMessagePlaceholderId, previousAnalysisData = null, previousGeneratedCode = null) {
+class AgentExecutor {
+    /**
+     * @typedef {object} AgentStep
+     * @property {string} tool - Name of the tool executed (or signal like '_answerUserTool').
+     * @property {object} args - Arguments passed to the tool.
+     * @property {string} resultSummary - A concise summary of the tool's result or error.
+     * @property {any} [result] - The actual result payload from a successful tool execution (stored for context).
+     * @property {string} [error] - Error message if the tool execution failed.
+     * @property {number} attempt - The attempt number for this step (handles retries).
+     */
+
+    /**
+     * @typedef {object} IntermediateResults
+     * @property {object<string, object>} datasetSchemas - Map of datasetId to schema info.
+     * @property {object<string, object>} datasetSamples - Map of datasetId to sample data.
+     * @property {object<string, Array<object>>} parsedData - Map of datasetId to fully parsed data array.
+     * @property {any} analysisResult - Result from the last successful execute_analysis_code call.
+     * @property {string|null} generatedReportCode - React code generated by generate_report_code.
+     * @property {any} previousAnalysisResult - Analysis result carried over from a previous turn.
+     * @property {string|null} previousGeneratedCode - Generated code carried over from a previous turn.
+     */
+
+    /**
+     * @typedef {object} TurnContext
+     * @property {string} originalQuery - The user's query for this turn.
+     * @property {AgentStep[]} steps - An array tracking the agent's actions this turn.
+     * @property {IntermediateResults} intermediateResults - Holds data needed across steps within the turn.
+     * @property {string} userContext - Context string related to the user's settings/profile.
+     * @property {string} teamContext - Context string related to the team's settings/profile.
+     * @property {Array<{role: string, content: string}>} fullChatHistory - Formatted chat history for the LLM.
+     * @property {string|null} finalAnswer - The final text answer determined by the agent.
+     * @property {string|null} error - Any critical error message encountered during the turn.
+     * @property {object<string, number>} toolErrorCounts - Tracks retry attempts for each tool.
+     */
+
+    /**
+     * Initializes the AgentExecutor for a single agent turn.
+     * @param {string} userId - The ID of the user initiating the request.
+     * @param {string | null} teamId - The ID of the team context (or null).
+     * @param {string} sessionId - The ID of the chat session.
+     * @param {string} aiMessagePlaceholderId - The MongoDB ObjectId of the PromptHistory record for this turn.
+     * @param {function(string, object): void} sendEventCallback - Function to stream events (e.g., llm_chunk, agent_status) back to the caller.
+     * @param {any} [initialPreviousAnalysisData=null] - Analysis data from a previous turn (optional).
+     * @param {string} [initialPreviousGeneratedCode=null] - Generated code from a previous turn (optional).
+     */
+    constructor(userId, teamId, sessionId, aiMessagePlaceholderId, sendEventCallback, initialPreviousAnalysisData = null, initialPreviousGeneratedCode = null) {
         this.userId = userId;
-        this.teamId = teamId; // May be null for personal context
+        this.teamId = teamId;
         this.sessionId = sessionId;
         this.aiMessagePlaceholderId = aiMessagePlaceholderId;
+        this.sendEventCallback = sendEventCallback;
+        /** @type {AgentContextService} */
+        this.contextService = new AgentContextService(userId, teamId, sessionId);
+
+        // Initialize turn-specific context
+        /** @type {TurnContext} */
         this.turnContext = {
             originalQuery: '',
-            chatHistoryForSummarization: [], // Store raw history for summarizer
-            steps: [], // Track tools used and results this turn
+            steps: [], // Tracks tool calls and results for this turn { tool, args, resultSummary, result?, error?, attempt }
             intermediateResults: {
-                lastSchema: null, 
-                datasetSchemas: {}, // Store schemas for all datasets
-                datasetSamples: {}, // Store sample rows for all datasets
-                parsedDataRef: null,
-                generatedAnalysisCode: null,
-                analysisResult: null,
-                analysisError: null,
-                previousAnalysisData: previousAnalysisData,
-                previousGeneratedCode: previousGeneratedCode,
+                datasetSchemas: {}, // { [datasetId]: schemaInfo }
+                datasetSamples: {}, // { [datasetId]: { totalRows, sampleRows } }
+                parsedData: {},     // { [datasetId]: Array<object> } - Store actual parsed data
+                analysisResult: null, // Result from execute_analysis_code
+                generatedReportCode: null, // Result from generate_report_code
+                previousAnalysisResult: initialPreviousAnalysisData, // Carry over from previous turns if provided
+                previousGeneratedCode: initialPreviousGeneratedCode,
             },
-            userContext: '', // User settings context
-            teamContext: '', // Team settings context
-            generatedReportCode: null, // NEW: Store generated React code this turn
+            userContext: '',
+            teamContext: '',
+            fullChatHistory: [], // Formatted history for LLM [{ role, content }]
             finalAnswer: null,
             error: null,
-            // Track tool errors/retries within a turn
             toolErrorCounts: {}, // { [toolName]: count }
         };
-        this.io = getIO(); // Get socket instance
+
+        /** @type {string[]} */
+        this.knownToolNames = Object.keys(toolImplementations);
+        logger.debug(`[AgentExecutor ${sessionId}] Initialized.`);
+    }
+
+    // --- Streaming & Status Updates ---
+    /**
+     * Sends low-level streaming events (LLM chunks, final results) via the provided callback.
+     * Handles potential errors in the callback function itself.
+     * @private
+     * @param {string} eventType - The type of event (e.g., 'llm_chunk', 'agent_status', 'final_result').
+     * @param {object} data - The payload for the event.
+     */
+    _sendStreamEvent(eventType, data) {
+        if (typeof this.sendEventCallback === 'function') {
+            try {
+                this.sendEventCallback(eventType, data);
+            } catch (callbackError) {
+                 logger.error(`[AgentExecutor ${this.sessionId}] Error executing sendEventCallback for event ${eventType}: ${callbackError.message}`, { stack: callbackError.stack });
+            }
+        } else {
+            logger.warn(`[AgentExecutor ${this.sessionId}] sendEventCallback is not defined. Cannot send stream event ${eventType}.`);
+        }
     }
 
     /**
-     * Emits WebSocket events to update the frontend on agent status.
-     * Targets the specific user associated with this agent instance.
-     * @param {string} eventName - The name of the event (e.g., 'agent:thinking').
-     * @param {object} payload - The data payload for the event.
+     * Emits higher-level agent status updates (thinking, using_tool, tool_result, error, final_answer)
+     * via the `_sendStreamEvent` method, bundling common context.
+     * Uses the specific `eventName` as the SSE event type for frontend compatibility.
+     * @private
+     * @param {string} eventName - The specific agent status event name (e.g., 'agent:thinking').
+     * @param {object} payload - Additional data specific to the event.
      */
     _emitAgentStatus(eventName, payload) {
-        if (this.io && this.sessionId && this.userId) {
             const eventPayload = {
                 messageId: this.aiMessagePlaceholderId,
                 sessionId: this.sessionId,
+            userId: this.userId, // Include userId for potential client-side filtering/routing
                 ...payload,
             };
-            // Emit specifically to the user's room
-            const userRoom = `user:${this.userId}`;
-            this.io.to(userRoom).emit(eventName, eventPayload);
-            logger.debug(`Agent Event Emitted to room ${userRoom}: ${eventName}`, eventPayload);
-        } else {
-            logger.warn('Socket.io instance, session ID, or user ID missing, cannot emit agent status.', {
-                 hasIo: !!this.io, sessionId: this.sessionId, userId: this.userId
-            });
-        }
+        // Send the specific eventName as the SSE event type
+        this._sendStreamEvent(eventName, eventPayload);
+        logger.debug(`[AgentExecutor ${this.sessionId}] Emitted Agent Status SSE Event: ${eventName}`, payload); // Log specific payload
     }
 
+    // --- Data Access Callback --- 
     /**
-     * Pre-fetches dataset schemas and sample data for all datasets in the session.
-     * @param {Array<string>} datasetIds - Array of dataset IDs in the session
-     * @return {Promise<void>}
+     * Callback function provided to tools (specifically `execute_analysis_code`)
+     * allowing them to retrieve previously parsed data stored in the turn context.
+     * @private
+     * @param {string} datasetId - The ID of the dataset whose parsed data is needed.
+     * @returns {Promise<Array<object>|null>} The parsed data array or null if not found.
      */
-    async _preloadDatasetContext(datasetIds) {
-        if (!datasetIds || datasetIds.length === 0) {
-            logger.info(`[Agent Loop ${this.sessionId}] No datasets to preload.`);
-            return;
+    async _getParsedDataForTool(datasetId) {
+        logger.debug(`[AgentExecutor ${this.sessionId}] Tool requesting parsed data for dataset: ${datasetId}`);
+        const data = this.turnContext.intermediateResults.parsedData[datasetId];
+        if (!data) {
+             logger.warn(`[AgentExecutor ${this.sessionId}] Parsed data for dataset ${datasetId} not found in intermediate results.`);
+             return null;
         }
-
-        logger.info(`[Agent Loop ${this.sessionId}] Preloading context for ${datasetIds.length} datasets.`);
-        // Add detailed logging of exact dataset IDs
-        logger.info(`[Agent Loop ${this.sessionId}] DATASET IDs RECEIVED: ${JSON.stringify(datasetIds)}`);
-        
-        // Process each dataset ID sequentially to avoid overwhelming the DB
-        for (const datasetId of datasetIds) {
-            try {
-                // Log each dataset ID being processed
-                logger.info(`[Agent Loop ${this.sessionId}] Processing dataset ID: ${datasetId} (Type: ${typeof datasetId})`);
-                
-                // 1. Fetch schema
-                const schemaData = await datasetService.getDatasetSchema(datasetId, this.userId);
-                if (schemaData) {
-                    this.turnContext.intermediateResults.datasetSchemas[datasetId] = schemaData;
-                    // Also store in lastSchema for backward compatibility
-                    this.turnContext.intermediateResults.lastSchema = schemaData;
-                    logger.info(`[Agent Loop ${this.sessionId}] Preloaded schema for dataset ${datasetId}`);
-                }
-
-                // 2. Fetch and parse sample data (last 20 rows)
-                const rawContent = await datasetService.getRawDatasetContent(datasetId, this.userId);
-                if (rawContent) {
-                    // Parse the CSV content
-                    const parseResult = Papa.parse(rawContent, {
-                        header: true,
-                        dynamicTyping: true,
-                        skipEmptyLines: true,
-                        transformHeader: header => header.trim()
-                    });
-
-                    if (parseResult.data && parseResult.data.length > 0) {
-                        // Get the last 20 rows (or all if fewer than 20)
-                        const sampleSize = 20;
-                        const totalRows = parseResult.data.length;
-                        const startIndex = Math.max(0, totalRows - sampleSize);
-                        const sampleRows = parseResult.data.slice(startIndex);
-                        
-                        // Store the sample
-                        this.turnContext.intermediateResults.datasetSamples[datasetId] = {
-                            totalRows,
-                            sampleRows
-                        };
-                        
-                        // Also store the parsed data reference for backward compatibility
-                        const parsedDataRef = `parsed_${datasetId}_${Date.now()}`;
-                        this.turnContext.intermediateResults[parsedDataRef] = parseResult.data;
-                        this.turnContext.intermediateResults.parsedDataRef = parsedDataRef;
-                        
-                        logger.info(`[Agent Loop ${this.sessionId}] Preloaded ${sampleRows.length} sample rows from ${totalRows} total rows for dataset ${datasetId}`);
-                    }
-                }
-            } catch (error) {
-                logger.error(`[Agent Loop ${this.sessionId}] Error preloading context for dataset ${datasetId}: ${error.message}`, { error });
-                // Continue with next dataset, don't fail the whole operation
-            }
-        }
+        return data;
     }
 
+    // --- Main Execution Loop ---
     /**
-     * Runs the main agent loop: Reason -> Act -> Observe.
-     * @param {string} userMessage - The user's current message/query.
-     * @param {Array<string>} sessionDatasetIds - Array of dataset IDs in the session
-     * @returns {Promise<{status: string, aiResponseText?: string, error?: string}>} - Final status and result.
+     * Executes the primary agent reasoning loop for a single turn.
+     * 1. Prepares context (history, datasets, user/team info).
+     * 2. Iteratively calls the LLM (streaming):
+     *    - Prepares LLM context including previous steps/results.
+     *    - Streams LLM response chunks back.
+     *    - Parses tool calls or final answer signals from the stream or complete response.
+     * 3. Executes Tools:
+     *    - Calls the appropriate tool implementation.
+     *    - Handles retries on failure.
+     *    - Stores results in intermediate state.
+     *    - Emits tool usage and result status events.
+     * 4. Finalizes:
+     *    - Breaks loop on final answer, max iterations, or critical error.
+     *    - Updates the PromptHistory record with the final status and results.
+     *    - Sends a final result event.
+     *
+     * @async
+     * @param {string} userMessage - The user's current message/query for this turn.
+     * @param {Array<string>} sessionDatasetIds - Array of dataset IDs available in the current chat session.
+     * @returns {Promise<{status: 'completed'|'error', aiResponseText?: string, aiGeneratedCode?: string, error?: string}>} Final status object summarizing the turn's outcome.
      */
-    async runAgentLoop(userMessage, sessionDatasetIds = []) {
-        logger.info(`[Agent Loop ${this.sessionId}] Starting for user ${this.userId}, message: "${userMessage.substring(0, 50)}..."`);
+    async runAgentLoopWithStreaming(userMessage, sessionDatasetIds = []) {
+        logger.info(`[AgentExecutor ${this.sessionId}] Starting streaming loop for user ${this.userId}. Query: "${userMessage.substring(0, 50)}..."`);
         this.turnContext.originalQuery = userMessage;
-        this.turnContext.toolErrorCounts = {}; // Reset error counts for the turn
+        this.turnContext.toolErrorCounts = {}; // Reset errors
         let iterations = 0;
 
         try {
-            // 0. Set initial state & emit thinking
+            // 0. Initial Setup & Emit Thinking Status
             this._emitAgentStatus('agent:thinking', {});
 
-            // Fetch initial user/team context settings
-            const initialContext = await assembleContext(this.userId, []); // No datasets needed here
-            this.turnContext.userContext = initialContext.userContext;
-            this.turnContext.teamContext = initialContext.teamContext;
+            // 1. Prepare Initial Context Concurrently
+            const initialContextPromise = this.contextService.getInitialUserTeamContext();
+            const datasetContextPromise = this.contextService.preloadDatasetContext(sessionDatasetIds);
+            const historyPromise = this.contextService.prepareChatHistoryAndArtifacts(this.aiMessagePlaceholderId);
 
-            // Preload dataset schemas and samples (if session has datasets)
-            if (sessionDatasetIds && sessionDatasetIds.length > 0) {
-                await this._preloadDatasetContext(sessionDatasetIds);
+            // Use Promise.allSettled to handle potential errors in context fetching gracefully
+            const [initialCtxResult, datasetCtxResult, historyResultSettled] = await Promise.allSettled([
+                initialContextPromise,
+                datasetContextPromise,
+                historyPromise
+            ]);
+
+            // Process results, logging errors but continuing if possible
+            if (initialCtxResult.status === 'fulfilled') {
+                this.turnContext.userContext = initialCtxResult.value.userContext;
+                this.turnContext.teamContext = initialCtxResult.value.teamContext;
+            } else {
+                logger.error(`[AgentExecutor ${this.sessionId}] Failed to get initial user/team context: ${initialCtxResult.reason}`);
             }
 
-            await this._prepareChatHistory(); // Prepare history context
+            if (datasetCtxResult.status === 'fulfilled') {
+                this.turnContext.intermediateResults.datasetSchemas = datasetCtxResult.value.datasetSchemas;
+                this.turnContext.intermediateResults.datasetSamples = datasetCtxResult.value.datasetSamples;
+                    } else {
+                 logger.error(`[AgentExecutor ${this.sessionId}] Failed to preload dataset context: ${datasetCtxResult.reason}`);
+            }
+
+            if (historyResultSettled.status === 'fulfilled') {
+                const historyResult = historyResultSettled.value;
+                this.turnContext.fullChatHistory = historyResult.fullChatHistory;
+                // Carry over previous artifacts only if not already set by constructor
+                if (this.turnContext.intermediateResults.previousAnalysisResult === null) {
+                    this.turnContext.intermediateResults.previousAnalysisResult = historyResult.previousAnalysisResult;
+                }
+                if (this.turnContext.intermediateResults.previousGeneratedCode === null) {
+                    this.turnContext.intermediateResults.previousGeneratedCode = historyResult.previousGeneratedCode;
+                }
+                     } else {
+                 logger.error(`[AgentExecutor ${this.sessionId}] Failed to prepare chat history: ${historyResultSettled.reason}`);
+                 // Continue with empty history? Decide based on requirements.
+                 this.turnContext.fullChatHistory = [];
+            }
+
+            logger.debug(`[AgentExecutor ${this.sessionId}] Context prepared. History: ${this.turnContext.fullChatHistory.length}. Schemas: ${Object.keys(this.turnContext.intermediateResults.datasetSchemas).length}. Samples: ${Object.keys(this.turnContext.intermediateResults.datasetSamples).length}.`);
+
+            // --- Main Reasoning Loop ---
+            let currentLLMResponse = '';
+            let parsedToolCallFromStream = null; // Store tool call detected mid-stream
+            let llmFinished = false;
+            let finalAnswerFromLLM = null; // Store the final answer text if LLM signals it directly
 
             while (iterations < MAX_AGENT_ITERATIONS) {
                 iterations++;
-                logger.info(`[Agent Loop ${this.sessionId}] Iteration ${iterations}`);
-                
-                let action;
-                let forceAction = null; // null | 'execute_parser' | 'generate_analysis' | 'execute_analysis'
-                let codeToExecute = null;
-                let datasetIdForExecution = null; // Still needed for parsing
-                let parsedDataRefForExecution = null;
-                let analysisGoalForGeneration = null;
+                logger.info(`[AgentExecutor ${this.sessionId}] Iteration ${iterations}`);
+                currentLLMResponse = '';
+                parsedToolCallFromStream = null;
+                llmFinished = false;
+                finalAnswerFromLLM = null; // Reset for this iteration
 
-                // --- Determine if an action should be forced based on previous step --- 
-                if (this.turnContext.steps.length > 0) {
-                    const lastStep = this.turnContext.steps[this.turnContext.steps.length - 1];
-                    const lastTool = lastStep.tool;
-                    const lastResultSummary = lastStep.resultSummary || '';
-                    const lastArgs = lastStep.args || {};
+                // 2. Prepare LLM Context for this iteration
+                const llmContext = this._prepareLLMContextForStream();
 
-                    // Case 1: Generation of PARSER code succeeded -> Force execution of parser code
-                    if (lastTool === 'generate_data_extraction_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.generatedParserCode) {
-                        forceAction = 'execute_parser';
-                        let rawGeneratedCode = this.turnContext.intermediateResults.generatedParserCode;
-                        const codeBlockRegex = /^```(?:javascript|js)?\s*([\s\S]*?)\s*```$|^([\s\S]*)$/m;
-                        const match = rawGeneratedCode.match(codeBlockRegex);
-                        codeToExecute = match && (match[1] || match[2]) ? (match[1] || match[2]).trim() : rawGeneratedCode.trim();
-                        datasetIdForExecution = lastArgs.dataset_id;
-                        // Store original goal for the *next* generation step
-                        this.turnContext.intermediateResults.originalAnalysisGoal = lastArgs.analysis_goal;
-                        logger.info(`[Agent Loop ${this.sessionId}] Stage 1 Complete: Parser code generated. Forcing execution.`);
-                    }
-                    // Case 2: Execution of PARSER code succeeded -> Force generation of ANALYSIS code
-                    else if (lastTool === 'execute_backend_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.parserExecutionResult) {
-                        forceAction = 'generate_analysis';
-                        // --- OVERRIDE GOAL FOR DEBUGGING --- 
-                        // analysisGoalForGeneration = this.turnContext.intermediateResults.originalAnalysisGoal;
-                        analysisGoalForGeneration = "Calculate the total number of rows in the inputData array and return it as { rowCount: number }.";
-                        logger.info(`[Agent Loop ${this.sessionId}] Stage 2 Complete: Parser code executed. Forcing SIMPLE analysis code generation.`);
-                        // --- END OVERRIDE --- 
-                    }
-                    // Case 3: Generation of ANALYSIS code succeeded -> Force execution of analysis code
-                    else if (lastTool === 'generate_analysis_code' && !lastResultSummary.startsWith('Error') && this.turnContext.intermediateResults.generatedAnalysisCode) {
-                        forceAction = 'execute_analysis';
-                        // Use the already cleaned code stored from the generation step
-                        codeToExecute = this.turnContext.intermediateResults.generatedAnalysisCode;
-                        parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
-                        logger.info(`[Agent Loop ${this.sessionId}] Stage 3 Complete: Analysis code generated. Forcing execution.`);
-                    }
-                }
-
-                // --- Determine Action --- 
-                if (forceAction === 'execute_parser') {
-                    if (!codeToExecute) {
-                        logger.error('[Agent Loop] Cannot force PARSER execution, cleaned code is empty.');
-                        action = null; // Let LLM try to recover
-                    } else {
-                        action = {
-                            tool: 'execute_backend_code', // Still uses the old executor name for now
-                            args: { code: codeToExecute, dataset_id: datasetIdForExecution }
-                        };
-                    }
-                    this.turnContext.intermediateResults.generatedParserCode = null; // Clear intermediate
-                } else if (forceAction === 'generate_analysis') {
-                     if (!analysisGoalForGeneration) {
-                         logger.error('[Agent Loop] Cannot force ANALYSIS generation, original goal not found.');
-                         action = null;
-                     } else {
-                        action = {
-                            tool: 'generate_analysis_code',
-                            args: { analysis_goal: analysisGoalForGeneration }
-                        };
-                     }
-                } else if (forceAction === 'execute_analysis') {
-                     const rawGeneratedCode = this.turnContext.intermediateResults.generatedAnalysisCode;
-                     parsedDataRefForExecution = this.turnContext.intermediateResults.parsedDataRef;
-
-                     // --- Updated Code Cleaning Logic --- 
-                     let codeToExecute = '';
-                     if (rawGeneratedCode && typeof rawGeneratedCode === 'string') {
-                         let cleanedCode = rawGeneratedCode.trim(); // 1. Trim whitespace
-                         const startFence = /^```(?:javascript|js)?\s*/; // Regex for start fence
-                         const endFence = /\s*```$/; // Regex for end fence
-                         cleanedCode = cleanedCode.replace(startFence, ''); // 2. Remove start fence
-                         cleanedCode = cleanedCode.replace(endFence, ''); // 3. Remove end fence
-                         codeToExecute = cleanedCode.trim(); // 4. Trim again
-                         logger.debug('[Agent Loop] Cleaned analysis code before execution. Length after clean: ', codeToExecute.length);
-                     } else {
-                         logger.warn('[Agent Loop] Raw generated code is missing or not a string.');
-                     }
-                     // --- End cleaning ---
-
-                     if (!codeToExecute) {
-                         logger.error('[Agent Loop] Cannot force ANALYSIS execution, cleaned code is empty.');
-                         action = null;
-                     } else if (!parsedDataRefForExecution) {
-                         logger.error('[Agent Loop] Cannot force ANALYSIS execution, parsed data reference is missing.');
-                         action = null;
-                     } else {
-                         action = {
-                             tool: 'execute_analysis_code',
-                             args: { code: codeToExecute, parsed_data_ref: parsedDataRefForExecution }
-                         };
-                     }
-                     this.turnContext.intermediateResults.generatedAnalysisCode = null; // Clear intermediate context
-                }
-                
-                // If no action forced, get from LLM
-                if (!action) { 
-                    const llmContext = this._prepareLLMContext();
-                    const llmResponse = await promptService.getLLMReasoningResponse(llmContext);
-                    action = this._parseLLMResponse(llmResponse);
-                }
-
-                // --- Action Processing --- 
-                if (action.tool === '_answerUserTool') {
-                    // Validate the extracted answer
-                    if (typeof action.args.textResponse !== 'string' || action.args.textResponse.trim() === '') {
-                         logger.warn(`[Agent Loop ${this.sessionId}] LLM called _answerUserTool with invalid/empty textResponse. Raw response: ${llmResponse}`);
-                         // Fallback: Use the raw response, hoping it's the intended answer
-                         this.turnContext.finalAnswer = llmResponse.trim();
-                    } else {
-                        this.turnContext.finalAnswer = action.args.textResponse;
-                    }
-                    logger.info(`[Agent Loop ${this.sessionId}] LLM decided to answer.`);
-                    this.turnContext.steps.push({ tool: action.tool, args: action.args, resultSummary: 'Final answer provided.' });
-                    break; 
-                } else if (action.tool === 'generate_report_code') { // Handle report generation
-                    logger.info(`[Agent Loop ${this.sessionId}] LLM requested tool: ${action.tool}`);
-                    this.turnContext.steps.push({ tool: action.tool, args: action.args, resultSummary: 'Executing tool...'});
-                    this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args });
-
-                    const toolResult = await this.toolDispatcher(action.tool, action.args);
-                    const resultSummary = this._summarizeToolResult(toolResult);
-                    this.turnContext.steps[this.turnContext.steps.length - 1].resultSummary = resultSummary;
-                    this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary });
-
-                    if (toolResult.error) {
-                        logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} resulted in error: ${toolResult.error}`);
-                    } else if (toolResult.result && toolResult.result.react_code) {
-                        // Clean the code before storing
-                        let cleanedCode = toolResult.result.react_code;
-                        if (cleanedCode && typeof cleanedCode === 'string') {
-                            const codeFenceRegex = /^```(?:javascript|js|json)?\s*([\s\S]*?)\s*```$/m;
-                            const match = cleanedCode.match(codeFenceRegex);
-                            if (match && match[1]) {
-                                cleanedCode = match[1].trim();
-                                console.log('[Agent Loop Clean] Cleaned React Code (fences removed):', cleanedCode);
-                            } else {
-                                cleanedCode = cleanedCode.trim();
-                            }
+                // 3. Stream LLM Response & Parse Tool Calls/Final Answer Signal
+                await streamLLMReasoningResponse(
+                    llmContext,
+                    async (eventType, data) => {
+                        switch (eventType) {
+                            case 'llm_chunk':
+                                currentLLMResponse += data.chunk;
+                                // Send chunk to client immediately
+                                this._sendStreamEvent('llm_chunk', { chunk: data.chunk });
+                                break;
+                            case 'token':
+                                // Add to accumulating response
+                                currentLLMResponse += data.content;
+                                // Send token to client immediately
+                                this._sendStreamEvent('token', { content: data.content });
+                                break;
+                            case 'tool_call':
+                                // Tool call structure detected by the streaming service
+                                parsedToolCallFromStream = { tool: data.tool, args: data.args };
+                                logger.info(`[AgentExecutor ${this.sessionId}] Tool call parsed during stream: ${data.tool}`);
+                                // Emit status *now* that we know a tool is likely being used
+                                this._emitAgentStatus('agent:using_tool', { toolName: data.tool, args: data.args });
+                                // Don't break; allow LLM to potentially stream thoughts after the call
+                                break;
+                             case 'final_answer':
+                                 // The prompt service detected a signal that this is the final answer
+                                 finalAnswerFromLLM = data.text || currentLLMResponse.trim(); // Use provided text or accumulated chunks
+                                 logger.info(`[AgentExecutor ${this.sessionId}] Final answer signal received from LLM stream.`);
+                                 // Could potentially break here if we don't care about post-answer thoughts
+                                 break;
+                            case 'finish':
+                                llmFinished = true;
+                                logger.debug(`[AgentExecutor ${this.sessionId}] LLM stream finished naturally. Reason: ${data.finishReason || 'unspecified'}`);
+                                break;
+                            case 'completed':
+                                // Stream completed successfully
+                                logger.debug(`[AgentExecutor ${this.sessionId}] LLM stream completed event received.`);
+                                break;
+                            case 'error':
+                                logger.error(`[AgentExecutor ${this.sessionId}] LLM streaming error: ${data.error}`);
+                                throw new Error(`LLM streaming error: ${data.error}`); // Propagate error
                         }
-                        // Store the CLEANED generated code in the turn context
-                        this.turnContext.generatedReportCode = cleanedCode;
-                        logger.info(`[Agent Loop ${this.sessionId}] Stored cleaned generated React report code.`);
                     }
-                    // Loop continues after report generation attempt
-                } else if (action.tool) {
-                    logger.info(`[Agent Loop ${this.sessionId}] Executing Action: Tool ${action.tool}`);
+                );
+
+                // 4. Process LLM Output: Decide Action
+                let action = null;
+                let isFinalAnswer = false;
+
+                // ADDED: Log the raw LLM response content
+                logger.debug(`[AgentExecutor ${this.sessionId}] Raw LLM response (truncated): "${currentLLMResponse.substring(0, 1000)}${currentLLMResponse.length > 1000 ? '...' : ''}"`);
+
+                if (finalAnswerFromLLM !== null) {
+                     // Explicit final answer signal received during streaming
+                     action = { tool: '_answerUserTool', args: { textResponse: finalAnswerFromLLM }};
+                     isFinalAnswer = true;
+                     this.turnContext.finalAnswer = finalAnswerFromLLM;
+                     logger.debug(`[AgentExecutor ${this.sessionId}] Using explicit final answer signal from stream: "${finalAnswerFromLLM.substring(0, 200)}..."`);
+                } else if (parsedToolCallFromStream) {
+                    // Tool call parsed during streaming takes precedence
+                    action = parsedToolCallFromStream;
+                    isFinalAnswer = false;
+                    logger.debug(`[AgentExecutor ${this.sessionId}] Using tool call parsed during stream: ${action.tool}`);
+                } else if (llmFinished) {
+                     // LLM finished without explicit tool call or final answer signal during stream.
+                     // Parse the *complete* response to check for a formatted tool call or treat as answer.
+                     logger.debug(`[AgentExecutor ${this.sessionId}] Attempting to parse complete LLM response...`);
+                     const parseResult = this._parseCompleteLLMResponse(currentLLMResponse);
+                     logger.debug(`[AgentExecutor ${this.sessionId}] Parse result: tool=${parseResult.tool}, isFinalAnswer=${parseResult.isFinalAnswer}, textResponse length=${parseResult.textResponse?.length || 0}`);
+                     action = { tool: parseResult.tool, args: parseResult.args };
+                     isFinalAnswer = parseResult.isFinalAnswer;
+                     this.turnContext.finalAnswer = parseResult.textResponse; // Store potential final answer
+                     } else {
+                     // Stream ended unexpectedly (e.g., error handled above, or timeout?)
+                     logger.warn(`[AgentExecutor ${this.sessionId}] LLM stream ended without finish event or final answer signal.`);
+                     logger.debug(`[AgentExecutor ${this.sessionId}] Using raw response as final answer: "${currentLLMResponse.substring(0, 200)}..."`);
+                     action = { tool: '_answerUserTool', args: { textResponse: currentLLMResponse.trim() } };
+                     isFinalAnswer = true;
+                     this.turnContext.finalAnswer = currentLLMResponse.trim();
+                }
+
+                // 5. Execute Action or Finish
+                if (action.tool === '_answerUserTool' || isFinalAnswer) {
+                    logger.info(`[AgentExecutor ${this.sessionId}] Agent loop ending with final answer.`);
+                    // Ensure final answer text is captured
+                    if (!this.turnContext.finalAnswer) {
+                        this.turnContext.finalAnswer = action.args?.textResponse || currentLLMResponse.trim() || "I apologize, but I couldn't formulate a response.";
+                        logger.warn(`[AgentExecutor ${this.sessionId}] Final answer text was missing, using fallback.`);
+                    }
+                    this.turnContext.steps.push({ tool: '_answerUserTool', args: { textResponse: this.turnContext.finalAnswer }, resultSummary: 'Final answer provided.' });
+                    this._emitAgentStatus('agent:final_answer', { text: this.turnContext.finalAnswer });
+                    break; // Exit loop
+                }
+
+                if (action.tool && toolImplementations[action.tool]) {
+                    logger.info(`[AgentExecutor ${this.sessionId}] Executing Tool: ${action.tool}`);
                     const currentStepIndex = this.turnContext.steps.length;
-                    // Don't add a step if it's a forced action that logically follows the previous step?
-                    // Or maybe add it to show the forced step? Let's add it.
+
+                    // --- ADDED: Inject generated analysis code before execution --- 
+                    let finalArgs = { ...action.args }; // Clone args
+                    if (action.tool === 'execute_analysis_code' && this.turnContext.intermediateResults.generatedAnalysisCode) {
+                        logger.info(`[AgentExecutor ${this.sessionId}] Substituting generated code into execute_analysis_code arguments.`);
+                        finalArgs.code = this.turnContext.intermediateResults.generatedAnalysisCode;
+                        // Optional: Log snippet of injected code for verification
+                        // logger.debug(`[AgentExecutor ${this.sessionId}] Injected code snippet (first 500): ${finalArgs.code.substring(0, 500)}`);
+                    } else if (action.tool === 'execute_analysis_code') {
+                        logger.warn(`[AgentExecutor ${this.sessionId}] execute_analysis_code requested, but no generated code found in context! Using LLM provided code (likely placeholder).`);
+                    }
+                    // --- END ADDED --- 
+
+                    // Ensure step is added *before* execution for potential retries
                     this.turnContext.steps.push({ 
                         tool: action.tool, 
-                        args: action.args, 
+                        args: finalArgs, // Use finalArgs with potentially substituted code
                         resultSummary: 'Executing tool...', 
-                        attempt: 1, 
-                        isForced: !!forceAction // Mark if step was forced
+                        attempt: 1
                     });
-                    
-                    this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args });
-
-                    let toolResult = await this.toolDispatcher(action.tool, action.args);
-                    let resultSummary = this._summarizeToolResult(toolResult);
-                    
-                    if(this.turnContext.steps[currentStepIndex]) {
-                        this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
+                    // Emit status only if not already emitted during stream parsing
+                    if (!parsedToolCallFromStream) {
+                        // Use finalArgs for the emitted event too
+                        this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: finalArgs });
                     }
-                    
-                    // --- Retry Logic (Only for non-forced steps?) ---
-                    // If a forced step fails, retrying might not help if the input was wrong.
-                    // Let's disable retry for forced steps for now.
-                    const allowRetry = !forceAction;
-                    if (allowRetry && toolResult.error && (this.turnContext.toolErrorCounts[action.tool] || 0) < MAX_TOOL_RETRIES) {
-                         const retryCount = (this.turnContext.toolErrorCounts[action.tool] || 0) + 1;
-                         logger.warn(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed. Attempting retry (${retryCount}/${MAX_TOOL_RETRIES}). Error: ${toolResult.error}`);
-                         this.turnContext.toolErrorCounts[action.tool] = retryCount;
-                         
-                         const stepSummaryWithError = `Error: ${toolResult.error}. Retrying...`;
-                         if(this.turnContext.steps[currentStepIndex]) {
-                              this.turnContext.steps[currentStepIndex].resultSummary = stepSummaryWithError;
-                              this.turnContext.steps[currentStepIndex].attempt = retryCount + 1; 
-                         }
-                         this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary: stepSummaryWithError });
 
+                    // Pass finalArgs to the execution method
+                    let toolResult = await this._executeTool(action.tool, finalArgs);
+                    let resultSummary = summarizeToolResult(toolResult); // Use utility
+
+                    // --- Retry Logic ---
+                    if (toolResult.error && (this.turnContext.toolErrorCounts[action.tool] || 0) < MAX_TOOL_RETRIES) {
+                         const retryCount = (this.turnContext.toolErrorCounts[action.tool] || 0) + 1;
+                         this.turnContext.toolErrorCounts[action.tool] = retryCount;
+                        logger.warn(`[AgentExecutor ${this.sessionId}] Tool ${action.tool} failed. Retrying (${retryCount}/${MAX_TOOL_RETRIES}). Error: ${toolResult.error}`);
+
+                        // Update step for retry attempt
+                        this.turnContext.steps[currentStepIndex].resultSummary = `Error (Attempt ${retryCount}): ${toolResult.error}. Retrying...`;
+                        this.turnContext.steps[currentStepIndex].error = toolResult.error; // Store error on step
+                              this.turnContext.steps[currentStepIndex].attempt = retryCount + 1; 
+                        this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary: this.turnContext.steps[currentStepIndex].resultSummary, error: toolResult.error });
+
+                        // Re-emit using_tool for clarity
                          this._emitAgentStatus('agent:using_tool', { toolName: action.tool, args: action.args }); 
-                         toolResult = await this.toolDispatcher(action.tool, action.args); 
-                         resultSummary = this._summarizeToolResult(toolResult);
-                         
-                         if(this.turnContext.steps[currentStepIndex]) {
-                             this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
-                         }
-                         
-                         if (toolResult.error) {
-                            logger.error(`[Agent Loop ${this.sessionId}] Tool ${action.tool} failed on retry. Error: ${toolResult.error}`);
-                         } else {
-                            logger.info(`[Agent Loop ${this.sessionId}] Tool ${action.tool} succeeded on retry.`);
-                         }
-                     }
+                        toolResult = await this._executeTool(action.tool, action.args); // Re-execute
+                        resultSummary = summarizeToolResult(toolResult); // Summarize new result
+                    }
                     // --- End Retry Logic ---
 
-                    this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary });
+                    // Update step with final result/error of this attempt
+                    this.turnContext.steps[currentStepIndex].resultSummary = resultSummary;
+                         if (toolResult.error) {
+                        this.turnContext.steps[currentStepIndex].error = toolResult.error;
+                         } else {
+                         this.turnContext.steps[currentStepIndex].result = toolResult.result; // Store success result on step if needed later
+                    }
 
-                    // --- ADDED: Error Check specifically for Analysis Execution Failure ---
-                    if ((action.tool === 'execute_analysis_code' || action.tool === 'execute_backend_code') && toolResult.error) {
-                        logger.error(`[Agent Loop ${this.sessionId}] CRITICAL ERROR during code execution: ${toolResult.error}. Terminating loop.`);
-                        this.turnContext.error = `Code Execution Failed: ${resultSummary}`; 
-                        await this._updatePromptHistoryRecord('error', null, this.turnContext.error, null);
-                        this._emitAgentStatus('agent:error', { error: this.turnContext.error });
-                        return { status: 'error', error: this.turnContext.error }; // Exit loop immediately
-                    }
-                    // --- END ADDED Error Check ---
+                    this._emitAgentStatus('agent:tool_result', { toolName: action.tool, resultSummary, error: toolResult.error });
 
-                    // --- Store Intermediate Results --- 
-                    if (action.tool === 'get_dataset_schema' && toolResult.result) {
-                        this.turnContext.intermediateResults.lastSchema = toolResult.result;
-                        logger.info(`Stored dataset schema.`);
+                    // Store intermediate results explicitly if successful
+                    if (!toolResult.error) {
+                        this._storeIntermediateResult(action.tool, toolResult);
                     }
-                    if (action.tool === 'parse_csv_data' && toolResult.result?.parsed_data_ref) {
-                        this.turnContext.intermediateResults.parsedDataRef = toolResult.result.parsed_data_ref;
-                        logger.info(`Stored parsed data reference: ${toolResult.result.parsed_data_ref}`);
+
+                    // Check for critical errors after potential retry
+                    if (toolResult.error && (action.tool === 'execute_analysis_code')) {
+                        logger.error(`[AgentExecutor ${this.sessionId}] CRITICAL ERROR during code execution after retries: ${toolResult.error}. Terminating loop.`);
+                        this.turnContext.error = `Code Execution Failed: ${resultSummary}`;
+                        throw new Error(this.turnContext.error); // Throw to be caught by outer handler
                     }
-                    if (action.tool === 'generate_data_extraction_code' && toolResult.result?.code) {
-                        this.turnContext.intermediateResults.generatedParserCode = toolResult.result.code;
-                        logger.info(`Stored generated PARSER code for execution.`);
-                    }
-                     if (action.tool === 'generate_analysis_code' && toolResult.result?.code) {
-                         this.turnContext.intermediateResults.generatedAnalysisCode = toolResult.result.code;
-                         logger.info(`Stored generated ANALYSIS code.`);
-                    } 
-                    // Distinguish parser vs analysis execution results based on context
-                    if (action.tool === 'execute_backend_code') { // Old name used by parser exec
-                        if (toolResult.result !== undefined) {
-                             this.turnContext.intermediateResults.parserExecutionResult = toolResult.result;
-                             logger.info(`Stored PARSER execution result.`);
-                        } else if (toolResult.error) {
-                             this.turnContext.intermediateResults.parserExecutionError = toolResult.error;
-                             logger.warn(`Stored PARSER execution error.`);
-                        }
-                    }
-                     if (action.tool === 'execute_analysis_code') { // New name for analysis exec
-                         if (toolResult.result !== undefined) {
-                             // Ensure we store the *actual* result from the execution tool's {result: ...} wrapper
-                             this.turnContext.intermediateResults.analysisResult = toolResult.result;
-                             logger.info(`Stored ANALYSIS execution result.`);
-                         } else if (toolResult.error) {
-                             this.turnContext.intermediateResults.analysisError = toolResult.error;
-                             logger.warn(`Stored ANALYSIS execution error.`);
-                         }
-                    }
-                    if (action.tool === 'generate_report_code' && toolResult.result?.react_code) {
-                         this.turnContext.generatedReportCode = toolResult.result.react_code;
-                         logger.info(`Stored generated React report code.`);
-                    }
-                    // --- End Store Results ---
+                    // Loop continues for next LLM call...
                     
                 } else { 
-                    logger.warn(`[Agent Loop ${this.sessionId}] LLM response parsing failed or yielded no action. Treating raw response as final answer. Raw: ${llmResponse}`);
-                    this.turnContext.finalAnswer = llmResponse.trim();
-                    this.turnContext.steps.push({ tool: '_unknown', args: {}, resultSummary: 'LLM response unclear, using as final answer.' });
-                    break;
+                    // LLM finished but action was not final answer and not a known tool
+                    logger.error(`[AgentExecutor ${this.sessionId}] LLM response yielded unknown tool: ${action.tool}. Ending loop.`);
+                    this.turnContext.finalAnswer = `I encountered an issue understanding the next step (unknown tool: ${action.tool}). Please try rephrasing your request.`;
+                     this.turnContext.error = `Unknown tool requested: ${action.tool}`;
+                    this.turnContext.steps.push({ tool: '_unknown', args: action.args || {}, resultSummary: this.turnContext.error });
+                    break; // Exit loop with error state
                 }
             } // End while loop
 
+            // --- Loop Finished ---
             if (iterations >= MAX_AGENT_ITERATIONS && !this.turnContext.finalAnswer) {
-                logger.warn(`[Agent Loop ${this.sessionId}] Agent reached maximum iterations.`);
-                // Attempt to formulate a response indicating failure due to complexity/iterations
-                this.turnContext.finalAnswer = "I apologize, but I couldn't complete the request within the allowed steps. The query might be too complex.";
-                this.turnContext.steps.push({ tool: '_maxIterations', args: {}, resultSummary: 'Reached max iterations.'});
+                logger.warn(`[AgentExecutor ${this.sessionId}] Agent reached maximum iterations.`);
+                this.turnContext.finalAnswer = "I apologize, but I couldn't complete the request within the allowed steps. The query might be too complex or I got stuck in a loop.";
+                this.turnContext.steps.push({ tool: '_maxIterations', args: {}, resultSummary: 'Reached max iterations.' });
                 // Fall through to update record and return gracefully
             }
 
-            if (!this.turnContext.finalAnswer) {
-                 logger.error(`[Agent Loop ${this.sessionId}] Loop finished unexpectedly without a final answer.`);
-                 // Try to provide a generic error message if no answer was formed
-                 this.turnContext.finalAnswer = "I encountered an unexpected issue and could not complete the request.";
-                 this.turnContext.steps.push({ tool: '_internalError', args: {}, resultSummary: 'Loop ended without final answer.'});
-                 // Fall through to update record, but maybe mark as error?
-                 await this._updatePromptHistoryRecord('error', null, 'Agent loop finished without final answer', null);
-                 return { status: 'error', error: 'Agent loop finished without final answer' };
+            // If loop somehow finished without error but also without a final answer text
+            if (!this.turnContext.finalAnswer && !this.turnContext.error) {
+                logger.error(`[AgentExecutor ${this.sessionId}] Loop finished unexpectedly without a final answer or error state.`);
+                this.turnContext.error = 'Agent loop finished without final answer';
+                this.turnContext.finalAnswer = "I encountered an unexpected internal issue and could not complete the request.";
+                 // This indicates a logic error, throw to ensure it's captured as an error
+                throw new Error(this.turnContext.error);
             }
 
-            // 5. Finalize: Update the PromptHistory record with the potentially corrected answer
+            // 6. Finalize: Update PromptHistory record (even if loop ended with error message in finalAnswer)
+            const finalStatus = this.turnContext.error ? 'error' : 'completed';
             await this._updatePromptHistoryRecord(
-                'completed',
-                this.turnContext.finalAnswer, // Use the original LLM final answer
-                null, // No error message
-                this.turnContext.generatedReportCode // Pass generated code
+                finalStatus,
+                this.turnContext.finalAnswer, // Use the determined final answer
+                this.turnContext.error, // Log specific error if one occurred
+                this.turnContext.intermediateResults.generatedReportCode,
+                this.turnContext.intermediateResults.analysisResult
             );
-            logger.info(`[Agent Loop ${this.sessionId}] Completed successfully.`);
+
+            logger.info(`[AgentExecutor ${this.sessionId}] Agent loop finished with status: ${finalStatus}.`);
+            // Send final result event - REMOVED as frontend expects specific agent:final_answer and end events
+            // this._sendStreamEvent('final_result', { ... }); 
+
             return { 
-                status: 'completed', 
-                aiResponseText: this.turnContext.finalAnswer, // Return original LLM final answer
-                // Optionally return code here too? Task handler re-fetches anyway.
-                // aiGeneratedCode: this.turnContext.generatedReportCode 
+                status: finalStatus,
+                aiResponseText: this.turnContext.finalAnswer,
+                aiGeneratedCode: this.turnContext.intermediateResults.generatedReportCode,
+                error: this.turnContext.error
             };
 
         } catch (error) {
-            logger.error(`[Agent Loop ${this.sessionId}] Error during agent execution: ${error.message}`, { error });
-            const errorMessage = error.message || 'Unknown agent error';
-            this.turnContext.error = errorMessage;
+            // Catch errors from within the loop (e.g., LLM stream error, critical tool error)
+            logger.error(`[AgentExecutor ${this.sessionId}] Unhandled error during agent execution: ${error.message}`, { stack: error.stack });
+            const errorMessage = this.turnContext.error || error.message || 'Unknown agent error';
+            this.turnContext.error = errorMessage; // Ensure error is stored in context
+
+            // Emit error status and update history record
             this._emitAgentStatus('agent:error', { error: errorMessage });
-            // Ensure update happens even if placeholder ID is null somehow (shouldn't happen)
-            if (this.aiMessagePlaceholderId) {
-                 await this._updatePromptHistoryRecord('error', null, errorMessage, null); 
+            try {
+                await this._updatePromptHistoryRecord('error', null, errorMessage, null, null);
+            } catch (updateError) {
+                logger.error(`[AgentExecutor ${this.sessionId}] Failed to update prompt history with error status after catching loop error: ${updateError.message}`);
             }
+             // Send final error result event
+             this._sendStreamEvent('final_result', {
+                 status: 'error',
+                 error: errorMessage,
+                 sessionId: this.sessionId,
+                 messageId: this.aiMessagePlaceholderId
+             });
             return { status: 'error', error: errorMessage };
         }
     }
 
-    /** Fetches and potentially summarizes chat history. */
-    async _prepareChatHistory() {
-        try {
-            // Fix 1: Update PromptHistory Query
-            const historyRecords = await PromptHistory.find({
-                chatSessionId: this.sessionId,
-                _id: { $ne: this.aiMessagePlaceholderId },
-                messageType: 'ai_report', // Target only AI reports
-                status: 'completed', // Only successful ones
-                $or: [ // Ensure either analysis data or code exists
-                    { reportAnalysisData: { $exists: true, $ne: null } },
-                    { aiGeneratedCode: { $exists: true, $ne: null } }
-                ]
-            })
-            .sort({ createdAt: -1 }) // Fetch newest first for artifact search
-            .limit(HISTORY_FETCH_LIMIT) // Limit history size
-            .select('messageType status reportAnalysisData aiGeneratedCode createdAt _id') // Select needed fields
-            .lean();
-
-            logger.debug(`[Agent History Prep] Fetched ${historyRecords.length} potential artifact records (newest first).`);
-
-            // Fix 2: Update artifact search logic
-            let artifactData = {
-                previousAnalysisResult: null,
-                previousGeneratedCode: null,
-                analysisFoundOnMsgId: null,
-                codeFoundOnMsgId: null
-            };
-
-            // Find the most recent successful report with analysis data
-            // The query already sorts by newest and filters for completed reports
-            const lastSuccessfulReport = historyRecords.find(msg => msg.reportAnalysisData);
-
-            if (lastSuccessfulReport) {
-                artifactData = {
-                    previousAnalysisResult: lastSuccessfulReport.reportAnalysisData,
-                    previousGeneratedCode: lastSuccessfulReport.aiGeneratedCode, // May or may not exist, that's okay
-                    analysisFoundOnMsgId: lastSuccessfulReport._id,
-                    codeFoundOnMsgId: lastSuccessfulReport.aiGeneratedCode ? lastSuccessfulReport._id : null // Only set if code exists
-                };
-
-                logger.info(`[Agent History Prep] Found previous artifacts in message ${lastSuccessfulReport._id}`, {
-                    hasAnalysis: !!artifactData.previousAnalysisResult,
-                    hasCode: !!artifactData.previousGeneratedCode
-                });
-            } else {
-                 logger.info(`[Agent History Prep] No suitable previous completed report with analysis data found.`);
-            }
-            // --- End Fix 2 --
-
-            // Store potentially found artifacts in intermediate results
-            // Use consistent naming: previousAnalysisResult, previousGeneratedCode
-            this.turnContext.intermediateResults.previousAnalysisResult = artifactData.previousAnalysisResult;
-            this.turnContext.intermediateResults.previousGeneratedCode = artifactData.previousGeneratedCode;
-
-            logger.debug(`[Agent History Prep] Post-artifact search check:`, {
-                hasPreviousAnalysis: !!artifactData.previousAnalysisResult,
-                analysisMsgId: artifactData.analysisFoundOnMsgId,
-                hasPreviousCode: !!artifactData.previousGeneratedCode,
-                codeMsgId: artifactData.codeFoundOnMsgId,
-            });
-
-            // Fetch the full history separately for LLM context (chronological)
-            const fullHistoryRecords = await PromptHistory.find({
-                chatSessionId: this.sessionId,
-                _id: { $ne: this.aiMessagePlaceholderId }
-            })
-            .sort({ createdAt: 1 }) // Chronological for LLM
-            .limit(HISTORY_FETCH_LIMIT)
-            .select('messageType promptText aiResponseText') // Only need text content
-            .lean();
-
-             const formattedHistory = fullHistoryRecords.map(msg => ({
-                role: msg.messageType === 'user' ? 'user' : 'assistant',
-                content: (msg.messageType === 'user' ? msg.promptText : msg.aiResponseText) || ''
-            })).filter(msg => msg.content);
-
-            this.turnContext.fullChatHistory = formattedHistory;
-
-            // --- History Summarization and related fields REMOVED --
-
-        } catch (err) {
-             logger.error(`Failed to fetch chat history for session ${this.sessionId}: ${err.message}`);
-             this.turnContext.fullChatHistory = []; // Ensure it's an empty array on error
-             // Reset artifact state on error to avoid passing stale data
-             this.turnContext.intermediateResults.previousAnalysisResult = null;
-             this.turnContext.intermediateResults.previousGeneratedCode = null;
-        }
-    }
-
+    // --- LLM Response Parsing --- 
     /**
-     * Prepares the full context object required by the LLM reasoning prompt service.
-     * @returns {object} - Context object for promptService.getLLMReasoningResponse.
+     * Parses the complete LLM response text when the stream finishes, *if* no specific
+     * tool call or final answer signal was detected during the stream itself.
+     * Attempts to extract a JSON tool call; otherwise treats the text as a final answer.
+     * @private
+     * @param {string} responseText - The complete text response accumulated from the LLM stream.
+     * @returns {{tool: string, args: object, isFinalAnswer: boolean, textResponse: string|null}} Parsed action details.
      */
-    _prepareLLMContext() {
-        // --- ADDED: Prepare previous analysis context ---
-        let previousAnalysisResultSummary = null;
-        let hasPreviousGeneratedCode = false;
+    _parseCompleteLLMResponse(responseText) {
+        const trimmedResponse = responseText?.trim() || '';
+        const defaultAnswer = { tool: '_answerUserTool', args: { textResponse: trimmedResponse }, isFinalAnswer: true, textResponse: trimmedResponse };
 
-        // Use the corrected field name from turnContext
-        if (this.turnContext.intermediateResults.previousAnalysisResult) {
-            previousAnalysisResultSummary = "Analysis results from a previous turn are available and should be reused if applicable.";
+        if (!trimmedResponse) {
+             logger.debug(`[AgentExecutor ${this.sessionId}] Complete LLM response is empty. Treating as final answer.`);
+            return defaultAnswer;
         }
-        if (this.turnContext.intermediateResults.previousGeneratedCode) {
-            hasPreviousGeneratedCode = true;
-        }
-        // --- END ADDED --
 
-        // Ensure fullChatHistory exists (it should be set by _prepareChatHistory)
-        const chatHistoryForLLM = this.turnContext.fullChatHistory || []; // Use variable from context
-
-        // Prepare dataset context by adding schemas and samples to the context
-        const datasetSchemas = this.turnContext.intermediateResults.datasetSchemas || {};
-        const datasetSamples = this.turnContext.intermediateResults.datasetSamples || {};
+        // ADDED: Log the attempt to parse structured JSON
+        logger.debug(`[AgentExecutor ${this.sessionId}] Attempting to extract JSON from response of length ${trimmedResponse.length}`);
         
-        // Log the exact dataset IDs being sent to the LLM
-        const datasetIds = Object.keys(datasetSchemas);
-        logger.info(`[_prepareLLMContext] Sending the following dataset IDs to LLM: ${JSON.stringify(datasetIds)}`);
-        if (datasetIds.length > 0) {
-            logger.info(`[_prepareLLMContext] First dataset ID type: ${typeof datasetIds[0]}, length: ${datasetIds[0].length}`);
-        }
-
-        return {
-            userId: this.userId, 
-            originalQuery: this.turnContext.originalQuery,
-            // --- FIX: Use 'history' key --- 
-            history: chatHistoryForLLM, // Use the standardized key 'history'
-            currentTurnSteps: this.turnContext.steps,
-            availableTools: this._getToolDefinitions(), 
-            userContext: this.turnContext.userContext, 
-            teamContext: this.turnContext.teamContext, 
-            previousAnalysisResultSummary: previousAnalysisResultSummary,
-            hasPreviousGeneratedCode: hasPreviousGeneratedCode,
-            analysisResult: this.turnContext.intermediateResults.analysisResult,
-            datasetSchemas: datasetSchemas,
-            datasetSamples: datasetSamples
-        };
-    }
-
-    /**
-     * Parses the LLM's raw response text to identify tool calls or final answers.
-     * Expected tool call format: A JSON object like {"tool": "<name>", "args": {...}}
-     * Anything else is treated as a final answer for the _answerUserTool.
-     * @param {string} llmResponse - The raw text response from the LLM.
-     * @returns {{tool: string|null, args: object|null}} - Parsed action.
-     */
-    _parseLLMResponse(llmResponse) {
-        if (!llmResponse || typeof llmResponse !== 'string') {
-             logger.warn('LLM response is empty or not a string.');
-             return { tool: '_answerUserTool', args: { textResponse: 'An error occurred: Empty response from AI.' } };
-        }
-
-        const trimmedResponse = llmResponse.trim();
-        
-        // Regex to find a JSON object enclosed in optional markdown fences
-        const jsonRegex = /^```(?:json)?\s*(\{[\s\S]*\})\s*```$|^(\{[\s\S]*\})$/m;
+        // Attempt to parse structured JSON (e.g., tool call)
+        // Regex to find JSON object optionally enclosed in markdown fences
+        const jsonRegex = /^```(?:json)?\s*(\{[^]*?\})\s*```$|^(\{[^]*?\})$/m; // Use [^]*? for non-greedy multi-line content
         const jsonMatch = trimmedResponse.match(jsonRegex);
 
         if (jsonMatch) {
             const potentialJson = jsonMatch[1] || jsonMatch[2];
             if (potentialJson) {
-                 let sanitizedJsonString = null; // Declare outside the try block
-                 try {
-                    // --- SANITIZATION STEP --- 
-                    sanitizedJsonString = potentialJson.replace(/("code"\s*:\s*")([\s\S]*?)("(?!\\))/gs, (match, p1, p2, p3) => {
-                        const escapedCode = p2
-                            .replace(/\\/g, '\\') // Escape backslashes FIRST
-                            .replace(/"/g, '\"')  // Escape double quotes
-                            .replace(/\n/g, '\\n') // Escape newlines
-                            .replace(/\r/g, '\\r'); // Escape carriage returns
-                        return p1 + escapedCode + p3;
-                    });
-                    // --- END SANITIZATION --- 
+                // ADDED: Log the extracted potential JSON
+                logger.debug(`[AgentExecutor ${this.sessionId}] Found potential JSON (first 500 chars): ${potentialJson.substring(0, 500)}${potentialJson.length > 500 ? '...' : ''}`);
+                
+                try {
+                    // Basic sanitization might be needed here if JSON is complex (e.g., nested strings with quotes)
+                    const parsed = JSON.parse(potentialJson);
+                    
+                    // ADDED: Log the successfully parsed JSON
+                    logger.debug(`[AgentExecutor ${this.sessionId}] Successfully parsed JSON, checking structure. Found keys: ${Object.keys(parsed).join(', ')}`);
 
-                    const parsed = JSON.parse(sanitizedJsonString); // Parse the sanitized string
-
-                    // Validate the parsed JSON structure for a tool call
+                    // Validate structure for tool call
                     if (parsed && typeof parsed.tool === 'string' && typeof parsed.args === 'object' && parsed.args !== null) {
-                        const knownTools = this._getToolImplementations();
-                        if (knownTools[parsed.tool]) {
-                            logger.debug(`Parsed tool call via regex: ${parsed.tool}`, parsed.args);
-                            // Handle _answerUserTool called via JSON
+                        if (this.knownToolNames.includes(parsed.tool)) {
+                            logger.debug(`[AgentExecutor ${this.sessionId}] Parsed tool call from complete response: ${parsed.tool}`);
+                             // Handle _answerUserTool specifically if called via JSON
                             if (parsed.tool === '_answerUserTool') {
-                                if(typeof parsed.args.textResponse === 'string' && parsed.args.textResponse.trim() !== ''){
-                                     return { tool: parsed.tool, args: parsed.args };
+                                 const textArg = parsed.args.textResponse;
+                                if (typeof textArg === 'string' && textArg.trim() !== '') {
+                                     return { tool: parsed.tool, args: parsed.args, isFinalAnswer: true, textResponse: textArg.trim() };
                                 } else {
-                                     logger.warn('_answerUserTool called via JSON but missing/empty textResponse.');
-                                     return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
+                                     logger.warn(`[AgentExecutor ${this.sessionId}] _answerUserTool in JSON lacks textResponse, using raw response.`);
+                                     return defaultAnswer; // Fallback to treating raw response as answer
                                 }
                             }
-                            return { tool: parsed.tool, args: parsed.args }; // Valid tool call
+                            // Valid tool call found
+                            return { tool: parsed.tool, args: parsed.args, isFinalAnswer: false, textResponse: null };
                         } else {
-                            logger.warn(`LLM requested unknown tool via JSON: ${parsed.tool}`);
-                            return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
+                            logger.warn(`[AgentExecutor ${this.sessionId}] Parsed JSON tool is unknown: ${parsed.tool}. Treating as final answer.`);
+                            // Fall through to default answer
                         }
                     } else {
-                         logger.warn('Parsed JSON does not match expected tool structure.', parsed);
-                         return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
+                        logger.warn(`[AgentExecutor ${this.sessionId}] Parsed JSON doesn't match expected tool structure. Treating as final answer.`);
+                        // ADDED: Log details about why the structure was invalid
+                        if (!parsed) {
+                            logger.debug(`[AgentExecutor ${this.sessionId}] Parsed result is null or undefined`);
+                        } else {
+                            logger.debug(`[AgentExecutor ${this.sessionId}] Structure validation failed: tool is ${typeof parsed.tool}, args is ${typeof parsed.args}`);
+                        }
+                        // Fall through to default answer
                     }
                 } catch (e) {
-                    // sanitizedJsonString is now accessible here
-                    logger.error(`Failed to parse extracted JSON: ${e.message}. Sanitized attempt: ${sanitizedJsonString !== null ? sanitizedJsonString : '[Sanitization failed or not reached]'}. Original JSON source: ${potentialJson}`);
-                    return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
+                    logger.warn(`[AgentExecutor ${this.sessionId}] Failed to parse JSON from complete response: ${e.message}. Content: ${potentialJson.substring(0, 200)}... Treating as final answer.`);
+                    // Fall through to default answer
                 }
+            }
+        } else {
+            // ADDED: Log when no JSON pattern is found
+            logger.debug(`[AgentExecutor ${this.sessionId}] No JSON pattern found in response. First 100 chars: ${trimmedResponse.substring(0, 100)}...`);
+        }
+
+        // No valid JSON tool call found, treat the entire response as the final answer.
+        logger.debug(`[AgentExecutor ${this.sessionId}] Complete LLM response treated as final answer text.`);
+        return defaultAnswer;
+    }
+
+
+    // --- Context Preparation --- 
+    /**
+     * Prepares the comprehensive context object required by the `streamLLMReasoningResponse` service call.
+     * Gathers history, tool definitions, formatted results from previous steps in *this turn*,
+     * user/team context, dataset info, and previous turn artifacts.
+     * @private
+     * @returns {object} Context object structured for the LLM prompt service.
+     */
+    _prepareLLMContextForStream() {
+        // Summarize previous analysis result if available
+        let previousAnalysisResultSummary = null;
+        if (this.turnContext.intermediateResults.previousAnalysisResult) {
+            try {
+                // Provide a concise summary, avoiding large data structures
+                const summary = JSON.stringify(this.turnContext.intermediateResults.previousAnalysisResult);
+                previousAnalysisResultSummary = `Analysis results from a previous turn are available: ${summary.substring(0, 150)}${summary.length > 150 ? '...' : ''}`;
+            } catch {
+                previousAnalysisResultSummary = "Analysis results from a previous turn are available.";
             }
         }
 
-        logger.debug('LLM response treated as final answer text (no valid JSON tool call found).');
-        return { tool: '_answerUserTool', args: { textResponse: trimmedResponse } };
-    }
+        // Format results from tools executed *in this turn* for the next LLM call
+        const formattedToolResults = this.turnContext.steps
+            // Include only steps that are actual tool executions (not placeholders or final answer)
+            .filter(step => step.tool !== '_answerUserTool' && step.resultSummary !== 'Executing tool...')
+            .map(step => {
+                // Use the utility function to format the result/error stored on the step object
+                // Assumes _executeTool and retry logic store result/error on the step
+                 const toolResultObject = { result: step.result, error: step.error };
+                 // Append args to the result object so formatToolResultForLLM knows the context
+                 // toolResultObject.args = step.args; // May not be needed by formatter
+                 return formatToolResultForLLM(step.tool, toolResultObject);
+            });
 
-    /** Returns array of tool definitions the LLM can use. */
-    _getToolDefinitions() {
-        // Note: Output format must match what the LLM expects.
-        return [
-            {
-                name: 'parse_csv_data',
-                description: 'Parses the raw CSV content of a dataset using PapaParse. Returns a reference ID to the parsed data.',
-                args: {
-                    dataset_id: 'string'
-                },
-                 output: '{ "status": "success", "parsed_data_ref": "<ref_id>", "rowCount": <number> } or { "error": "..." }'
-            },
-            {
-                name: 'generate_analysis_code',
-                description: 'Generates Node.js analysis code expecting pre-parsed data in `inputData` variable. Requires schema context from `get_dataset_schema`.',
-                args: {
-                     analysis_goal: 'string'
-                     // Removed dataset_id, as schema is retrieved separately
-                },
-                 output: '{ "code": "<Node.js code string>" }'
-            },
-            {
-                 name: 'execute_analysis_code',
-                 description: 'Executes analysis code in a sandbox with parsed data injected as `inputData`. Requires `parse_csv_data` to be called first.',
-                 args: {
-                     code: 'string', 
-                     parsed_data_ref: 'string'
-                 },
-                 output: '{ "result": <JSON result>, "error": "..." }'
-            },
-            {
-                name: 'generate_report_code',
-                description: 'Generates React report code based on analysis results available in the context. Use this AFTER `execute_analysis_code` succeeds.',
-                // *** REMOVED analysis_result from args presented to LLM ***
-                args: {
-                    analysis_summary: 'string' // Only require summary from LLM
-                },
-                output: '{ "react_code": "<React code string>" }'
-            },
-            {
-                name: '_answerUserTool',
-                description: 'Provides the final textual answer to the user.',
-                args: { textResponse: 'string' },
-                output: 'Signals loop end.'
-            }
-        ];
-    }
-
-    /** Returns mapping of tool names to their implementation functions. */
-    _getToolImplementations() {
         return {
-            'list_datasets': this._listDatasetsTool, // Keep for backward compatibility
-            'get_dataset_schema': this._getDatasetSchemaTool, // Keep for backward compatibility
-            'parse_csv_data': this._parseCsvDataTool, 
-            'generate_analysis_code': this._generateAnalysisCodeTool, 
-            'execute_analysis_code': this._executeAnalysisCodeTool, 
-            'generate_report_code': this._generateReportCodeTool,
-            '_answerUserTool': this._answerUserTool,
+            // Identifiers
+            userId: this.userId,
+            sessionId: this.sessionId,
+
+            // Core context
+            originalQuery: this.turnContext.originalQuery,
+            history: this.turnContext.fullChatHistory, // Use pre-fetched, formatted history
+            availableTools: toolDefinitions, // Use imported definitions
+
+            // Context from current turn state
+            currentTurnSteps: this.turnContext.steps.map(s => ({ // Provide a summary of steps taken
+                 tool: s.tool,
+                 args: s.args, // Keep args for context
+                 summary: s.resultSummary,
+                 attempt: s.attempt
+             })),
+             formattedToolResults: formattedToolResults, // Pass formatted results from previous steps *in this turn*
+
+            // Context from previous turns / datasets
+            userContext: this.turnContext.userContext,
+            teamContext: this.turnContext.teamContext,
+            previousAnalysisResultSummary: previousAnalysisResultSummary,
+            hasPreviousGeneratedCode: !!this.turnContext.intermediateResults.previousGeneratedCode,
+            datasetSchemas: this.turnContext.intermediateResults.datasetSchemas,
+            datasetSamples: this.turnContext.intermediateResults.datasetSamples,
+
+             // Analysis result from *this turn* (e.g., for report generation prompt)
+            currentAnalysisResult: this.turnContext.intermediateResults.analysisResult,
         };
     }
 
-    /** Summarizes tool results, especially large ones, for the LLM context. */
-    _summarizeToolResult(result) {
+     // --- Intermediate State Management ---
+    /**
+     * Stores the successful result from a tool execution into the `turnContext.intermediateResults`.
+     * This allows subsequent steps or tools (like `generate_report_code`) to access necessary data
+     * (e.g., parsed data, analysis results).
+     * @private
+     * @param {string} toolName - The name of the tool that successfully executed.
+     * @param {object} toolResult - The successful result object from the tool execution ({status: 'success', result: ..., args: ...}).
+     */
+    _storeIntermediateResult(toolName, toolResult) {
+         // Ensure we only store successful results
+         if (toolResult.error || toolResult.status !== 'success' || toolResult.result === undefined) {
+             return;
+         }
+
+         const resultData = toolResult.result;
+         const args = toolResult.args || {}; // Get args passed back from _executeTool
+
+         try {
+            switch (toolName) {
+                case 'parse_csv_data':
+                    // Expects { parsedData: Array<object>, rowCount: number } in resultData
+                    if (resultData.parsedData && args.dataset_id) {
+                        const datasetId = args.dataset_id;
+                        this.turnContext.intermediateResults.parsedData[datasetId] = resultData.parsedData;
+                        logger.info(`[AgentExecutor ${this.sessionId}] Stored parsed data for dataset ${datasetId} (${resultData.rowCount} rows).`);
+            } else {
+                        logger.warn(`[AgentExecutor ${this.sessionId}] parse_csv_data success result missing parsedData or dataset_id in args. Result:`, resultData, 'Args:', args);
+                    }
+                    break;
+                case 'execute_analysis_code':
+                    this.turnContext.intermediateResults.analysisResult = resultData;
+                    logger.info(`[AgentExecutor ${this.sessionId}] Stored analysis execution result.`);
+                    break;
+                case 'generate_analysis_code':
+                    if (resultData.code) {
+                        this.turnContext.intermediateResults.generatedAnalysisCode = resultData.code;
+                        logger.info(`[AgentExecutor ${this.sessionId}] Stored generated analysis code (length: ${resultData.code.length}).`);
+            } else {
+                        logger.warn(`[AgentExecutor ${this.sessionId}] generate_analysis_code success result missing code.`);
+                    }
+                    break;
+                case 'generate_report_code':
+                    if (resultData.react_code) {
+                        this.turnContext.intermediateResults.generatedReportCode = resultData.react_code;
+                        logger.info(`[AgentExecutor ${this.sessionId}] Stored generated React report code.`);
+                } else {
+                        logger.warn(`[AgentExecutor ${this.sessionId}] generate_report_code success result missing react_code.`);
+                    }
+                    break;
+                // --- Add cases for other tools if their results need explicit storage ---
+                // case 'get_dataset_schema':
+                //    // Schemas are already stored during initial context prep if successful
+                //    break;
+                // case 'list_datasets':
+                //    // Result is usually just informational for the LLM in the next step
+                //    break;
+                // case 'generate_analysis_code':
+                //    // The generated code is immediately used by execute_analysis_code,
+                //    // no need to store it long-term in intermediateResults unless specifically required elsewhere.
+                //    break;
+                default:
+                    logger.debug(`[AgentExecutor ${this.sessionId}] No specific intermediate storage action defined for tool: ${toolName}`);
+            }
+         } catch (storageError) {
+              logger.error(`[AgentExecutor ${this.sessionId}] Error storing intermediate result for tool ${toolName}: ${storageError.message}`, { data: resultData });
+         }
+     }
+
+    // --- Tool Execution --- 
+    /**
+     * Dynamically loads and executes the requested tool function.
+     * Passes necessary context (userId, sessionId, schemas, analysis results, callbacks) to the tool.
+     * Handles basic validation of the tool's return structure.
+     * @private
+     * @param {string} toolName - The name of the tool to execute (must be a key in `toolImplementations`).
+     * @param {object} args - The arguments object for the tool, provided by the LLM.
+     * @returns {Promise<object>} The result object from the tool execution, including the original `args` for context.
+     *                          Expected structure: {status: 'success'|'error', result?: any, error?: string, logs?: string[], args: object}.
+     */
+    async _executeTool(toolName, args) {
+        const toolFunction = toolImplementations[toolName];
+        if (!toolFunction) {
+            logger.error(`[AgentExecutor ${this.sessionId}] Attempted to call unknown or unloaded tool: ${toolName}`);
+            return { status: 'error', error: `Unknown tool: ${toolName}`, args };
+        }
+
+        logger.debug(`[AgentExecutor ${this.sessionId}] Preparing to execute tool: ${toolName}`, { args });
+
         try {
-            if (!result) return 'Tool returned no result.';
-            if (result.error) {
-                let errorSummary = `Error: ${result.error}`; 
-                // Be more specific for common errors if possible
-                if (result.error.includes('timed out')) {
-                    errorSummary = 'Error: Code execution timed out.';
-                } else if (result.error.includes('sendResult')) {
-                    errorSummary = 'Error: Analysis code did not produce a result correctly.';
-                } else if (result.error.includes('access denied')) {
-                     errorSummary = 'Error: Access denied to the required resource.';
-                }
-                // Limit length
-                const limit = 250;
-                if (errorSummary.length > limit) {
-                    errorSummary = errorSummary.substring(0, limit - 3) + '...';
-                }
-                return errorSummary;
+            // Prepare the context object to pass to the tool function
+            const toolContext = {
+                userId: this.userId,
+                teamId: this.teamId,
+                sessionId: this.sessionId,
+                // Provide access to relevant parts of the turn context if needed by tools
+                datasetSchemas: this.turnContext.intermediateResults.datasetSchemas,
+                analysisResult: this.turnContext.intermediateResults.analysisResult,
+                // Provide callback for tools needing data managed by orchestrator
+                getParsedDataCallback: toolName === 'execute_analysis_code'
+                    ? this._getParsedDataForTool.bind(this)
+                    : undefined, // Only provide if needed
+            };
+
+            // Execute the tool function
+            const toolResult = await toolFunction(args, toolContext);
+
+            // Validate tool result structure (optional but good practice)
+            if (typeof toolResult !== 'object' || !toolResult.status) {
+                 logger.error(`[AgentExecutor ${this.sessionId}] Tool ${toolName} returned invalid result structure:`, toolResult);
+                 return { status: 'error', error: `Tool ${toolName} returned an invalid result.`, args };
             }
-            // Add summary for successful parsing
-            if (result.result?.status === 'success' && result.result?.parsed_data_ref) {
-                 return `Successfully parsed data (${result.result.rowCount || '?'} rows). Ref ID: ${result.result.parsed_data_ref}`;
-            }
-            // Add specific summary for report code generation
-            if (result.result && typeof result.result.react_code === 'string') {
-                return 'Successfully generated React report code.';
-            }
-            const resultString = JSON.stringify(result.result);
-            const limit = 500; // Shorter limit for analysis results in context
-            if (resultString.length > limit) {
-                let summary = resultString.substring(0, limit - 3) + '...';
-                try {
-                    const parsed = JSON.parse(resultString); 
-                    if (Array.isArray(parsed)) summary = `Result: Array[${parsed.length}]`;
-                    else if (typeof parsed === 'object' && parsed !== null) summary = `Result: Object{${Object.keys(parsed).slice(0,3).join(',')}${Object.keys(parsed).length > 3 ? ',...' : ''}}`;
-                } catch(e){ /* ignore */ }
-                 return summary;
-            }
-            return resultString;
-        } catch (e) {
-            logger.warn(`Could not summarize tool result: ${e.message}`);
-            return 'Could not summarize tool result.';
+
+            // Pass back the original args along with the result for context
+            return { ...toolResult, args };
+
+        } catch (error) {
+            // Catch unexpected errors *within* the tool's execution
+            logger.error(`[AgentExecutor ${this.sessionId}] Uncaught error during execution of tool ${toolName}: ${error.message}`, { stack: error.stack, toolArgs: args });
+                return {
+                 status: 'error',
+                 error: `Tool execution failed unexpectedly: ${error.message}`,
+                 args
+            };
         }
     }
 
-    /** Updates the PromptHistory record in the database. */
-    async _updatePromptHistoryRecord(status, aiResponseText = null, errorMessage = null, aiGeneratedCode = null) {
+    // --- Database Update --- 
+    /**
+     * Updates the corresponding PromptHistory record in MongoDB with the final outcome of the agent turn.
+     * Records the final status, response text, error message, generated code, analysis data, and steps taken.
+     * Handles potential errors during the database update gracefully.
+     * @private
+     * @param {string} status - Final status: 'completed' or 'error'.
+     * @param {string|null} [aiResponseText=null] - Final AI text response.
+     * @param {string|null} [errorMessage=null] - Error message if status is 'error'.
+     * @param {string|null} [aiGeneratedCode=null] - Generated React report code, if any.
+     * @param {any|null} [analysisData=null] - Final analysis result data from `execute_analysis_code`, if any.
+     */
+    async _updatePromptHistoryRecord(status, aiResponseText = null, errorMessage = null, aiGeneratedCode = null, analysisData = null) {
         if (!this.aiMessagePlaceholderId) {
-             logger.error('Cannot update PromptHistory: aiMessagePlaceholderId is missing.');
-             return;
+            logger.error(`[AgentExecutor ${this.sessionId}] Cannot update prompt history: aiMessagePlaceholderId is missing.`);
+            // Cannot proceed without the ID
+            return;
         }
         try {
-            // Get analysis result if available (needed when completing)
-            const analysisResult = this.turnContext.intermediateResults.analysisResult;
-            // --- Get the report code DIRECTLY from the context --- 
-            const finalGeneratedCode = this.turnContext.generatedReportCode;
-            // --- Log the value directly from context --- 
-            console.log(`[_updatePromptHistoryRecord] Value of this.turnContext.generatedReportCode: ${finalGeneratedCode ? `Exists (Length: ${finalGeneratedCode.length})` : 'MISSING'}`);
-
-            // ---- ADD DEBUG LOG ----
-            logger.debug(`[Agent Update DB] Preparing update for ${this.aiMessagePlaceholderId}`, { 
-                status, 
-                hasResponseText: !!aiResponseText, 
-                hasErrorMessage: !!errorMessage, 
-                // Use the potentially cleaned code for logging and saving
-                hasGeneratedCode: !!finalGeneratedCode, 
-                codeLength: finalGeneratedCode?.length,
-                hasAnalysisResult: !!analysisResult, 
-            });
-            // ---- END DEBUG LOG ----
             const updateData = {
                 status: status,
-                // Conditionally add fields only if they have a value
-                ...(aiResponseText !== null && { aiResponseText: aiResponseText }),
-                ...(errorMessage !== null && { errorMessage: errorMessage }),
-                // Use the potentially cleaned code for saving
-                ...(finalGeneratedCode !== null && finalGeneratedCode !== undefined && { aiGeneratedCode: finalGeneratedCode }), // Check not null/undefined
-                ...(status === 'completed' && analysisResult !== null && analysisResult !== undefined && { reportAnalysisData: analysisResult }),
-                 agentSteps: this.turnContext.steps, // Store the steps taken
+                completedAt: new Date(),
+                // Store a snapshot of the steps taken during this turn
+                steps: this.turnContext.steps.map(s => ({
+                    tool: s.tool,
+                    args: s.args, // Consider censoring sensitive args if necessary
+                    resultSummary: s.resultSummary,
+                    error: s.error, // Include error message if step failed
+                    attempt: s.attempt
+                 })),
             };
-            const updatedMessage = await PromptHistory.findByIdAndUpdate(this.aiMessagePlaceholderId, updateData, { new: true });
-            if (updatedMessage) {
-                 logger.info(`Updated PromptHistory ${this.aiMessagePlaceholderId} with status: ${status}`);
-                 // Log if analysis data was actually saved (useful for verification)
-                 if (status === 'completed' && analysisResult !== null && analysisResult !== undefined) {
-                     logger.debug(`[Agent Update DB] Saved reportAnalysisData for ${this.aiMessagePlaceholderId}`);
-                 }
+
+            // Add fields conditionally
+            if (aiResponseText !== null) updateData.aiResponseText = aiResponseText;
+            // Use the specific error message if provided, otherwise use the general turn error
+            if (errorMessage !== null || this.turnContext.error) updateData.errorMessage = errorMessage || this.turnContext.error;
+            if (aiGeneratedCode !== null) updateData.aiGeneratedCode = aiGeneratedCode;
+            // Store the final analysis result associated with this report/response
+            if (analysisData !== null) updateData.reportAnalysisData = analysisData;
+
+            const updatedRecord = await PromptHistory.findByIdAndUpdate(
+                this.aiMessagePlaceholderId,
+                { $set: updateData },
+                { new: true } // Options: return the updated document
+            ).lean(); // Use lean for performance if full Mongoose object isn't needed after update
+
+            if (!updatedRecord) {
+                // This is concerning - the placeholder ID should exist
+                logger.error(`[AgentExecutor ${this.sessionId}] CRITICAL: Could not find PromptHistory record ${this.aiMessagePlaceholderId} to update.`);
             } else {
-                 logger.warn(`PromptHistory record ${this.aiMessagePlaceholderId} not found during update.`);
-            }
-        } catch (dbError) {
-            logger.error(`Failed to update PromptHistory ${this.aiMessagePlaceholderId}: ${dbError.message}`, { dbError });
-        }
-    }
-
-    //=================================
-    // Tool Implementation Functions
-    //=================================
-
-    /** Dispatcher */
-    async toolDispatcher(toolName, args) {
-        const toolImplementations = this._getToolImplementations();
-        const toolFunction = toolImplementations[toolName];
-
-        if (!toolFunction) {
-            logger.error(`Attempted to dispatch unknown tool: ${toolName}`);
-            return { error: `Unknown tool: ${toolName}` };
-        }
-
-        if (toolName === '_answerUserTool') {
-             return { result: { message: 'Signal to answer user received.' } };
-        }
-
-        try {
-            if (typeof args !== 'object' || args === null) {
-                 throw new Error(`Invalid arguments provided for tool ${toolName}. Expected an object.`);
-            }
-
-            // Pass the original args directly to the tool function
-            const toolOutput = await toolFunction.call(this, args);
-
-            // Ensure the output is in the { result: ... } or { error: ... } format
-            if (toolOutput && (toolOutput.result !== undefined || toolOutput.error !== undefined)) {
-                 return toolOutput;
-            } else {
-                 logger.warn(`Tool ${toolName} did not return the expected format. Wrapping result.`);
-                 // Wrap unexpected return values for consistency, assuming success if no error thrown
-                 return { result: toolOutput };
+                logger.info(`[AgentExecutor ${this.sessionId}] Updated PromptHistory record ${this.aiMessagePlaceholderId} with final status: ${status}`);
             }
         } catch (error) {
-            logger.error(`Error executing tool ${toolName}: ${error.message}`, { args, error });
-            return { error: `Tool ${toolName} execution failed: ${error.message}` };
+            // Log error but don't let DB update failure stop the agent response flow
+            logger.error(`[AgentExecutor ${this.sessionId}] Failed to update prompt history record ${this.aiMessagePlaceholderId}: ${error.message}`, { stack: error.stack });
         }
     }
 
-    /** Tool: List Datasets */
-    async _listDatasetsTool(args) { // Args ignored
-        logger.info(`Executing tool: list_datasets`);
-        try {
-            const datasets = await datasetService.listAccessibleDatasets(this.userId, this.teamId);
-            const formattedDatasets = datasets.map(d => ({
-                id: d._id.toString(),
-                name: d.name,
-                description: d.description || ''
-            }));
-            return { result: { datasets: formattedDatasets } };
-        } catch (error) {
-            logger.error(`_listDatasetsTool failed: ${error.message}`, { error });
-            return { error: `Failed to list datasets: ${error.message}` };
-        }
-    }
+} // End class AgentExecutor
 
-    /** Tool: Get Schema */
-    async _getDatasetSchemaTool(args) {
-        const { dataset_id } = args;
-        logger.info(`Executing tool: get_dataset_schema with id: ${dataset_id}`);
-        if (!dataset_id || typeof dataset_id !== 'string') {
-            return { error: 'Missing or invalid required argument: dataset_id (must be a string)' };
-        }
 
-        try {
-            const schemaData = await datasetService.getDatasetSchema(dataset_id, this.userId);
-            if (!schemaData) {
-                 return { error: `Dataset schema not found or access denied for ID: ${dataset_id}` };
-            }
-             // Ensure the returned data matches the documented output structure
-             const resultData = {
-                schemaInfo: schemaData.schemaInfo || [],
-                columnDescriptions: schemaData.columnDescriptions || {},
-                description: schemaData.description || ''
-             };
-            // STORE SCHEMA FOR LATER USE BY CODE GEN
-            this.turnContext.intermediateResults.lastSchema = resultData;
-            logger.info(`[Agent Loop ${this.sessionId}] Stored dataset schema.`);
-            return { result: resultData };
-        } catch (error) {
-            logger.error(`_getDatasetSchemaTool failed for ${dataset_id}: ${error.message}`, { error });
-             // Handle specific errors like CastError for invalid ObjectId
-             if (error.name === 'CastError') {
-                 return { error: `Invalid dataset ID format: ${dataset_id}` };
-             }
-            return { error: `Failed to get dataset schema: ${error.message}` };
-        }
-    }
-
-    /** Tool: Parse CSV Data */
-    async _parseCsvDataTool(args) {
-        const { dataset_id } = args;
-        logger.info(`Executing tool: parse_csv_data for dataset ${dataset_id}`);
-        
-        // Add detailed logging about the dataset ID
-        logger.info(`[_parseCsvDataTool] DATASET ID DEBUG: Value: "${dataset_id}", Type: ${typeof dataset_id}, Length: ${dataset_id ? dataset_id.length : 'N/A'}`);
-        
-        if (!dataset_id || typeof dataset_id !== 'string') {
-            return { error: 'Missing or invalid required argument: dataset_id' };
-        }
-        
-        // Check for common non-ObjectId values that might be attempted by the AI
-        if (['implicit_revenue_data', 'revenue_data', 'sales_data', 'financial_data', 'dataset', 'ds_f697a53475'].includes(dataset_id)) {
-            logger.warn(`[_parseCsvDataTool] AI attempted to use a literal name "${dataset_id}" instead of the ObjectId`);
-            
-            // FALLBACK MECHANISM: Get the first valid dataset ID from context
-            const availableDatasetIds = Object.keys(this.turnContext.intermediateResults.datasetSchemas || {});
-            if (availableDatasetIds.length > 0) {
-                const correctDatasetId = availableDatasetIds[0];
-                logger.info(`[_parseCsvDataTool] FALLBACK: Using correct dataset ID: ${correctDatasetId} instead of invalid ID: ${dataset_id}`);
-                
-                // Proceed with the correct ID
-                try {
-                    const rawContent = await datasetService.getRawDatasetContent(correctDatasetId, this.userId);
-                    if (!rawContent) {
-                        throw new Error('Failed to fetch dataset content or content is empty.');
-                    }
-                    
-                    logger.info(`Parsing CSV content for dataset ${correctDatasetId} (length: ${rawContent.length})`);
-                    // Continue with parsing as normal...
-                    const parseResult = Papa.parse(rawContent, {
-                        header: true,
-                        dynamicTyping: true,
-                        skipEmptyLines: true,
-                        transformHeader: header => header.trim()
-                    });
-                    
-                    if (parseResult.errors && parseResult.errors.length > 0) {
-                        logger.error(`PapaParse errors for dataset ${correctDatasetId}:`, parseResult.errors);
-                        const errorSummary = parseResult.errors.slice(0, 3).map(e => e.message).join('; ');
-                        return { error: `CSV Parsing failed: ${errorSummary}` };
-                    }
-                    
-                    if (!parseResult.data || parseResult.data.length === 0) {
-                        return { error: 'CSV Parsing resulted in no data.' };
-                    }
-                    
-                    logger.info(`Successfully parsed ${parseResult.data.length} rows for dataset ${correctDatasetId}.`);
-                    const parsedDataRef = `parsed_${correctDatasetId}_${Date.now()}`;
-                    this.turnContext.intermediateResults[parsedDataRef] = parseResult.data;
-                    
-                    return {
-                        result: {
-                            status: 'success',
-                            message: `Data parsed successfully, ${parseResult.data.length} rows found. Note: Used correct dataset ID: ${correctDatasetId}`,
-                            parsed_data_ref: parsedDataRef,
-                            rowCount: parseResult.data.length
-                        }
-                    };
-                } catch (error) {
-                    logger.error(`_parseCsvDataTool fallback failed for ${correctDatasetId}: ${error.message}`, { error });
-                    return { error: `Failed to parse dataset content: ${error.message}` };
-                }
-            } else {
-                return { 
-                    error: `Invalid dataset ID: '${dataset_id}'. You must use the exact MongoDB ObjectId (24-character hex string) provided in the system prompt, not a descriptive name.` 
-                };
-            }
-        }
-        
-        // NORMAL PATH FOR VALID DATASET IDs
-        try {
-            // Add ObjectId validation check
-            const mongoose = require('mongoose');
-            const isValidObjectId = mongoose.Types.ObjectId.isValid(dataset_id);
-            logger.info(`[_parseCsvDataTool] Is valid MongoDB ObjectId: ${isValidObjectId}`);
-            
-            if (!isValidObjectId) {
-                // Check if we have any available datasets to use as fallback
-                const availableDatasetIds = Object.keys(this.turnContext.intermediateResults.datasetSchemas || {});
-                if (availableDatasetIds.length > 0) {
-                    logger.info(`[_parseCsvDataTool] Invalid ObjectId but fallback available. Will retry.`);
-                    // Recursively call this method with the first dataset ID
-                    return this._parseCsvDataTool({ dataset_id: availableDatasetIds[0] });
-                } else {
-                    return { error: `Invalid dataset ID format: '${dataset_id}'. Dataset ID must be a valid MongoDB ObjectId (24-character hex string).` };
-                }
-            }
-            
-            const rawContent = await datasetService.getRawDatasetContent(dataset_id, this.userId);
-            if (!rawContent) {
-                throw new Error('Failed to fetch dataset content or content is empty.');
-            }
-            
-            logger.info(`Parsing CSV content for dataset ${dataset_id} (length: ${rawContent.length})`);
-            // Use PapaParse for reliable parsing
-            const parseResult = Papa.parse(rawContent, {
-                header: true, // Automatically use first row as header
-                dynamicTyping: true, // Attempt to convert numbers/booleans
-                skipEmptyLines: true,
-                transformHeader: header => header.trim(), // Trim header whitespace
-            });
-
-            if (parseResult.errors && parseResult.errors.length > 0) {
-                logger.error(`PapaParse errors for dataset ${dataset_id}:`, parseResult.errors);
-                // Report only the first few errors to avoid overwhelming context
-                const errorSummary = parseResult.errors.slice(0, 3).map(e => e.message).join('; ');
-                return { error: `CSV Parsing failed: ${errorSummary}` };
-            }
-
-            if (!parseResult.data || parseResult.data.length === 0) {
-                return { error: 'CSV Parsing resulted in no data.' };
-            }
-
-            logger.info(`Successfully parsed ${parseResult.data.length} rows for dataset ${dataset_id}.`);
-            // Store the *full* parsed data in intermediate results
-            // Generate a unique reference for this parsed data within the turn
-            const parsedDataRef = `parsed_${dataset_id}_${Date.now()}`;
-            this.turnContext.intermediateResults[parsedDataRef] = parseResult.data; 
-
-            // Return success and the reference ID
-            return { 
-                result: { 
-                    status: 'success', 
-                    message: `Data parsed successfully, ${parseResult.data.length} rows found.`,
-                    parsed_data_ref: parsedDataRef, // Return reference for agent
-                    rowCount: parseResult.data.length
-                } 
-            };
-        } catch (error) {
-            logger.error(`_parseCsvDataTool failed for ${dataset_id}: ${error.message}`, { error });
-            return { error: `Failed to parse dataset content: ${error.message}` };
-        }
-    }
-
-    async _generateAnalysisCodeTool(args) { 
-        const { analysis_goal } = args; 
-        logger.info(`Executing tool: generate_analysis_code`);
-        if (!analysis_goal) {
-            return { error: 'Missing or invalid required argument: analysis_goal' };
-        }
-        // Retrieve the stored schema
-        const schemaData = this.turnContext.intermediateResults.lastSchema;
-        if (!schemaData) {
-            return { error: 'Schema not found in context. Use get_dataset_schema first.' };
-        }
-        try {
-            const generatedCodeResponse = await promptService.generateAnalysisCode({
-                userId: this.userId,
-                analysisGoal: analysis_goal,
-                datasetSchema: schemaData 
-            });
-
-            if (!generatedCodeResponse || !generatedCodeResponse.code) {
-                 throw new Error('AI failed to generate valid analysis code.');
-            }
-            // Don't store here, just return. Agent loop stores in intermediateResults.
-            return { result: { code: generatedCodeResponse.code } }; 
-        } catch (error) {
-            logger.error(`_generateAnalysisCodeTool failed: ${error.message}`, { error });
-            return { error: `Failed to generate analysis code: ${error.message}` };
-        }
-    }
-
-    /** Tool: Execute Analysis Code */
-    async _executeAnalysisCodeTool(args) {
-        const { code, parsed_data_ref } = args;
-        logger.info(`Executing tool: execute_analysis_code`);
-        if (!code || typeof code !== 'string' || !parsed_data_ref || typeof parsed_data_ref !== 'string') {
-            return { error: 'Missing or invalid arguments: code (string) and parsed_data_ref (string) are required' };
-        }
-        
-        // Retrieve the actual parsed data using the reference ID
-        const parsedData = this.turnContext.intermediateResults[parsed_data_ref];
-        if (!parsedData) {
-             return { error: `Parsed data not found for ref: ${parsed_data_ref}` };
-        }
-        if (!Array.isArray(parsedData)) {
-            return { error: 'Referenced parsed data is not an array.'}; 
-        }
-
-        try {
-            // Call the CORRECT function from the service: executeSandboxedCode
-            const result = await codeExecutionService.executeSandboxedCode(code, parsedData);
-            
-            // Log the full result
-            console.log('[Agent Tool _executeAnalysisCodeTool] Full analysis result:', JSON.stringify(result, null, 2));
-            
-            // Store the ACTUAL result object internally 
-            this.turnContext.intermediateResults.analysisResult = result.result; // Extract the inner 'result' object
-            return { result: result.result }; // Return the inner 'result' object
-        } catch (error) {
-            logger.error(`_executeAnalysisCodeTool failed: ${error.message}`, { error });
-            this.turnContext.intermediateResults.analysisError = error.message;
-            return { error: `Analysis code execution failed: ${error.message}` };
-        }
-    }
-
-    /** Tool: Generate React Report Code */
-    async _generateReportCodeTool(args) {
-        const { analysis_summary } = args;
-        logger.info(`Executing tool: generate_report_code with summary: "${analysis_summary}"`);
-
-        // Fix 3: Add context validation
-        let analysisDataForReport = this.turnContext.intermediateResults.analysisResult;
-
-        if (!analysisDataForReport) {
-            logger.info('Current turn analysis data not found, checking for previous analysis data.');
-            // Try using the analysis data found during history preparation
-            analysisDataForReport = this.turnContext.intermediateResults.previousAnalysisResult; // Use the correct field name
-
-            if (!analysisDataForReport) {
-                logger.error('[Generate Report Tool] No analysis data found in current OR previous context.');
-                // Provide a clearer error message to the LLM
-                return {
-                    error: 'Cannot generate report code: Analysis result is missing. Please run analysis first or ensure a previous analysis was completed successfully.'
-                };
-            }
-
-            logger.info('[Generate Report Tool] Using previous analysis data for report generation/modification.');
-        } else {
-             logger.info('[Generate Report Tool] Using analysis data from the current turn.');
-        }
-
-        // Ensure analysisDataForReport is actually an object/array, not just truthy
-        if (typeof analysisDataForReport !== 'object' || analysisDataForReport === null) {
-             logger.error(`[Generate Report Tool] Invalid analysis data format: ${typeof analysisDataForReport}`);
-              return {
-                error: 'Cannot generate report code: Invalid analysis data format.'
-              };
-        }
-
-        // Convert analysis data to JSON string for the prompt service
-        let dataJsonString;
-        try {
-            dataJsonString = JSON.stringify(analysisDataForReport);
-        } catch (stringifyError) {
-            logger.error(`[Generate Report Tool] Failed to stringify analysis data: ${stringifyError.message}`);
-            return { error: `Internal error: Could not process analysis data.` };
-        }
-
-        try {
-            const reportResult = await promptService.generateReportCode({
-                userId: this.userId,
-                analysisSummary: analysis_summary,
-                dataJson: dataJsonString // Pass stringified data
-            });
-
-            // Fix: Extract the string from the result object
-            const generatedCodeString = reportResult?.react_code;
-
-            if (!generatedCodeString || typeof generatedCodeString !== 'string') {
-                 logger.warn('[Generate Report Tool] promptService.generateReportCode returned no valid code string.');
-                 return { error: 'Failed to generate report code. The AI might need more information or context.' };
-            }
-
-            logger.info('[Generate Report Tool] Successfully generated React report code string.');
-            // Fix: Store the extracted STRING in turnContext
-            this.turnContext.generatedReportCode = generatedCodeString; 
-            // Fix: Return the string in the expected result structure
-            return { result: { react_code: generatedCodeString } };
-
-        } catch (error) {
-            logger.error(`[Generate Report Tool] Error calling promptService.generateReportCode: ${error.message}`, { error });
-            return { error: `Failed to generate report code: ${error.message}` };
-        }
-    }
-
-    /** Tool: Answer User Signal */
-    async _answerUserTool(args) {
-       logger.info(`Executing tool: _answerUserTool`);
-        const { textResponse } = args;
-        if (typeof textResponse !== 'string' || textResponse.trim() === '') {
-            // This validation is technically redundant due to parsing logic, but good practice
-            return { error: 'Missing or empty required argument: textResponse for _answerUserTool' };
-        }
-        // This tool doesn't *do* anything other than signal the end
-        // The actual textResponse is handled when the agent loop breaks
-        return { result: { message: 'Answer signal processed.'} };
-    }
-
-    /**
-     * Attempts to parse a JSON tool call from a string.
-     * Handles potential markdown fences and JSON parsing errors.
-     * @param {string} text - The text potentially containing a tool call.
-     * @returns {object|null} - The parsed tool object {tool, args} or null if no valid call found.
-     */
-    _tryParseJsonToolCall(text) {
-        if (!text || typeof text !== 'string') return null;
-        const trimmedText = text.trim();
-
-        // Regex to find a JSON object enclosed in optional markdown fences, potentially at the end
-        const jsonRegex = /(?:```(?:json)?\s*)?(\{[\s\S]*\})(?:\s*```)?$/m;
-        const jsonMatch = trimmedText.match(jsonRegex);
-
-        if (jsonMatch && jsonMatch[1]) {
-            const potentialJson = jsonMatch[1];
-            try {
-                // Basic sanitization attempt (might need refinement based on specific LLM outputs)
-                const sanitizedJsonString = potentialJson
-                    // Attempt to fix trailing commas before closing braces/brackets
-                    .replace(/,\s*([}\]])/g, '$1'); 
-
-                const parsed = JSON.parse(sanitizedJsonString);
-
-                if (parsed && typeof parsed.tool === 'string' && typeof parsed.args === 'object' && parsed.args !== null) {
-                    // Validate against known tools? Maybe not strictly necessary here.
-                    return { tool: parsed.tool, args: parsed.args };
-                }
-            } catch (e) {
-                // Ignore parsing errors - might be incomplete JSON during stream
-                 logger.debug(`[_tryParseJsonToolCall] Failed to parse potential JSON: ${e.message}`);
-            }
-        }
-        return null;
-    }
-}
+// --- Exported Runner Function ---
 
 /**
- * StreamingAgentOrchestrator extends the base AgentOrchestrator with
- * streaming capabilities to provide real-time updates to the client.
+ * Main exported function to initiate and run the agent for a single user message turn.
+ * Handles instantiation of the AgentExecutor and invoking its main streaming loop.
+ * Performs basic validation on essential input parameters.
+ * 
+ * This function is intended to be called by higher-level services like `chat.service` or `chat.taskHandler`.
+ *
+ * @async
+ * @param {object} params - Parameters required for the agent run.
+ * @param {string} params.userId - ID of the user initiating the chat turn.
+ * @param {string|null} params.teamId - ID of the relevant team, if applicable.
+ * @param {string} params.sessionId - ID of the current chat session.
+ * @param {string} params.aiMessagePlaceholderId - MongoDB ObjectId of the PromptHistory document placeholder for the AI's response.
+ * @param {function(string, object): void} params.sendEventCallback - The callback function used to stream events back (e.g., to a WebSocket handler).
+ * @param {string} params.userMessage - The raw text of the user's message.
+ * @param {Array<string>} params.sessionDatasetIds - An array of dataset IDs accessible within this session.
+ * @param {any} [params.initialPreviousAnalysisData] - Optional: Analysis data result from a previous turn to provide context.
+ * @param {string} [params.initialPreviousGeneratedCode] - Optional: Generated code from a previous turn to provide context.
+ * @returns {Promise<{status: 'completed'|'error', aiResponseText?: string, aiGeneratedCode?: string, error?: string}>} A promise resolving to the final status object summarizing the turn's outcome.
  */
-class StreamingAgentOrchestrator extends AgentOrchestrator {
-    /**
-     * @param {string} userId - User ID
-     * @param {string|null} teamId - Team ID
-     * @param {string} sessionId - Chat session ID
-     * @param {string} aiMessagePlaceholderId - ID of the AI message placeholder
-     * @param {Function} sendEventCallback - Callback function to send events to the client
-     * @param {Object|null} previousAnalysisData - Previous analysis data
-     * @param {string|null} previousGeneratedCode - Previously generated code
-     */
-    constructor(userId, teamId, sessionId, aiMessagePlaceholderId, sendEventCallback, previousAnalysisData = null, previousGeneratedCode = null) {
-        super(userId, teamId, sessionId, aiMessagePlaceholderId, previousAnalysisData, previousGeneratedCode);
-        this.sendEventCallback = sendEventCallback; 
-        this.accumulatedText = ''; 
-        this.currentToolCallInfo = null; 
-        this.isToolCallComplete = false; // Flag to track if a tool call is expected
-    }
+async function runAgent(params) {
+     const {
+         userId,
+         teamId,
+         sessionId,
+         aiMessagePlaceholderId,
+         sendEventCallback, // Function to stream events back
+         userMessage,
+         sessionDatasetIds,
+         initialPreviousAnalysisData,
+         initialPreviousGeneratedCode
+      } = params;
 
-    _sendStreamEvent(eventType, data) {
-        if (typeof this.sendEventCallback === 'function') {
-            const eventData = { messageId: this.aiMessagePlaceholderId, sessionId: this.sessionId, ...data };
-            this.sendEventCallback(eventType, eventData);
-        } else {
-            logger.warn('Streaming event callback is not a function, cannot send event.', { eventType });
-        }
-    }
+     // Basic validation
+     if (!userId || !sessionId || !aiMessagePlaceholderId || typeof sendEventCallback !== 'function' || typeof userMessage !== 'string') {
+         const errorMsg = 'Agent initialization failed: Missing or invalid required parameters.';
+         logger.error(`[runAgent ${sessionId}] ${errorMsg}`, { userId, sessionId, aiMessagePlaceholderId: !!aiMessagePlaceholderId, hasCallback: typeof sendEventCallback === 'function', hasMessage: typeof userMessage === 'string' });
+         // Attempt to send an error event if possible
+         if (typeof sendEventCallback === 'function' && sessionId && aiMessagePlaceholderId) {
+             sendEventCallback('agent_status', { eventName: 'agent:error', payload: { error: errorMsg, sessionId, messageId: aiMessagePlaceholderId } });
+             sendEventCallback('final_result', { status: 'error', error: errorMsg, sessionId, messageId: aiMessagePlaceholderId });
+         }
+          // Update history if possible
+         if (aiMessagePlaceholderId) {
+             try {
+                await PromptHistory.findByIdAndUpdate(aiMessagePlaceholderId, { $set: { status: 'error', errorMessage: errorMsg, completedAt: new Date() }});
+             } catch(e) { logger.error(`[runAgent ${sessionId}] Failed to update history on init error`, e); }
+         }
+         return { status: 'error', error: errorMsg };
+     }
 
-    _emitAgentStatus(eventName, payload) {
-        if (eventName === 'agent:thinking') {
-            this._sendStreamEvent('thinking', {});
-            super._emitAgentStatus(eventName, payload); // Keep websocket update if needed
-        }
-    }
+     logger.info(`[runAgent ${sessionId}] Instantiating AgentExecutor for User ${userId}.`);
+     const executor = new AgentExecutor(
+         userId,
+         teamId,
+         sessionId,
+         aiMessagePlaceholderId,
+         sendEventCallback,
+         initialPreviousAnalysisData,
+         initialPreviousGeneratedCode
+     );
 
-    // Helper to format tool result for LLM history
-    _formatToolResultForLLM(toolName, toolResult) {
-        // Gemini uses 'function' role for tool calls and 'model' for responses,
-        // but expects tool results via a specific 'functionResponse' part type.
-        // We'll mimic this structure logically.
-        // Note: The actual API call in gemini.client.js handles the specific format.
-        // Here, we just structure the history entry conceptually.
-        return {
-            role: 'user', // Representing the system/tool providing the result back
-            parts: [{
-                functionResponse: {
-                    name: toolName,
-                    response: toolResult.result || { error: toolResult.error || 'Tool execution failed' },
-                }
-            }]
-        };
-    }
-
-    async runAgentLoopWithStreaming(userMessage, sessionDatasetIds = []) {
-        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Starting for user ${this.userId}`);
-        this.turnContext.originalQuery = userMessage;
-        this.accumulatedText = ''; // Reset accumulated text for the whole turn
-        this.turnContext.steps = [];
-        this.isToolCallComplete = false;
-
-        let resolveProcessing, rejectProcessing;
-        const processingCompletePromise = new Promise((resolve, reject) => {
-            resolveProcessing = resolve;
-            rejectProcessing = reject;
-        });
-
-        let finalOutcome = { status: 'unknown', error: null, aiResponseText: null };
-        let loopCount = 0; // Add loop counter to prevent infinite loops
-        const MAX_LOOPS = 10; // Set a max number of LLM <-> Tool steps
-
-        try {
-            this._sendStreamEvent('start', {});
-            this._emitAgentStatus('agent:thinking', {}); // Initial thinking
-
-            // Preload context ONCE at the start
-            await this._preloadDatasetContext(sessionDatasetIds);
-            await this._prepareChatHistory(); // Prepare initial history
-
-            // Get initial LLM context
-            const llmContext = this._prepareLLMContext();
-            let currentAccumulatedTextForStep = ''; // Track text for the current step
-
-            // --- Main Agent Loop ---
-            while (loopCount < MAX_LOOPS) {
-                loopCount++;
-                logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Starting loop iteration ${loopCount}`);
-                currentAccumulatedTextForStep = ''; // Reset text for this step
-                let currentToolCall = null; // Reset tool call for this step
-                let stepCompleted = false; // Flag for this step's completion
-                let reasoningTextForHistory = ''; // Store reasoning text separately
-                let toolCallJsonDetected = false; // Flag to stop accumulating JSON
-
-                const stepPromise = new Promise(async (resolveStep, rejectStep) => {
-
-                    const streamCallback = async (eventType, data) => {
-                        logger.debug(`[Stream Callback - Loop ${loopCount}] Received event: ${eventType}`, data);
-                        try {
-                            switch (eventType) {
-                                case 'token':
-                                    if (data.content) {
-                                        // 1. Always accumulate text for the current step's internal buffer for parsing
-                                        const previousLength = currentAccumulatedTextForStep.length;
-                                        currentAccumulatedTextForStep += data.content;
-
-                                        let contentToSend = data.content;
-                                        let enteringJsonNow = false;
-
-                                        // 2. Check if the JSON fence START is appearing *now*
-                                        if (!toolCallJsonDetected) {
-                                            const jsonFenceIndex = currentAccumulatedTextForStep.indexOf('```json');
-                                            // Check if the fence starts within the content we just added
-                                            if (jsonFenceIndex !== -1 && jsonFenceIndex >= previousLength) {
-                                                logger.info(`[Stream Callback - Loop ${loopCount}] JSON fence start detected.`);
-                                                enteringJsonNow = true;
-                                                toolCallJsonDetected = true; // Set flag immediately
-
-                                                // Calculate how much of the *current* token is *before* the fence
-                                                const charsBeforeFence = jsonFenceIndex - previousLength;
-                                                if (charsBeforeFence > 0) {
-                                                    contentToSend = data.content.substring(0, charsBeforeFence);
-                                                } else {
-                                                    contentToSend = null; // Fence starts exactly at the beginning of this token
-                                                }
-                                                logger.debug(`[Stream Callback - Loop ${loopCount}] Portion of token before fence: "${contentToSend ? contentToSend : ''}"`);
-                                            }
-                                        }
-
-                                        // 3. Send token & Accumulate ONLY if JSON hasn't been detected yet OR if it's the partial token just before the fence
-                                        if (!toolCallJsonDetected || enteringJsonNow) {
-                                            if (contentToSend) {
-                                                this._sendStreamEvent('token', { content: contentToSend });
-                                                this.accumulatedText += contentToSend;
-                                                reasoningTextForHistory += contentToSend;
-                                            }
-                                            // If we just entered JSON, ensure no more tokens are sent/accumulated for this step
-                                            if (enteringJsonNow) {
-                                                 logger.info(`[Stream Callback - Loop ${loopCount}] Stopping token stream/accumulation after sending pre-fence content.`);
-                                            }
-                                        } else {
-                                            // JSON already detected in a previous token, do not send or accumulate this token
-                                            logger.debug(`[Stream Callback - Loop ${loopCount}] Token received after JSON detected, ignoring for stream/accumulation.`);
-                                        }
-
-                                        // 4. Check for completed JSON block end (for parsing, independent of streaming)
-                                        if (toolCallJsonDetected && !currentToolCall) { // Only parse if fence started but tool not yet confirmed
-                                            if (currentAccumulatedTextForStep.trim().endsWith('```')) {
-                                                const detectedTool = this._tryParseToolCall(currentAccumulatedTextForStep);
-                                                if (detectedTool) {
-                                                    currentToolCall = detectedTool;
-                                                    logger.info(`[Stream Callback - Loop ${loopCount}] Full Tool JSON parsed: ${detectedTool.tool}.`);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    break;
-                                case 'completed':
-                                    logger.info(`[Stream Callback - Loop ${loopCount}] LLM stream for this step completed.`);
-                                    stepCompleted = true;
-
-                                    // Final check: Try parse tool call from the full step text one last time
-                                    if (!currentToolCall) {
-                                        const finalCheckTool = this._tryParseToolCall(currentAccumulatedTextForStep);
-                                        if (finalCheckTool) {
-                                            logger.warn(`[Stream Callback - Loop ${loopCount}] Tool JSON parsed only upon completion event.`);
-                                            currentToolCall = finalCheckTool;
-                                            // Reset toolCallJsonDetected flag just in case it wasn't set by fence detection
-                                            toolCallJsonDetected = true; 
-                                        }
-                                    }
-
-                                    // Refine Reasoning Text just before adding to history
-                                    if (toolCallJsonDetected) {
-                                        const reasoningMatch = currentAccumulatedTextForStep.match(/(.*?)```json[\s\S]*```$/s);
-                                        if (reasoningMatch && reasoningMatch[1]) {
-                                            reasoningTextForHistory = reasoningMatch[1].trim();
-                                            logger.debug(`[Stream Callback - Loop ${loopCount}] Final reasoning text extracted (length: ${reasoningTextForHistory.length}).`);
-                                        } else {
-                                            logger.warn(`[Stream Callback - Loop ${loopCount}] Could not extract reasoning text on completion. Using accumulated stream text as fallback.`);
-                                            // Fallback to whatever was actually streamed/accumulated IF extraction fails
-                                            reasoningTextForHistory = this.accumulatedText; 
-                                        }
-                                    } else {
-                                        // No tool detected at all, the full accumulated text is the reasoning
-                                        reasoningTextForHistory = this.accumulatedText; 
-                                    }
-
-                                    if (currentToolCall) {
-                                        // --- Tool Call Was Detected --- 
-                                        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Executing tool: ${currentToolCall.tool} (Loop ${loopCount})`);
-                                        this.turnContext.steps.push({ tool: currentToolCall.tool, args: currentToolCall.args, resultSummary: 'Executing...', isStreaming: true });
-                                        this._sendStreamEvent('tool_call', { toolName: currentToolCall.tool, input: currentToolCall.args });
-
-                                        try {
-                                            const toolResult = await this.toolDispatcher(currentToolCall.tool, currentToolCall.args);
-                                            logger.debug(`Tool dispatch completed (Loop ${loopCount}). Result:`, toolResult);
-                                            const resultSummary = this._summarizeToolResult(toolResult);
-                                            const lastStep = this.turnContext.steps[this.turnContext.steps.length - 1];
-                                            if (lastStep) lastStep.resultSummary = resultSummary;
-                                            this._sendStreamEvent('tool_result', {
-                                                toolName: currentToolCall.tool,
-                                                status: toolResult.error ? 'error' : 'success',
-                                                output: resultSummary,
-                                                error: toolResult.error || null
-                                            });
-
-                                            if (toolResult.error) {
-                                                const toolErrorMessage = `Tool execution failed: ${toolResult.error}`;
-                                                logger.warn(`Tool ${currentToolCall.tool} returned an error state:`, toolResult.error);
-                                                finalOutcome = { status: 'error', error: toolErrorMessage, aiResponseText: this.accumulatedText };
-                                                await super._updatePromptHistoryRecord('error', this.accumulatedText, toolErrorMessage, this.turnContext.generatedReportCode);
-                                                this._sendStreamEvent('error', { message: toolErrorMessage });
-                                                resolveProcessing(); // End overall processing on tool error
-                                                rejectStep(new Error(toolErrorMessage)); // End this step with error
-                                            } else {
-                                                // --- Tool Success --- 
-                                                // ... (check for generate_report_code completion) ...
-                                                
-                                                // Format tool result for LLM history
-                                                const toolResultForHistory = this._formatToolResultForLLM(currentToolCall.tool, toolResult);
-                                                // --- Use captured reasoning text for history --- 
-                                                llmContext.history.push({ role: 'model', parts: [{ text: reasoningTextForHistory || '' }] }); 
-                                                llmContext.history.push(toolResultForHistory);
-                                                resolveStep(); 
-                                            }
-                                        } catch (toolError) {
-                                            const toolErrorMessage = `Tool execution failed: ${toolError.message}`;
-                                            logger.error(`Error THROWN during tool execution (Loop ${loopCount}): ${currentToolCall.tool}. Message: ${toolError.message}`, { stack: toolError.stack });
-                                            this._sendStreamEvent('tool_result', { /* ... error details */ });
-                                            finalOutcome = { status: 'error', error: toolErrorMessage, aiResponseText: this.accumulatedText };
-                                            await super._updatePromptHistoryRecord('error', this.accumulatedText, toolErrorMessage, this.turnContext.generatedReportCode);
-                                            this._sendStreamEvent('error', { message: toolErrorMessage });
-                                            resolveProcessing(); // End overall processing
-                                            rejectStep(toolError); // Reject step promise
-                                        }
-                                    } else {
-                                        // --- No Tool Call: Final Text Response --- 
-                                        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] LLM finished loop ${loopCount} with final text response.`);
-                                        finalOutcome = { status: 'completed', error: null, aiResponseText: this.accumulatedText }; // Use accumulated text (which excluded JSON)
-                                        await super._updatePromptHistoryRecord('completed', this.accumulatedText, null, this.turnContext.generatedReportCode);
-                                        this._sendStreamEvent('completed', { finalContent: this.accumulatedText });
-                                        resolveProcessing(); 
-                                        resolveStep();
-                                    }
-                                    break;
-                                case 'error':
-                                    const llmErrorMessage = data.message || 'Unknown streaming error from LLM';
-                                    logger.error(`[Stream Callback - Loop ${loopCount}] Received error from LLM stream: ${llmErrorMessage}`);
-                                    stepCompleted = true;
-                                    finalOutcome = { status: 'error', error: llmErrorMessage, aiResponseText: this.accumulatedText };
-                                    await super._updatePromptHistoryRecord('error', this.accumulatedText, llmErrorMessage, this.turnContext.generatedReportCode);
-                                    this._sendStreamEvent('error', { message: llmErrorMessage });
-                                    resolveProcessing(); // Resolve overall promise (with error state)
-                                    rejectStep(new Error(llmErrorMessage)); // Reject step promise
-                                    break;
-                                default:
-                                    logger.warn(`[Stream Callback - Loop ${loopCount}] Unhandled event type: ${eventType}`);
-                            }
-                        } catch (callbackError) {
-                            logger.error(`[Stream Callback - Loop ${loopCount}] Internal error: ${callbackError.message}`, { callbackError });
-                            stepCompleted = true;
-                            const internalMessage = `Internal callback error: ${callbackError.message}`;
-                            finalOutcome = { status: 'error', error: internalMessage, aiResponseText: this.accumulatedText };
-                            try {
-                                await super._updatePromptHistoryRecord('error', this.accumulatedText, internalMessage, this.turnContext.generatedReportCode);
-                                this._sendStreamEvent('error', { message: internalMessage });
-                            } catch (finalError) { logger.error(`Failed to report internal callback error: ${finalError.message}`); }
-                            rejectProcessing(callbackError); // Reject overall promise
-                            rejectStep(callbackError); // Reject step promise
-                        }
-                    }; // End streamCallback definition
-
-                    // --- Initiate LLM call for this step ---
-                    logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Calling LLM for step ${loopCount}. History length: ${llmContext.history.length}`);
-                    this._sendStreamEvent('thinking', {}); // Indicate thinking before each LLM call
-                    await promptService.streamLLMReasoningResponse(llmContext, streamCallback);
-                    logger.info(`[Agent Loop - STREAMING ${this.sessionId}] LLM stream initiated for step ${loopCount}. Callback will handle result.`);
-
-                }); // End stepPromise definition
-
-                // Await the completion of the current step (LLM response + potential tool execution)
-                try {
-                    await stepPromise;
-                    // Check if the overall process was completed/resolved within the step's callback
-                    if (finalOutcome.status === 'completed' || finalOutcome.status === 'error') {
-                         logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Loop break condition met after step ${loopCount}. Status: ${finalOutcome.status}`);
-                         break; // Exit the while loop
-                    }
-                     logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Step ${loopCount} completed successfully, continuing loop.`);
-                } catch (stepError) {
-                    logger.error(`[Agent Loop - STREAMING ${this.sessionId}] Step ${loopCount} failed: ${stepError.message}. Ending loop.`);
-                     // Ensure finalOutcome reflects the error if not already set
-                     if (finalOutcome.status !== 'error') {
-                         finalOutcome = { status: 'error', error: stepError.message, aiResponseText: this.accumulatedText };
-                     }
-                    break; // Exit the while loop on step failure
-                }
-
-            } // --- End Main Agent Loop (while) ---
-
-            if (loopCount >= MAX_LOOPS) {
-                 logger.warn(`[Agent Loop - STREAMING ${this.sessionId}] Reached max loop count (${MAX_LOOPS}). Forcing completion.`);
-                 finalOutcome = { status: 'error', error: 'Agent reached maximum steps.', aiResponseText: this.accumulatedText };
-                 await super._updatePromptHistoryRecord('error', this.accumulatedText, finalOutcome.error, this.turnContext.generatedReportCode);
-                 this._sendStreamEvent('error', { message: finalOutcome.error });
-                 resolveProcessing(); // Ensure promise is resolved
-            } else if (finalOutcome.status === 'unknown') {
-                 // Loop finished without explicit completed/error (shouldn't happen ideally)
-                 logger.warn(`[Agent Loop - STREAMING ${this.sessionId}] Loop finished unexpectedly with unknown status.`);
-                 finalOutcome = { status: 'error', error: 'Agent finished unexpectedly.', aiResponseText: this.accumulatedText };
-                 await super._updatePromptHistoryRecord('error', this.accumulatedText, finalOutcome.error, this.turnContext.generatedReportCode);
-                 this._sendStreamEvent('error', { message: finalOutcome.error });
-                 resolveProcessing();
-            }
-
-            // --- Wait for the overall completion signal ---
-            // This might be redundant now if resolveProcessing is called correctly in all end paths
-            // await processingCompletePromise;
-            logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Overall processing completion signal received. Final outcome: ${finalOutcome.status}`);
-
-
-        } catch (error) {
-            logger.error(`[Agent Loop - STREAMING ${this.sessionId}] Top-level error: ${error.message}`, { error });
-            if (finalOutcome.status === 'unknown') {
-                finalOutcome = { status: 'error', error: error.message || 'Unknown agent error', aiResponseText: this.accumulatedText };
-            }
-            if (finalOutcome.status !== 'completed') {
-                try {
-                    const errorMessage = finalOutcome.error || error.message || 'Unknown error';
-                    await super._updatePromptHistoryRecord('error', this.accumulatedText || null, errorMessage, this.turnContext.generatedReportCode);
-                    this._sendStreamEvent('error', { message: errorMessage });
-                } catch (reportingError) { logger.error(`Error reporting top-level error: ${reportingError.message}`); }
-            }
-             // Ensure promise is resolved/rejected if an error happens before it's settled
-             if (typeof rejectProcessing === 'function') { // Check if rejectProcessing is defined
-                 try { rejectProcessing(error); } catch (e) { /* ignore */ }
-             }
-
-            return finalOutcome;
-        } finally {
-            logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Reached finally block. Final Status: ${finalOutcome.status}`);
-             // Send a final 'end' event AFTER the main promise resolves/rejects
-             // Ensure this doesn't race with 'completed' or 'error' events
-             // Maybe delay slightly? Or rely on client handling?
-             // For now, let's send it to signal HTTP response end.
-             this._sendStreamEvent('end', { status: finalOutcome.status }); // Send final status
-        }
-
-        logger.info(`[Agent Loop - STREAMING ${this.sessionId}] Returning final outcome:`, finalOutcome);
-        return finalOutcome;
-    }
-
-    // --- ADD HELPER FOR STREAMING PARSE --- 
-    _tryParseToolCall(textChunk) {
-         // Use the parsing logic from the base class
-         return super._tryParseJsonToolCall(textChunk);
-    }
+     // Execute the main loop
+     return await executor.runAgentLoopWithStreaming(userMessage || '', sessionDatasetIds || []);
 }
 
-module.exports = {
-    AgentOrchestrator,
-    StreamingAgentOrchestrator
-};
-
+module.exports = { runAgent }; // Export only the runner function

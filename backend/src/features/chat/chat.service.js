@@ -3,7 +3,7 @@ const PromptHistory = require('./prompt.model');
 const { createTask } = require('../../shared/services/cloudTasks.service');
 const config = require('../../shared/config');
 const logger = require('../../shared/utils/logger');
-const { StreamingAgentOrchestrator } = require('./agent.service');
+const { runAgent } = require('./agent.service');
 
 /**
  * Creates a new chat session
@@ -291,81 +291,52 @@ const getChatMessages = async (sessionId, userId, limit = 50, skip = 0) => {
 };
 
 /**
- * Handles a streaming chat request, adding a message to chat history and
- * streaming the AI's response back via Server-Sent Events (SSE).
- * @param {string} sessionId - The chat session ID
- * @param {string} userId - The user ID
- * @param {string} promptText - The user's message
- * @param {Array} selectedDatasetIds - Array of dataset IDs to use for context
- * @param {Object} responseStream - Express response object used as SSE stream
- * @returns {Promise<void>}
+ * Handles a streaming chat request: validates input, creates messages,
+ * runs the agent orchestrator, and streams events back to the client via SSE.
+ *
+ * @async
+ * @param {string} sessionId - The ID of the chat session.
+ * @param {string} userId - The ID of the user making the request.
+ * @param {string} promptText - The user's message text.
+ * @param {string[]} [selectedDatasetIds=[]] - Array of dataset IDs selected for context.
+ * @param {object} responseStream - The Express response object used as the Server-Sent Events stream.
+ * @throws {Error} Throws errors for validation failures or agent execution issues.
  */
 const handleStreamingChatRequest = async (sessionId, userId, promptText, selectedDatasetIds = [], responseStream) => {
   try {
     logger.info(`Starting streaming chat response for session ${sessionId}, user ${userId}`);
     
-    // Verify session exists and belongs to user
-    const session = await ChatSession.findOne({
-      _id: sessionId,
-      userId
-    });
-
+    // Validate session and user access (assuming ChatSession.findOne handles authorization or it's done before)
+    const session = await ChatSession.findOne({ _id: sessionId, userId: userId }); // Or broader team access check
     if (!session) {
-      sendStreamEvent(responseStream, 'error', { message: 'Chat session not found or unauthorized' });
-      responseStream.end();
-      throw new Error('Chat session not found or unauthorized');
+      throw new Error('Chat session not found or access denied.');
     }
 
-    // Check if this is the first message in the session
-    const messageCount = await PromptHistory.countDocuments({ chatSessionId: sessionId });
-    const isFirstMessage = messageCount === 0;
-    let finalDatasetIds = [];
+    // Ensure dataset IDs are valid strings (basic check)
+    const finalDatasetIds = (Array.isArray(selectedDatasetIds) ? selectedDatasetIds : []).filter(id => typeof id === 'string' && id.length > 0);
 
-    if (isFirstMessage) {
-      // First message: Require datasets and associate them with the session
-      if (!selectedDatasetIds || selectedDatasetIds.length === 0) {
-        sendStreamEvent(responseStream, 'error', { message: 'At least one dataset must be selected for the first message in a chat session.' });
-        responseStream.end();
-        throw new Error('At least one dataset must be selected for the first message in a chat session.');
-      }
-      session.associatedDatasetIds = selectedDatasetIds;
-      finalDatasetIds = selectedDatasetIds;
-    } else {
-      // Subsequent messages: Use the datasets already associated with the session
-      finalDatasetIds = session.associatedDatasetIds || [];
-      if (finalDatasetIds.length === 0) {
-        logger.warn(`Session ${sessionId} has subsequent messages but no associated datasets. This might indicate an issue.`);
-      }
-    }
-
-    // Create a new user message
+    // Create user message placeholder
     const userMessage = new PromptHistory({
       userId,
       chatSessionId: sessionId,
       promptText,
       selectedDatasetIds: finalDatasetIds,
       messageType: 'user',
-      status: 'completed',
+      status: 'completed', // User message is always completed instantly
       createdAt: new Date()
     });
-
     await userMessage.save();
 
-    // Update the session updatedAt timestamp and save associated datasets if first message
-    session.updatedAt = new Date();
-    await session.save();
-
-    // Create a placeholder for the AI response
+    // Create AI message placeholder
     const aiMessage = new PromptHistory({
-      userId,
+      userId, // Store user ID for potential ownership checks later
       chatSessionId: sessionId,
-      promptText: "",  // Will be populated during streaming
+      promptText: "",  // Will be populated by the agent or finalized
       selectedDatasetIds: finalDatasetIds,
       messageType: 'ai_report',
       status: 'processing',
       createdAt: new Date()
     });
-
     await aiMessage.save();
 
     // Send initial events to confirm receipt and provide message IDs
@@ -379,50 +350,65 @@ const handleStreamingChatRequest = async (sessionId, userId, promptText, selecte
       status: 'processing'
     });
     
-    // Create and run a streaming agent orchestrator
-    const streamingAgent = new StreamingAgentOrchestrator(
-      userId,
-      session.teamId || null,
-      sessionId,
-      aiMessage._id.toString(),
-      (eventType, eventData) => sendStreamEvent(responseStream, eventType, eventData)
-    );
-    
-    // Run the agent loop with streaming
+    // --- Use the new runAgent function --- 
+    const agentParams = {
+        userId,
+        teamId: session.teamId || null,
+        sessionId,
+        aiMessagePlaceholderId: aiMessage._id.toString(),
+        sendEventCallback: (eventType, eventData) => sendStreamEvent(responseStream, eventType, eventData),
+        userMessage: promptText,
+        sessionDatasetIds: finalDatasetIds,
+        // TODO: Potentially fetch and pass initialPreviousAnalysisData / initialPreviousGeneratedCode here
+        // based on the session or previous messages if needed for context carry-over.
+        initialPreviousAnalysisData: null, // Placeholder
+        initialPreviousGeneratedCode: null // Placeholder
+    };
+
     try {
-      await streamingAgent.runAgentLoopWithStreaming(promptText, finalDatasetIds);
+      // Call the exported runAgent function
+      const finalResult = await runAgent(agentParams);
       
-      // Send a final 'end' event
-      sendStreamEvent(responseStream, 'end', { status: 'completed' });
-      
-      // Close the stream
-      responseStream.end();
-      
-      logger.info(`Streaming chat response completed for session ${sessionId}, message ${aiMessage._id}`);
-    } catch (streamingError) {
-      logger.error(`Error in streaming agent: ${streamingError.message}`, { error: streamingError });
-      sendStreamEvent(responseStream, 'error', { message: streamingError.message });
-      responseStream.end();
-      
-      // Update the AI message to error state if the streaming failed
-      await PromptHistory.findByIdAndUpdate(aiMessage._id, {
-        status: 'error',
-        errorMessage: `Streaming error: ${streamingError.message}`
-      });
-    }
-  } catch (error) {
-    logger.error(`Failed to handle streaming chat request: ${error.message}`, { error });
-    // If the error wasn't sent through the stream yet (e.g., during session validation)
-    // we try to send it, but the function calling this should also handle any errors thrown
-    try {
-      if (responseStream && !responseStream.writableEnded) {
-        sendStreamEvent(responseStream, 'error', { message: error.message });
+      // runAgent now handles updating PromptHistory internally, 
+      // and should send a 'final_result' event via the callback.
+
+      // We still need to ensure the stream is properly ended.
+      // The final_result event might be the last thing sent.
+      if (!responseStream.writableEnded) {
+          logger.info(`Stream for session ${sessionId}, message ${aiMessage._id} closing after agent completion (Status: ${finalResult.status}).`);
+          sendStreamEvent(responseStream, 'end', { status: finalResult.status }); // Send explicit end event
+          responseStream.end();
+      } else {
+          logger.warn(`Stream for session ${sessionId}, message ${aiMessage._id} was already ended before explicit closure.`);
+      }
+
+    } catch (agentError) {
+      // Errors caught within runAgent should ideally be handled there (updating DB, sending error event).
+      // This catch block handles potential unexpected errors *from* runAgent itself, or errors it re-throws.
+      logger.error(`Error running agent for session ${sessionId}: ${agentError.message}`, { error: agentError });
+      if (!responseStream.writableEnded) {
+        // Ensure an error event is sent if the stream is still open
+        sendStreamEvent(responseStream, 'error', { message: `Agent execution failed: ${agentError.message}` });
+        sendStreamEvent(responseStream, 'end', { status: 'error' }); // Send explicit end event with error status
         responseStream.end();
       }
-    } catch (streamError) {
-      logger.error(`Failed to send error event to stream: ${streamError.message}`);
+      // No need to update PromptHistory here, runAgent should handle it on failure.
     }
-    throw error;
+  } catch (error) {
+    // Catch errors from initial setup (session validation, message creation)
+    logger.error(`Failed to handle streaming chat request for session ${sessionId}: ${error.message}`, { error });
+    // Try to send error through stream if possible
+    if (responseStream && !responseStream.writableEnded) {
+      try {
+        sendStreamEvent(responseStream, 'error', { message: error.message });
+        sendStreamEvent(responseStream, 'end', { status: 'error' });
+        responseStream.end();
+      } catch (streamError) {
+        logger.error(`Failed to send setup error event to stream: ${streamError.message}`);
+      }
+    }
+    // Re-throw the error so the controller knows something went wrong
+    throw error; 
   }
 };
 
