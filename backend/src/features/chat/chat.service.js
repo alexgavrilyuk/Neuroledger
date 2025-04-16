@@ -266,9 +266,9 @@ const getChatMessages = async (sessionId, userId, limit = 50, skip = 0) => {
     }
     
     // Get messages for this session, sorted by creation date
-    // Explicitly select fields, including aiGeneratedCode and reportAnalysisData
+    // Explicitly select fields
     const messages = await PromptHistory.find({ chatSessionId: sessionId })
-      .select('+aiGeneratedCode +reportAnalysisData') // Ensure both fields are included
+      .select('+aiGeneratedCode +reportAnalysisData +steps +messageFragments') // Include steps and fragments
       .sort({ createdAt: 1 })
       .skip(skip)
       .limit(limit)

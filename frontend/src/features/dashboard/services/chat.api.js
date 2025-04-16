@@ -159,6 +159,9 @@ export const streamChatMessage = (sessionId, promptText, selectedDatasetIds = []
                 case 'agent:error':
                   if (eventHandlers.onError) eventHandlers.onError(data);
                   break;
+                case 'agent:final_answer':
+                   if (eventHandlers.onAgentFinalAnswer) eventHandlers.onAgentFinalAnswer(data);
+                   break;
                 case 'user_message_created':
                   if (eventHandlers.onUserMessageCreated) eventHandlers.onUserMessageCreated(data);
                    break;

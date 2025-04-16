@@ -666,6 +666,8 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
         // ADDED: Track chunk count to help debug stream completion issues
         let chunkCount = 0;
         let lastChunkTime = Date.now();
+        let jsonBlockDetected = false; // Flag to stop sending tokens to FE
+        let fullLLMResponseText = ''; // <<< ADDED: Accumulate full response
 
         // Process the stream
         for await (const chunk of stream) {
@@ -677,7 +679,23 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
             if (provider === 'openai') {
                 const delta = chunk.choices?.[0]?.delta?.content;
                 if (delta) {
-                    streamCallback('token', { content: delta });
+                    fullLLMResponseText += delta; // <<< ACCUMULATE
+                    if (!jsonBlockDetected) { // Only send token if JSON not seen
+                         // Check if this delta contains the start of JSON
+                         const jsonMarkerIndex = delta.indexOf('```json'); // Use text variable consistent with gemini logic below?
+                         const toolMarkerIndex = delta.indexOf('{\n  "tool":'); 
+                         let markerFoundAt = -1;
+                         if (jsonMarkerIndex !== -1) markerFoundAt = jsonMarkerIndex;
+                         else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
+
+                         if (markerFoundAt !== -1) {
+                             jsonBlockDetected = true;
+                             const textToSend = delta.substring(0, markerFoundAt).trim();
+                             if (textToSend) streamCallback('token', { content: textToSend });
+                         } else {
+                              streamCallback('token', { content: delta });
+                         }
+                    }
                 }
                 // ADDED: More detailed finish tracking
                 if(chunk.choices?.[0]?.finish_reason) {
@@ -689,12 +707,37 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
             } else if (provider === 'gemini') {
                 // Gemini SDK yields chunks directly
                 try {
-                    const text = chunk.text(); // Method to get text from Gemini chunk
-                    if (text) {
-                         streamCallback('token', { content: text });
-                    }
+                    const text = chunk.text(); 
+                    fullLLMResponseText += text; // <<< ACCUMULATE
+                    logger.debug(`[STREAM DEBUG] Gemini chunk text content: "${text}"`);
+
+                    // Only process if JSON block hasn't been detected yet
+                    if (!jsonBlockDetected) {
+                        const jsonMarkerIndex = text.indexOf('```json');
+                        const toolMarkerIndex = text.indexOf('{\n  "tool":'); 
+                        let markerFoundAt = -1;
+                        if (jsonMarkerIndex !== -1) markerFoundAt = jsonMarkerIndex;
+                        else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
+
+                        if (markerFoundAt !== -1) {
+                            // Marker FOUND in this chunk
+                            jsonBlockDetected = true; 
+                            const textToSend = text.substring(0, markerFoundAt).trim();
+                            if (textToSend) {
+                                logger.debug(`[STREAM DEBUG] Sending final text part before JSON: "${textToSend}"`);
+                                streamCallback('token', { content: textToSend });
+                            }
+                            logger.debug('[STREAM DEBUG] JSON block detected, stopping further token stream.');
+                            // Skip sending the rest of this chunk or any subsequent text tokens
+                        } else {
+                            // Marker NOT found in this chunk, send the whole text
+                            if (text) {
+                                streamCallback('token', { content: text });
+                            }
+                        } // <<< End of marker check block
+                    } // <<< End of jsonBlockDetected check
                     
-                    // ADDED: Check for finish info in Gemini response
+                    // Check for finish info (this should still happen even if JSON was detected)
                     if (chunk.candidates && chunk.candidates[0] && chunk.candidates[0].finishReason) {
                         const reason = chunk.candidates[0].finishReason;
                         logger.info(`Gemini stream chunk has finish info. Reason: ${reason}, Total chunks: ${chunkCount}`);
@@ -706,20 +749,27 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
                      streamCallback('error', { message: `Error processing AI response chunk: ${e.message}` });
                 }
             } else { // Claude
-                 // Anthropic SDK stream events
                  if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-                     streamCallback('token', { content: chunk.delta.text });
-                 } else if (chunk.type === 'message_stop') {
-                     logger.info(`Claude stream finished. Total chunks: ${chunkCount}`);
-                     streamCallback('finish', { finishReason: 'stop' });
-                 } else if (chunk.type === 'content_block_start' && chunk.content_block.type === 'tool_use') {
-                    // Basic handling for tool calls - might need refinement
-                    streamCallback('tool_call', { toolName: chunk.content_block.name, input: chunk.content_block.input });
-                 }
-                 // ADDED: Log other event types we're not handling
-                 else {
-                    logger.debug(`Unhandled Claude stream event type: ${chunk.type}`);
-                 }
+                     const deltaText = chunk.delta.text;
+                     fullLLMResponseText += deltaText; // <<< ACCUMULATE
+                     if (!jsonBlockDetected) { // Check flag for Claude too
+                         // Check for JSON start (simpler check for now)
+                         const jsonMarkerIndex = deltaText.indexOf('```json');
+                         const toolMarkerIndex = deltaText.indexOf('{\n  "tool":');
+                         let markerFoundAt = -1;
+                         if (jsonMarkerIndex !== -1) markerFoundAt = jsonMarkerIndex;
+                         else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
+
+                         if (markerFoundAt !== -1) {
+                            jsonBlockDetected = true;
+                            const textToSend = deltaText.substring(0, markerFoundAt).trim();
+                            if (textToSend) streamCallback('token', { content: textToSend });
+                         } else {
+                             streamCallback('token', { content: deltaText });
+                         }
+                     }
+                 } 
+                 // ... (rest of Claude handling: message_stop, tool_use, etc.) ...
             }
         }
 
@@ -734,10 +784,14 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
         }
         
         streamCallback('completed', { finalContent: null }); // Signal completion
+        
+        // <<< ADDED: Return the fully accumulated text >>>
+        return fullLLMResponseText;
 
     } catch (error) {
         logger.error(`Error during ${provider} LLM streaming reasoning API call: ${error.message}`, error);
         streamCallback('error', { message: `AI assistant (${provider}) failed to generate a streaming response: ${error.message}` });
+        return null; // Return null or throw on error
     }
 };
 

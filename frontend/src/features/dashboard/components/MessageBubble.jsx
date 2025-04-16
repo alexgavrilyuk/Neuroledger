@@ -175,62 +175,29 @@ const MessageBubble = ({ message, onViewReport }) => {
             mainContentElement = <p className="italic text-gray-500 dark:text-gray-400">No response content.</p>;
          }
 
-        // --- Build Tool Status Indicator (if applicable) ---
+        // --- Tool Status Indicator (Live/Active Step) --- 
         let toolStatusIndicator = null;
-        // Show indicator only when actively using a tool OR if the status is thinking
-         if (isThinking) {
-             toolStatusIndicator = (
-                 <div className="mt-2 flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-600 pt-2">
-                     <FaMicrochip className={`h-4 w-4 animate-pulse`}/>
-                     <span className="italic font-medium">
-                         Thinking...
-                     </span>
-                 </div>
-             );
-         } else if (isUsingTool && message.toolName) {
-            const toolInfo = toolDisplayMap[message.toolName] || toolDisplayMap.default;
-            let bannerClasses = "mt-2 border rounded-lg p-2 flex items-center gap-2 text-xs font-medium"; // Base classes
-            let specificBannerContent = null;
-
-            if (message.toolStatus === 'running') {
-                bannerClasses += " bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800/50 text-blue-700 dark:text-blue-300";
-                specificBannerContent = (
-                    <>
-                        <toolInfo.Icon className="h-4 w-4 animate-spin flex-shrink-0" />
-                        <span>{toolInfo.text}</span>
-                    </>
-                );
-            } else if (message.toolStatus === 'success') {
-                bannerClasses += " bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800/50 text-green-700 dark:text-green-300";
-                specificBannerContent = (
-                     <>
-                         <FaCheckCircle className="h-4 w-4 flex-shrink-0" />
-                         <span className="truncate" title={message.toolOutput}>
-                             {message.toolName} completed: {message.toolOutput}
-                         </span>
-                     </>
-                 );
-            } else if (message.toolStatus === 'error') {
-                 bannerClasses += " bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-700/50 text-red-700 dark:text-red-300";
-                 specificBannerContent = (
-                     <>
-                         <FaTimesCircle className="h-4 w-4 flex-shrink-0" />
-                         <span className="truncate" title={message.toolError}>
-                             {message.toolName} failed: {message.toolError}
-                         </span>
-                     </>
-                 );
-            }
-
-            if (specificBannerContent) {
-                toolStatusIndicator = <div className={bannerClasses}>{specificBannerContent}</div>;
-            }
+        if (isThinking) {
+            toolStatusIndicator = (
+                <div className="mt-2 flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-600 pt-2">
+                    <FaMicrochip className={`h-4 w-4 animate-pulse`}/>
+                    <span className="italic font-medium">Thinking...</span>
+                </div>
+            );
+        } else if (isUsingTool && message.toolName) {
+           const toolInfo = toolDisplayMap[message.toolName] || toolDisplayMap.default;
+           toolStatusIndicator = (
+                <div className={`mt-2 border rounded-lg p-2 flex items-center gap-2 text-xs font-medium bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800/50 text-blue-700 dark:text-blue-300`}>
+                    <toolInfo.Icon className="h-4 w-4 animate-spin flex-shrink-0" />
+                    <span>{toolInfo.text}</span>
+                </div>
+           );
         }
 
-        // --- Build Report Button (if applicable) ---
+        // --- Report Button --- 
         let reportButton = null;
         if (isReportAvailable) {
-            reportButton = (
+             reportButton = (
                 <div className="mt-3 flex items-center border-t border-gray-200 dark:border-gray-600 pt-3">
                     <Button
                         variant="primary"
@@ -245,21 +212,59 @@ const MessageBubble = ({ message, onViewReport }) => {
             );
         }
 
-        // --- Combine Elements ---
-        // Render the container only if there's something to show
-        if (mainContentElement || toolStatusIndicator || reportButton) {
-            return (
-                 <div> {/* Use simple div, remove space-y-2 if not needed */}
-                    {mainContentElement}
-                    {toolStatusIndicator}
-                    {reportButton}
-                 </div>
-            );
-        } else {
-            // Fallback if somehow nothing is rendered (e.g., empty completed message)
-             return <p className="italic text-gray-500 dark:text-gray-400">...</p>; 
-        }
+        // --- Render Fragments --- 
+        const renderedFragments = (message.fragments || []).map((fragment, index) => {
+            if (fragment.type === 'text') {
+                // Render markdown for text fragments
+                 return (
+                     <div key={`frag-${index}-text`} className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
+                         <ReactMarkdown>{fragment.content}</ReactMarkdown>
+                     </div>
+                 );
+            } else if (fragment.type === 'step') {
+                // Render the styled step UI element
+                const toolInfo = toolDisplayMap[fragment.tool] || toolDisplayMap.default;
+                const isSuccess = !fragment.error;
+                const statusText = fragment.error ? `Error: ${fragment.error}` : fragment.resultSummary || 'Completed';
+                
+                return (
+                    <div 
+                        key={`frag-${index}-step-${fragment.tool}`} 
+                        title={statusText} 
+                        className={`flex items-center gap-x-2 text-xs p-1.5 rounded mt-2 mb-1 ${isSuccess ? 'text-gray-600 dark:text-gray-300' : 'text-red-600 dark:text-red-300'}`}
+                    >
+                        {isSuccess ? (
+                            <FaCheckCircle className="h-3.5 w-3.5 flex-shrink-0 text-green-500" />
+                        ) : (
+                            <FaTimesCircle className="h-3.5 w-3.5 flex-shrink-0 text-red-500" />
+                        )}
+                        <toolInfo.Icon className="h-3.5 w-3.5 flex-shrink-0" />
+                        <span className="font-medium truncate">{toolInfo.text.replace(/ing\.\.\./, 'ed').replace(/\.\.\./, '')}</span> 
+                    </div>
+                );
+            } else if (fragment.type === 'error') { // Handle potential error fragments 
+                 return (
+                     <div key={`frag-${index}-error`} className="text-red-600 dark:text-red-300 font-medium flex items-center gap-x-2 mt-2 text-xs">
+                         <FaExclamationTriangle className="h-4 w-4 flex-shrink-0" />
+                         <span>{fragment.content}</span>
+                     </div>
+                 );
+            }
+            return null;
+        });
 
+        // --- Final Combined Return --- 
+        return (
+            <div className="space-y-1"> 
+                 {renderedFragments} 
+                 {/* Blinking cursor */} 
+                 {message.isStreaming && !isUsingTool && !isThinking && <span className="inline-block w-2 h-4 bg-gray-700 dark:bg-gray-300 ml-1 animate-blink"></span>}
+                 {/* Live status indicator */} 
+                 {toolStatusIndicator} 
+                 {/* Report button */} 
+                 {reportButton}
+             </div>
+        );
     };
 
     return (

@@ -59,6 +59,11 @@ const PromptHistorySchema = new mongoose.Schema({
     enum: ['pending', 'processing', 'generating_code', 'fetching_data', 'execution_pending', 'executing_code', 'completed', 'error_generating', 'error_fetching_data', 'error_executing', 'error'],
     default: 'pending',
   },
+  // --- ADDED: Store message fragments for interleaved display --- 
+  messageFragments: {
+      type: [mongoose.Schema.Types.Mixed], // Array of {type: 'text', content: ...} or {type: 'step', ...}
+      default: []
+  },
   // --- End Phase 5 Fields ---
   errorMessage: {
       type: String
