@@ -162,12 +162,13 @@ const Modal = ({
           {!hideCloseButton && (
             <button
               type="button"
-              className="absolute top-4 right-4 z-10 p-1 rounded-md text-gray-400 hover:text-gray-500 dark:hover:text-gray-300
-              focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:ring-offset-gray-800"
+              className="absolute top-3 right-3 z-10 p-1.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300
+              focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 dark:ring-offset-gray-800
+              flex items-center justify-center"
               onClick={onClose}
             >
               <span className="sr-only">Close</span>
-              <XMarkIcon className="h-6 w-6" aria-hidden="true" />
+              <XMarkIcon className="h-5 w-5" aria-hidden="true" />
             </button>
           )}
 

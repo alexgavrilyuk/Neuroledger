@@ -342,7 +342,7 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
     return (
         <div className="w-full h-[75vh] flex flex-col border border-gray-200 dark:border-gray-700 rounded-md overflow-hidden bg-gray-50 dark:bg-gray-800/50">
              {/* Top Bar with Status and Export Button */}
-             <div className="p-2 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-4">
+             <div className="py-3 px-2 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-4">
                  {/* Status Area */}
                  <div className={`flex items-center justify-start gap-x-2 text-xs flex-grow overflow-hidden ${
                      iframeStatus === 'error' ? 'text-red-700 dark:text-red-200'
@@ -357,7 +357,7 @@ const ReportViewer = ({ reportInfo, themeName = 'light' }) => {
                  </div>
 
                  {/* Export Button Area */}
-                 <div className="flex-shrink-0">
+                 <div className="flex-shrink-0 mr-10">
                      <Button
                          variant="outline" // Or your desired button style
                          size="sm"
