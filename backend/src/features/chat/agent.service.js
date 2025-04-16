@@ -332,7 +332,7 @@ class AgentExecutor {
                                 logger.warn(`[Agent Stream CB] Received unhandled event type: ${eventType}`);
                         }
                         
-                        // --- ADDED: Append text fragments from LLM stream --- 
+                        // --- ADDED: Append text fragments from LLM stream ---
                         if (eventType === 'token' && data.content) {
                             const fragments = this.turnContext.intermediateResults.fragments;
                             const lastFragment = fragments[fragments.length - 1];
@@ -341,8 +341,6 @@ class AgentExecutor {
                             } else {
                                 fragments.push({ type: 'text', content: data.content });
                             }
-                            // Forward token to frontend
-                            this._sendStreamEvent('token', data);
                         }
                         // Need to handle other events like 'finish', 'completed', 'error' as before
                          else if (eventType === 'finish') {
@@ -396,13 +394,15 @@ class AgentExecutor {
                 if (isFinalAnswer && this.turnContext.finalAnswer) {
                      const fragments = this.turnContext.intermediateResults.fragments;
                      const lastFragment = fragments[fragments.length - 1];
+                     // Ensure final text is always the last text fragment
                      if (lastFragment && lastFragment.type === 'text') {
-                         lastFragment.content = this.turnContext.finalAnswer; // Overwrite last text fragment with final answer?
-                                                                     // Or append? Let's try overwrite/ensure it's the definitive final text.
+                         // Overwrite last text fragment if it exists to ensure this is the final text
+                         lastFragment.content = this.turnContext.finalAnswer; 
                      } else {
+                         // Otherwise, add it as a new fragment
                          fragments.push({ type: 'text', content: this.turnContext.finalAnswer });
                      }
-                     logger.debug('[AgentExecutor] Added final answer as text fragment.');
+                     logger.debug('[AgentExecutor] Added/Updated final answer as text fragment.');
                 }
                 // --- END ADDED --- 
 

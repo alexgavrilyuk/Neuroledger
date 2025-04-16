@@ -243,7 +243,8 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
     6.  **DO NOT** include any code for parsing CSV data (like \`.split("\n")\`), as the data is already parsed and provided in \`inputData\`.
     7.  **DO NOT** define functions or variables outside the main script body unless necessary for clarity (helper functions are okay).
     8.  Handle potential data issues gracefully (e.g., missing values, unexpected types) using checks and default values where appropriate.
-    9.  Output ONLY the raw Javascript code. Do not include any explanations, comments outside the code, or markdown formatting.
+    9.  **CRITICAL - Data Access:** Column names in the \`inputData\` objects (derived from the CSV headers) might not exactly match the concepts mentioned in the \`Analysis Goal\` (e.g., \`row['Actual Income']\` vs \`row['Income']\`, case differences like \`row['budget expenses']\` vs \`row['BudgetExpenses']\`). Your code **MUST** dynamically find the correct column/property name for each required metric (like income, budget income, expenses, budget expenses, and specific expense categories). Do this by iterating through \`Object.keys(row)\` and using case-insensitive comparisons or keyword matching (e.g., find a key containing \`income\` but not \`budget\`, find a key containing \`expense\` but not \`budget\`) to locate the relevant data field within each \`row\` object before attempting to parse its value. Do NOT rely on hardcoded, case-sensitive property names found only in the schema example.
+    10. Output ONLY the raw Javascript code. Do not include any explanations, comments outside the code, or markdown formatting.
 
     **Example (Conceptual):**
     \`\`\`javascript
