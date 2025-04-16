@@ -8,15 +8,15 @@ The chat feature allows users to:
 - Create and manage chat sessions
 - Send messages with dataset context
 - Receive AI-generated responses orchestrated by the agent
-- **Stream AI responses in real-time** (see text being generated, tools being used, etc.)
-- Observe agent status (thinking, using tools, generating code, executing code, generating report) via WebSockets
+- Stream AI responses in real-time with Server-Sent Events (SSE)
+- Observe agent status (thinking, using tools, generating code, executing code, generating report)
 - Leverage the agent's ability to:
   - Access dataset context through tools
   - Parse CSV data
   - Generate and execute sandboxed Node.js code for data extraction and analysis
   - Generate React component code for visualizing analysis results
 - View generated reports in a modal
-- View past conversations
+- View past conversations with history summaries for context preservation
 
 ## Models
 
@@ -35,7 +35,7 @@ Represents a persistent conversation thread owned by a user or associated with a
 ```
 
 ### PromptHistory
-Stores messages, agent steps, and potentially generated React code.
+Stores messages, agent steps, intermediate fragments, and potentially generated React code.
 
 ```javascript
 {
@@ -58,14 +58,17 @@ Stores messages, agent steps, and potentially generated React code.
               'execution_pending', 'executing_code', 'completed', 
               'error_generating', 'error_fetching_data', 'error_executing', 'error'),
   errorMessage: String?,
-  agentSteps: [ 
+  steps: [ // Used to track the agent's actions
     {
       tool: String,
       args: Object,
       resultSummary: String,
-      attempt: Number, // Tracking retries
-      isForced: Boolean // Whether step was forced by system logic
+      error: String?,
+      attempt: Number // For tracking retries
     }
+  ],
+  messageFragments: [ // Used to store interleaved text/step fragments for display
+    { type: 'text', content: String } | { type: 'step', tool: String, resultSummary: String, error: String?, status: String }
   ],
   createdAt: Date
 }
@@ -84,27 +87,27 @@ Stores messages, agent steps, and potentially generated React code.
 
 * **Chat Messages:**
   * `POST /chats/:sessionId/messages` - Send user message, queue agent task
-  * `GET /chats/:sessionId/stream` - **NEW: Stream chat responses in real-time** using Server-Sent Events (SSE)
+  * `GET /chats/:sessionId/stream` - Stream chat responses in real-time using Server-Sent Events (SSE)
   * `GET /chats/:sessionId/messages` - List messages (user and final AI responses)
   * `GET /chats/:sessionId/messages/:messageId` - Get specific message
 
 * **Prompt Generation:**
-  * `POST /prompts` - Simple code generation (may be deprecated)
+  * `POST /prompts` - Standalone code generation (may be deprecated)
 
 * **Asynchronous Processing:**
-  * `POST /internal/chat-ai-worker` - Internal endpoint for Cloud Tasks worker, triggers the Agent Orchestrator
+  * `POST /internal/chat-ai-worker` - Internal endpoint for Cloud Tasks worker, triggers the Agent Executor
 
 ### Controllers
 
 * `chat.controller.js`:
   * `createSession`, `getSessions`, `getSession`, `updateSession`, `deleteSession` - Basic session CRUD
   * `sendMessage` - Creates user message, queues agent task
-  * `streamMessage` - **NEW: Handles streaming chat responses via SSE**
+  * `streamMessage` - Handles streaming chat responses via SSE
   * `getMessages`, `getMessage` - Retrieves message history
   * `handleWorkerRequest` - Receives Cloud Tasks webhook, delegates to taskHandler
 
 * `prompt.controller.js`:
-  * `generatePrompt` - Simple code generation endpoint
+  * `generateAndExecuteReport` - Simple code generation endpoint
 
 ### Services
 
@@ -112,44 +115,62 @@ Stores messages, agent steps, and potentially generated React code.
   * Core business logic for chat sessions (CRUD)
   * `addMessage` - Creates user message, AI placeholder, queues Cloud Task
   * `getChatMessages` - Fetches messages with proper selection of aiGeneratedCode
-  * `handleStreamingChatRequest` - **NEW: Handles streaming chat responses**
-  * `sendStreamEvent` - **NEW: Helper to send SSE events**
+  * `handleStreamingChatRequest` - Handles streaming chat responses via SSE
+  * `sendStreamEvent` - Helper to send SSE events
 
 * `agent.service.js`:
-  * Core of the agent architecture - `AgentOrchestrator` class
-  * `StreamingAgentOrchestrator` class - **NEW: Extends AgentOrchestrator with streaming capabilities**
-  * `runAgentLoop` - Manages the Reason → Act → Observe loop
-  * `runAgentLoopWithStreaming` - **NEW: Streaming version of runAgentLoop**
-  * `_prepareChatHistory` - Fetches and potentially summarizes history
-  * `_emitAgentStatus` - Sends WebSocket events for frontend status updates
-  * `_sendStreamEvent` - **NEW: Sends SSE events for streaming responses**
-  * `toolDispatcher` - Routes tool calls to implementations
-  * Tool implementations:
-    * `_listDatasetsTool` - Lists available datasets
-    * `_getDatasetSchemaTool` - Gets schema for a dataset
-    * `_parseCsvDataTool` - Parses CSV data from a dataset
-    * `_generateDataExtractionCodeTool` - Generates parser code
-    * `_executeBackendCodeTool` - Executes parser code on dataset
-    * `_generateAnalysisCodeTool` - Generates analysis code
-    * `_executeAnalysisCodeTool` - Executes analysis code on parsed data
-    * `_generateReportCodeTool` - Generates React code for visualization
-    * `_answerUserTool` - Formats final text response
+  * `runAgent` - Main exported function that orchestrates AI agent processing
+  * `AgentExecutor` class - Core implementation of the agent reasoning loop
+    * `runAgentLoopWithStreaming` - Manages the Reason → Act → Observe loop with streaming
+    * `_prepareLLMContextForStream` - Prepares context for LLM calls
+    * `_parseCompleteLLMResponse` - Extracts tool calls or final answers from LLM responses
+    * `_executeTool` - Dynamically loads and executes tool implementations
+    * `_storeIntermediateResult` - Manages temporary data between agent steps
+    * `_updatePromptHistoryRecord` - Updates database with results
+    * `_emitAgentStatus`, `_sendStreamEvent` - Sends events for frontend status updates
+
+* `agent.utils.js`:
+  * `summarizeToolResult` - Generates readable summaries from tool results
+  * `parseLLMResponse` - Extracts tool calls from raw LLM output
+  * `formatToolResultForLLM` - Formats results for inclusion in next LLM context
+
+* `agentContext.service.js`:
+  * `getInitialUserTeamContext` - Fetches user/team settings
+  * `preloadDatasetContext` - Pre-fetches dataset schemas and samples
+  * `prepareChatHistoryAndArtifacts` - Fetches previous conversations and artifacts
 
 * `prompt.service.js`:
   * `getLLMReasoningResponse` - Calls LLM with context for agent reasoning
+  * `streamLLMReasoningResponse` - Streaming version that yields chunks as they arrive
   * `assembleContext` - Gathers user/team context
-  * `generateSandboxedCode` - Generates Node.js code for data extraction/analysis
+  * `generateAnalysisCode` - Generates Node.js code for data analysis
   * `generateReportCode` - Generates React code for visualization
-  * `summarizeChatHistory` - Condenses long conversation histories
+  * `getUserModelPreference` - Selects LLM provider (Claude, Gemini, OpenAI) based on user preference
 
 * `chat.taskHandler.js`:
   * `workerHandler` - Receives Cloud Tasks webhook
-  * Instantiates `AgentOrchestrator` with context
+  * Initializes agent with context
   * Handles final WebSocket event emission
+
+### Tool System
+
+The agent uses a modular tool system defined in the `tools/` directory:
+
+* `tool.definitions.js` - Declares available tools and their interfaces
+* Individual tool implementations:
+  * `list_datasets.js` - Lists available datasets
+  * `get_dataset_schema.js` - Gets schema for a dataset
+  * `parse_csv_data.js` - Parses CSV data from a dataset
+  * `generate_analysis_code.js` - Generates Node.js analysis code
+  * `execute_analysis_code.js` - Executes analysis code on parsed data
+  * `generate_report_code.js` - Generates React component code
+  * `answer_user.js` - Signals final text response
+
+Tools are dynamically loaded in `agent.service.js` and executed based on the LLM's reasoning.
 
 ### System Prompt Template (`system-prompt-template.js`)
 * Exports `generateAgentSystemPrompt`
-* Structures detailed instructions to Claude about:
+* Structures detailed instructions to the LLM about:
   * Agent loop (Reason, Act, Observe)
   * Available tools and their usage
   * Formatting of tool calls and results
@@ -157,123 +178,211 @@ Stores messages, agent steps, and potentially generated React code.
   * Analysis result formatting
   * Error handling guidelines
 
-## Workflow
+## Workflows
+
+### Standard Message Flow
 
 1. **Session Initialization:**
-   * User creates/selects chat session (`POST /chats` or frontend UI)
+   * User creates/selects chat session
    * Session stored in `ChatSession` collection
 
-2. **Message Submission (Standard):**
-   * User sends message (`POST /chats/:sessionId/messages`)
-   * `chat.controller.sendMessage` calls `chat.service.addMessage`
+2. **Message Submission:**
+   * Frontend submits via `POST /chats/:sessionId/messages`
    * User message saved in `PromptHistory` (status='completed')
    * AI placeholder created in `PromptHistory` (status='processing')
    * If first message, selectedDatasetIds associated with session
    * Cloud Task queued targeting `/internal/chat-ai-worker`
 
-3. **Message Submission (Streaming):**
-   * User sends message via streaming endpoint (`GET /chats/:sessionId/stream?promptText=...`)
-   * `chat.controller.streamMessage` calls `chat.service.handleStreamingChatRequest`
-   * User message saved in `PromptHistory` (status='completed')
-   * AI placeholder created in `PromptHistory` (status='processing')
-   * If first message, selectedDatasetIds associated with session
-   * `StreamingAgentOrchestrator` initialized and processing starts immediately
-   * SSE connection remains open for streaming events
-
-4. **Asynchronous Processing (Standard):**
+3. **Asynchronous Processing:**
    * Cloud Task triggers `chat.controller.handleWorkerRequest`
    * Controller delegates to `chat.taskHandler.workerHandler`
-   * TaskHandler initializes `AgentOrchestrator` with context
+   * TaskHandler initializes AgentExecutor with context
 
-5. **Agent Loop (Standard or Streaming):**
-   * Agent emits `agent:thinking` WebSocket event (and corresponding SSE event if streaming)
-   * Agent prepares context (including history summarization if needed)
+4. **Agent Loop:**
+   * Agent emits `agent:thinking` WebSocket event
+   * Agent prepares context (via `agentContext.service.js`)
    * Agent enters loop of:
-     * Call LLM for reasoning/next action
+     * Call `prompt.service.getLLMReasoningResponse` for next action
      * Parse LLM response for tool calls
      * Execute tools as needed
-     * Emit status via WebSocket events (and corresponding SSE events if streaming)
+     * Emit status via WebSocket events
      * Continue until final answer or max iterations
 
-6. **Tool Execution Flow:**
-   * **Data Context:** `list_datasets` → `get_dataset_schema`
-   * **Data Extraction:** `parse_csv_data` OR `generate_data_extraction_code` → `execute_backend_code`
-   * **Analysis:** `generate_analysis_code` → `execute_analysis_code`
-   * **Visualization:** `generate_report_code` (If user requested visualization)
-   * **Final Answer:** `_answerUserTool`
-
-7. **Response Completion (Standard):**
+5. **Response Completion:**
    * Agent updates `PromptHistory` record with final response
    * TaskHandler emits `chat:message:completed` or `chat:message:error`
    * Frontend receives events and updates UI
 
-8. **Response Completion (Streaming):**
-   * Agent updates `PromptHistory` record with final response
-   * Agent sends final SSE events (`completed` or `failed`)
-   * SSE connection is closed
-   * Frontend has already been incrementally updating the UI during streaming
+### Streaming Message Flow
 
-9. **Report Viewing:**
-   * If `aiGeneratedCode` present, frontend shows "View Report" button
-   * User clicks button → Frontend displays report in modal using sandboxed iframe
+1. **Session Initialization:**
+   * Same as Standard Flow
 
-## WebSocket Events
+2. **Message Submission:**
+   * Frontend connects to `GET /chats/:sessionId/stream?promptText=...`
+   * User message saved in `PromptHistory` (status='completed')
+   * AI placeholder created in `PromptHistory` (status='processing')
+   * If first message, selectedDatasetIds associated with session
+   * SSE connection remains open
 
-The agent and task handler emit events to `user:{userId}` room:
+3. **Streaming Processing:**
+   * `streamMessage` controller calls `handleStreamingChatRequest`
+   * Service initializes `runAgent` with streaming callback
+   * Agent loop starts and sends streaming events
+
+4. **Event Streaming:**
+   * Backend streams events in real-time via SSE:
+     * `user_message_created` - Confirms user message creation
+     * `ai_message_created` - Provides AI message placeholder ID
+     * `token` - Contains a chunk of generated text
+     * `agent:thinking` - Indicates reasoning in progress
+     * `agent:using_tool` - Shows tool execution with details
+     * `agent:tool_result` - Returns tool execution results
+     * `agent:final_answer` - Provides final text and results
+
+5. **Response Completion:**
+   * Agent updates `PromptHistory` record with final state
+   * Agent sends final `end` event and closes the SSE connection
+   * Frontend has already been incrementally updating the UI
+
+### Tool Execution Flow
+
+The agent orchestrates a multi-step pipeline:
+
+1. **Dataset Context:**
+   * Uses `list_datasets` to discover available datasets
+   * Uses `get_dataset_schema` to understand data structure
+
+2. **Data Parsing:**
+   * Uses `parse_csv_data` to convert CSV content to structured data
+   * Stores parsed data in intermediate context
+
+3. **Analysis:**
+   * Uses `generate_analysis_code` to create code for data analysis
+   * Uses `execute_analysis_code` to run code on parsed data
+   * Stores analysis results in intermediate context
+
+4. **Visualization:**
+   * Uses `generate_report_code` to create React components
+   * Stores generated code in `PromptHistory.aiGeneratedCode`
+
+5. **Final Response:**
+   * Uses `_answerUserTool` to provide final text response
+   * Update `PromptHistory` record with complete status
+   * Frontend handles displaying both text and report visualization
+
+## Event Streams
+
+### Server-Sent Events (SSE)
+
+The streaming endpoint emits events to the client via SSE:
+
+* **`start`**
+  * Initial event when streaming begins
+
+* **`user_message_created`**
+  * Confirms user message has been saved
+  * Payload: `{ messageId: string, status: 'completed' }`
+
+* **`ai_message_created`**
+  * Provides the AI message placeholder ID
+  * Payload: `{ messageId: string, status: 'processing' }`
+
+* **`token`**
+  * Contains a chunk of generated text being streamed
+  * Payload: `{ content: string }`
 
 * **`agent:thinking`**
-  * Emitted when agent starts processing
-  * Payload: `{ messageId, sessionId }`
+  * Indicates the agent is thinking/reasoning
+  * Payload: `{ messageId: string, sessionId: string }`
 
 * **`agent:using_tool`**
-  * Emitted before tool execution
-  * Payload: `{ messageId, sessionId, toolName, args }`
+  * Indicates a tool is being called
+  * Payload: `{ messageId: string, sessionId: string, toolName: string, args: object }`
 
 * **`agent:tool_result`**
-  * Emitted after tool execution
-  * Payload: `{ messageId, sessionId, toolName, resultSummary }`
+  * Provides the result or error from a tool call
+  * Payload: `{ messageId: string, sessionId: string, toolName: string, resultSummary: string, error?: string }`
+
+* **`agent:final_answer`**
+  * Provides the final answer text and any generated code
+  * Payload: `{ messageId: string, sessionId: string, text: string, aiGeneratedCode?: string, analysisResult?: object }`
 
 * **`agent:error`**
-  * Emitted on agent error
-  * Payload: `{ messageId, sessionId, error }`
+  * Indicates an error during agent processing
+  * Payload: `{ messageId: string, sessionId: string, error: string }`
+
+* **`error`**
+  * Contains error information for stream-level errors
+  * Payload: `{ message: string }`
+
+* **`end`**
+  * Final event before the connection closes
+  * Payload: `{ status: 'completed'|'error' }`
+
+### WebSocket Events
+
+For backward compatibility, the agent also emits events to the WebSocket room `user:{userId}`:
 
 * **`chat:message:completed`**
   * Emitted when processing completes successfully
-  * Payload: `{ message: PromptHistory, sessionId }`
+  * Payload: `{ message: PromptHistory, sessionId: string }`
 
 * **`chat:message:error`**
   * Emitted on final error
-  * Payload: `{ messageId, sessionId, error }`
+  * Payload: `{ messageId: string, sessionId: string, error: string }`
 
 ## Advanced Features
 
+### Multi-Provider LLM Support
+
+The agent supports multiple LLM providers:
+- Claude (Anthropic)
+- Gemini (Google)
+- OpenAI
+
+User preferences are stored in `User.settings.preferredAiModel` and retrieved via `getUserModelPreference()`.
+
 ### History Summarization
-When chat history exceeds `HISTORY_SUMMARIZATION_THRESHOLD` (10 messages), the agent uses the LLM to create a concise summary of previous messages to maintain context while reducing token usage.
+
+When chat history exceeds a threshold, the agent uses the LLM to create a concise summary of previous messages, maintaining context while reducing token usage.
+
+### Dynamic Tool Loading
+
+Tools are implemented as separate module files in the `tools/` directory and dynamically loaded at runtime by the `AgentExecutor`. This allows for easy extension of the agent's capabilities.
 
 ### Tool Retry Logic
-The agent implements retry logic for tool failures, attempting to recover from transient errors up to `MAX_TOOL_RETRIES` (1) times before failing.
 
-### Multi-Step Analysis Pipeline
-The agent orchestrates a multi-step analysis pipeline:
-1. Dataset parsing (extract CSV data)
-2. Analysis code generation (create code to analyze parsed data)
-3. Analysis execution (run code on parsed data)
-4. Report code generation (create visualization of analysis results)
+The agent implements retry logic for tool failures:
+- Tracks `toolErrorCounts` for each turn
+- Attempts to recover from transient errors up to `MAX_TOOL_RETRIES` times
+- Falls back gracefully if retries are exhausted
 
-### Context Preservation
-Previous analysis results and generated code can be referenced in subsequent turns, enabling modifications to reports without re-running analysis.
+### Context & Artifact Preservation
+
+Previous analysis results and generated code are preserved between turns:
+- `agentContext.service.js` fetches previous results via `prepareChatHistoryAndArtifacts()`
+- This allows the agent to reference or modify previous work without re-running analysis
+- Frontend can display report visualizations for any message with `aiGeneratedCode`
+
+### Message Fragments
+
+The agent now stores detailed message fragments for UI rendering:
+- `messageFragments` array in `PromptHistory` model
+- Contains interleaved `text` and `step` fragments
+- Allows for rich, conversational displays showing the agent's work
 
 ## Dependencies
 
 * `cloudTasks.service.js` - Async task queueing
-* `socket.js` - Real-time agent status updates
-* Claude API - LLM reasoning/code generation
+* `socket.js` - WebSocket for real-time updates
+* Anthropic Claude API / Gemini API / OpenAI API - LLM reasoning/code generation
 * `dataset.service.js` - Dataset access
 * `codeExecution.service.js` - Sandboxed code execution
 
 ## Security Considerations
 
-* Standard API auth and subscription checks for all endpoints
+* Standard API auth and subscription checks
 * `internal/chat-ai-worker` endpoint protected by Cloud Tasks OIDC token validation
 * Code execution runs in Node.js `vm` module with strict context control
   * Limited execution time (timeout)
@@ -286,13 +395,6 @@ Previous analysis results and generated code can be referenced in subsequent tur
 
 * Tool execution errors handled with potential retry
 * Maximum iterations safeguard prevents infinite loops
-* WebSocket events provide real-time error feedback
+* SSE/WebSocket events provide real-time error feedback
 * Graceful fallbacks for agent failure scenarios
-
-## Future Enhancements
-
-* Enhanced context management for even longer conversations
-* More sophisticated code execution sandboxing
-* Improved error recovery strategies
-* Support for more data formats beyond CSV
-* Multi-dataset analysis in a single query 
+* Comprehensive error logging at all stages

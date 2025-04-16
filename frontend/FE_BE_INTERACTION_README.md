@@ -1,11 +1,8 @@
-# FE_BE_INTERACTION_README.md
-# ** UPDATED FILE - Dataset Deletion, Proxy Upload, Team Access, and Chat/Prompt Integration **
-
 # NeuroLedger: Frontend / Backend API Interaction
 
 This document defines the contract for communication between the NeuroLedger frontend (React) and backend (Node.js/Express) services.
 
-**Last Updated:** April 7, 2024
+**Last Updated:** April 16, 2025
 
 ## 1. Base API URL
 
@@ -61,18 +58,27 @@ This document defines the contract for communication between the NeuroLedger fro
         * `selectedDatasetIds` (string, optional): Comma-separated list of dataset IDs to use for context (required for first message in a session).
     *   **Server-Sent Event Types:**
         * `start`: Initial event when streaming begins.
+          * Payload: `{}`
         * `user_message_created`: Confirms user message has been saved with its ID.
+          * Payload: `{ messageId: string, status: 'completed' }`
         * `ai_message_created`: Provides the AI message placeholder ID.
-        * `thinking`: Indicates the AI is thinking/reasoning.
+          * Payload: `{ messageId: string, status: 'processing' }`
         * `token`: Contains a chunk of generated text being streamed.
-        * `tool_call`: Indicates a tool is being called (e.g., executing code, fetching data).
-        * `tool_result`: Provides the result or error from a tool call.
-        * `generated_code`: Contains generated code (e.g., for data visualization).
-        * `completed`: Indicates successful completion with final content.
-        * `failed`: Indicates an error occurred during generation.
+          * Payload: `{ content: string }`
+        * `agent:thinking`: Indicates the agent is thinking/reasoning.
+          * Payload: `{ messageId: string, sessionId: string }`
+        * `agent:using_tool`: Indicates a tool is being called.
+          * Payload: `{ messageId: string, sessionId: string, toolName: string, args: object }`
+        * `agent:tool_result`: Provides the result from a tool call.
+          * Payload: `{ messageId: string, sessionId: string, toolName: string, resultSummary: string, error?: string }`
+        * `agent:final_answer`: Contains the final answer text and potential code.
+          * Payload: `{ messageId: string, sessionId: string, text: string, aiGeneratedCode?: string, analysisResult?: object }`
+        * `agent:error`: Indicates an error during agent processing.
+          * Payload: `{ messageId: string, sessionId: string, error: string }`
         * `error`: Contains error information if something went wrong.
+          * Payload: `{ message: string }`
         * `end`: Final event before the connection closes.
-    *   **Event Data Format:** All events have a `data` field containing a JSON-serialized object with event-specific properties.
+          * Payload: `{ status: 'completed'|'error' }`
     *   **Errors:** 
         * Standard HTTP errors (`400`, `401`, `403`, `404`, `500`) for initial connection issues.
         * SSE `error` events for problems during streaming.
@@ -109,9 +115,9 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `401`, `404` (User not found), `500`.
 
 *   **`PUT /api/v1/users/me/settings`**
-    *   **Description:** Updates the settings (currency, dateFormat, aiContext) for the currently authenticated user. Only provided fields are updated.
+    *   **Description:** Updates the settings (currency, dateFormat, aiContext, preferredAiModel) for the currently authenticated user. Only provided fields are updated.
     *   **Auth:** Required (`protect`).
-    *   **Request Body:** `{ "currency"?: string, "dateFormat"?: string, "aiContext"?: string }`
+    *   **Request Body:** `{ "currency"?: string, "dateFormat"?: string, "aiContext"?: string, "preferredAiModel"?: string }`
     *   **Success (200 OK):** `{ status: 'success', data: User }` (Full updated User object)
     *   **Errors:** `401`, `404` (User not found), `500`.
 
@@ -348,7 +354,7 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ---
 
-### Feature: Chat (Agent Architecture - Phase 3 + Refinements)
+### Feature: Chat (Agent Architecture)
 
 *   **`POST /api/v1/chats`**
     *   **Description:** Creates a new chat session for the authenticated user.
@@ -387,7 +393,7 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400` (Invalid ID), `401`, `403`, `404` (Not found or inaccessible), `500`.
 
 *   **`POST /api/v1/chats/{sessionId}/messages`**
-    *   **Description:** Sends a user message... Agent now attempts to **summarize long chat histories** and uses tools...
+    *   **Description:** Sends a user message, creates AI message placeholder, and queues agent processing.
     *   **Auth:** Required (`protect`, `requireActiveSubscription`).
     *   **Request Params:** `sessionId` (MongoDB ObjectId).
     *   **Request Body:** `{ "promptText": string, "selectedDatasetIds"?: string[] }` (`promptText` required, `selectedDatasetIds` required only for the first message).
@@ -395,11 +401,11 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400` (Invalid ID, Missing `promptText`, Missing `selectedDatasetIds` on first message), `401`, `403`, `404` (Session not found or inaccessible), `500`.
 
 *   **`GET /api/v1/chats/{sessionId}/messages`**
-    *   **Description:** Gets messages (user messages and final AI agent responses). **AI responses may include generated React code (`aiGeneratedCode`) for visualization.**
+    *   **Description:** Gets messages (user messages and final AI agent responses). AI responses may include generated React code (`aiGeneratedCode`) for visualization and message fragments (`messageFragments`) for UI rendering.
     *   **Auth:** Required (`protect`, `requireActiveSubscription`).
     *   **Request Params:** `sessionId` (MongoDB ObjectId).
     *   **Query Params:** `limit` (number, default 50), `skip` (number, default 0).
-    *   **Success (200 OK):** `{ status: 'success', data: [PromptHistory] }`
+    *   **Success (200 OK):** `{ status: 'success', data: [PromptHistory] }` including `aiGeneratedCode` and `messageFragments` if present.
     *   **Errors:** `400` (Invalid ID), `401`, `403`, `404` (Session not found or inaccessible), `500`.
 
 *   **`GET /api/v1/chats/{sessionId}/messages/{messageId}`**
@@ -409,8 +415,18 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Success (200 OK):** `{ status: 'success', data: PromptHistory }`
     *   **Errors:** `400` (Invalid IDs), `401`, `403`, `404` (Message/Session not found or inaccessible), `500`.
 
+*   **`GET /api/v1/chats/{sessionId}/stream`**
+    *   **Description:** Streams chat responses in real-time using Server-Sent Events (SSE). Same functionality as described in the Chat Streaming section.
+    *   **Auth:** Required (`protect`, `requireActiveSubscription`).
+    *   **Request Params:** `sessionId` (MongoDB ObjectId).
+    *   **Query Params:**
+        * `promptText` (string, required): The user's message text.
+        * `selectedDatasetIds` (string, optional): Comma-separated list of dataset IDs.
+    *   **Server-Sent Events:** As described in the Chat Streaming section.
+    *   **Errors:** As described in the Chat Streaming section.
+
 *   **`POST /api/v1/internal/chat-ai-worker`**
-    *   **Description:** Internal worker endpoint invoking the Agent Orchestrator. Agent now performs **history summarization** and has access to report generation tools.
+    *   **Description:** Internal worker endpoint invoking the Agent Executor. Agent performs history summarization and has access to dataset tools, code generation, code execution, and report generation.
     *   **Auth:** Internal - Validated via Cloud Tasks OIDC Token (`validateCloudTaskToken` middleware).
     *   **Request Body:** `{ "sessionId": string, "userId": string, "userMessageId": string, "aiMessageId": string, "sessionDatasetIds": string[] }` (Payload from the task queue, including the dataset IDs associated with the session).
     *   **Success (200 OK):** `{ status: 'success', message: 'Task received' }` (Returned immediately, actual processing happens in background).
@@ -451,7 +467,7 @@ This document defines the contract for communication between the NeuroLedger fro
 
 ## 5. Key Data Models (Typescript Interfaces)
 
-*(Note: These interfaces represent the shape of data exchanged via the API/WebSockets. Backend models may have additional methods or virtuals.)*
+*(Note: These interfaces represent the shape of data exchanged via the API/WebSockets/SSE. Backend models may have additional methods or virtuals.)*
 
 ### SubscriptionInfo (Part of User)
 ```typescript
@@ -477,6 +493,7 @@ interface User {
     currency: string;
     dateFormat: string;
     aiContext?: string;
+    preferredAiModel?: string; // 'claude', 'gemini', or 'openai'
   };
   subscriptionInfo: SubscriptionInfo;
   onboardingCompleted: boolean;
@@ -620,7 +637,8 @@ interface ChatSession {
   title: string; // User-defined or default title
   associatedDatasetIds?: string[]; // Datasets used for context in this session (set by first message)
   createdAt: string; // ISO Date string
-  lastActivityAt: string; // ISO Date string (updated on new message or agent completion)
+  updatedAt: string; // ISO Date string (updated on new message or agent completion)
+  lastActivityAt: string; // ISO Date string (used for sorting)
 }
 ```
 
@@ -632,50 +650,118 @@ interface PromptHistory {
   teamId?: string | null;
   chatSessionId: string; 
   promptText?: string; 
-  messageType: 'user' | 'ai_report';
+  messageType: 'user' | 'ai_report' | 'ai_error' | 'system';
+  selectedDatasetIds: string[]; // Datasets used for context
+  contextSent?: string; // Info sent in prompt for debugging
   aiResponseText?: string; // Final textual response/summary from the agent
-  aiGeneratedCode?: string; // <<< Contains generated React code if a report was created
-  status: 'processing' | 'completed' | 'error';
+  aiGeneratedCode?: string; // Contains generated React code if a report was created
+  status: 'pending' | 'processing' | 'generating_code' | 'fetching_data' |
+          'execution_pending' | 'executing_code' | 'completed' |
+          'error_generating' | 'error_fetching_data' | 'error_executing' | 'error';
   errorMessage?: string;
-  agentSteps?: Array<{ 
-      tool: string; // Includes Phase 3: generate_report_code
-      args: object;
-      resultSummary: string;
+  executionResult?: string;
+  durationMs?: number;
+  claudeModelUsed?: string;
+  // Reports
+  reportAnalysisData?: any; // Stores the processed JSON from analysis
+  reportDatasets?: Array<{
+    name: string,
+    content: string | null,
+    error: string | null
   }>;
+  // Agent details
+  steps?: Array<{
+    tool: string;
+    args: object;
+    resultSummary: string;
+    error?: string;
+    attempt: number;
+  }>;
+  messageFragments?: Array<
+    { type: 'text', content: string } |
+    { type: 'step', tool: string, resultSummary: string, error?: string, status: string }
+  >;
   createdAt: string; // ISO Date string
-  // reportDatasets field might be populated by the task handler or agent if needed for rendering
-  reportDatasets?: Array<{ name: string, content: string | null, error: string | null }>; 
 }
 ```
 
-## 6. WebSocket Events (Chat Feature - Agent Architecture)
+## 6. Event Streams
 
-The following events are emitted by the backend (`agent.service.js` or `chat.taskHandler.js`) to the specific user's room (`user:<userId>`) during AI message processing.
+### Server-Sent Events (SSE)
 
-*   **`agent:thinking`**
-    *   **Payload:** `{ messageId: string, sessionId: string }`
-    *   **Description:** Emitted when the agent starts processing a user message and begins its reasoning loop.
-    *   **Frontend Action:** Display a "Thinking..." status for the corresponding AI message placeholder.
-*   **`agent:using_tool`**
-    *   **Payload:** `{ messageId: string, sessionId: string, toolName: string, args: object }`
-    *   **Description:** Emitted before the agent executes a tool (e.g., `list_datasets`, `get_dataset_schema`, **`generate_data_extraction_code`**, **`execute_backend_code`**).
-    *   **Frontend Action:** Update the AI message status to indicate which tool is being used (e.g., "Accessing dataset list...", "Getting schema for 'Dataset X'...").
-*   **`agent:tool_result`**
-    *   **Payload:** `{ messageId: string, sessionId: string, toolName: string, resultSummary: string }`
-    *   **Description:** Emitted after a tool execution completes (successfully or with an error). `resultSummary` contains a brief summary or error message.
-    *   **Frontend Action:** Optionally update the status (e.g., revert to "Thinking..." or show a brief success/error indicator) before the next agent step or final response.
-*   **`agent:error`**
-    *   **Payload:** `{ messageId: string, sessionId: string, error: string }`
-    *   **Description:** Emitted if a significant error occurs within the agent's main loop (outside of a specific tool error, which is reported via `agent:tool_result`).
-    *   **Frontend Action:** Display an error status for the AI message. This often precedes the final `chat:message:error` event.
-*   **`chat:message:completed`**
-    *   **Payload:** `{ message: PromptHistory, sessionId: string }`
-    *   **Description:** Emitted by the task handler after the agent loop successfully finishes. The `message` object is the final `PromptHistory` record, containing `aiResponseText` and `agentSteps`.
-    *   **Frontend Action:** Replace the AI message placeholder with the final content and status.
-*   **`chat:message:error`**
-    *   **Payload:** `{ messageId: string, sessionId: string, error: string }`
-    *   **Description:** Emitted by the task handler if the agent loop fails or an error occurs after the loop.
-    *   **Frontend Action:** Update the corresponding AI message to display a final error state.
+The streaming endpoint (`GET /api/v1/chats/{sessionId}/stream`) emits events to the client via Server-Sent Events:
+
+* **`start`**
+  * Initial event when streaming begins
+  * Payload: `{}`
+
+* **`user_message_created`**
+  * Confirms user message has been saved
+  * Payload: `{ messageId: string, status: 'completed' }`
+
+* **`ai_message_created`**
+  * Provides the AI message placeholder ID
+  * Payload: `{ messageId: string, status: 'processing' }`
+
+* **`token`**
+  * Contains a chunk of generated text being streamed
+  * Payload: `{ content: string }`
+
+* **`agent:thinking`**
+  * Indicates the agent is thinking/reasoning
+  * Payload: `{ messageId: string, sessionId: string }`
+
+* **`agent:using_tool`**
+  * Indicates a tool is being called
+  * Payload: `{ messageId: string, sessionId: string, toolName: string, args: object }`
+
+* **`agent:tool_result`**
+  * Provides the result or error from a tool call
+  * Payload: `{ messageId: string, sessionId: string, toolName: string, resultSummary: string, error?: string }`
+
+* **`agent:final_answer`**
+  * Provides the final answer text and any generated code
+  * Payload: `{ messageId: string, sessionId: string, text: string, aiGeneratedCode?: string, analysisResult?: object }`
+
+* **`agent:error`**
+  * Indicates an error during agent processing
+  * Payload: `{ messageId: string, sessionId: string, error: string }`
+
+* **`error`**
+  * Contains error information if something went wrong
+  * Payload: `{ message: string }`
+
+* **`end`**
+  * Final event before the connection closes
+  * Payload: `{ status: 'completed'|'error' }`
+
+### WebSocket Events
+
+For backward compatibility, the agent and task handler also emit events to the WebSocket room `user:{userId}`:
+
+* **`agent:thinking`**
+  * Emitted when agent starts processing
+  * Payload: `{ messageId: string, sessionId: string }`
+
+* **`agent:using_tool`**
+  * Emitted before tool execution
+  * Payload: `{ messageId: string, sessionId: string, toolName: string, args: object }`
+
+* **`agent:tool_result`**
+  * Emitted after tool execution
+  * Payload: `{ messageId: string, sessionId: string, toolName: string, resultSummary: string, error?: string }`
+
+* **`agent:error`**
+  * Emitted on agent error
+  * Payload: `{ messageId: string, sessionId: string, error: string }`
+
+* **`chat:message:completed`**
+  * Emitted when processing completes successfully
+  * Payload: `{ message: PromptHistory, sessionId: string }`
+
+* **`chat:message:error`**
+  * Emitted on final error
+  * Payload: `{ messageId: string, sessionId: string, error: string }`
 
 ## 7. Dataset File Upload Flow
 
@@ -693,3 +779,74 @@ The following events are emitted by the backend (`agent.service.js` or `chat.tas
 4.  After successful GCS upload, frontend notifies backend: `POST /api/v1/datasets` with body `{ gcsPath, originalFilename, name?, fileSizeBytes?, teamId? }` (Requires Login + Active Sub). Backend validates permissions (user must be team admin if `teamId` provided).
 5.  Backend parses headers from GCS, creates `Dataset` metadata in DB.
 6.  Backend responds with `201 Created` and the new `Dataset` object.
+
+## 8. Chat Interaction Flows
+
+### Standard Message Flow
+
+1. **Session Initialization:**
+   * User creates/selects chat session via `POST /chats` or `GET /chats`.
+   * Session stored in `ChatSession` collection.
+
+2. **Message Submission:**
+   * Frontend submits via `POST /chats/:sessionId/messages`.
+   * User message saved in `PromptHistory` (status='completed').
+   * AI placeholder created in `PromptHistory` (status='processing').
+   * If first message, selectedDatasetIds associated with session.
+   * Cloud Task queued targeting `/internal/chat-ai-worker`.
+
+3. **Asynchronous Processing:**
+   * Cloud Task triggers `chat.controller.handleWorkerRequest`.
+   * Controller delegates to `chat.taskHandler.workerHandler`.
+   * TaskHandler initializes Agent with context.
+
+4. **Agent Loop:**
+   * Agent executes tool calls as needed.
+   * Emit status via WebSocket events.
+   * Updates `PromptHistory` record with final response.
+
+5. **Response Retrieval:**
+   * Frontend polls or receives WebSocket events.
+   * Displays final AI message with visualization if code was generated.
+
+### Streaming Message Flow
+
+1. **Message Submission:**
+   * Frontend connects to `GET /chats/:sessionId/stream?promptText=...`.
+   * Backend creates user message and AI placeholder.
+   * If first message, selectedDatasetIds associated with session.
+   * SSE connection remains open.
+
+2. **Real-Time Processing:**
+   * Backend streams events in real-time via SSE.
+   * Frontend receives token-by-token text updates.
+   * Frontend receives tool usage and results updates.
+   * Agent simultaneously updates `PromptHistory` record.
+
+3. **Completion:**
+   * Agent sends final `agent:final_answer` and `end` events.
+   * SSE connection closes.
+   * Frontend has the complete message and any generated code.
+
+## 9. Multi-Provider LLM Support
+
+The backend now supports multiple LLM providers. User preferences are stored in the `preferredAiModel` field:
+
+```typescript
+settings: {
+  // Other settings...
+  preferredAiModel?: string; // 'claude', 'gemini', or 'openai'
+}
+```
+
+Model selection is handled by `getUserModelPreference()` in `prompt.service.js`, which returns provider-specific details:
+
+```javascript
+{ provider: 'claude', model: 'claude-3-7-sonnet-20250219' } // Default model
+// OR
+{ provider: 'gemini', model: 'gemini-2.5-pro-preview-03-25' }
+// OR
+{ provider: 'openai', model: 'o3-mini-2025-01-31' }
+```
+
+If the preferred provider is unavailable, the service falls back to Claude.
