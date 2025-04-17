@@ -1,3 +1,9 @@
+// ================================================================================
+// FILE: NeuroLedger copy/backend/src/features/chat/agent.utils.js
+// PURPOSE: Contains utility functions for the agent. parseLLMResponse moved.
+// MODIFIED FILE
+// ================================================================================
+
 const logger = require('../../shared/utils/logger');
 
 /**
@@ -23,9 +29,11 @@ function summarizeToolResult(result) {
         const data = result.result;
         if (typeof data === 'object') {
             // Specific handling for known successful tool result structures
-            if (data.parsedData && typeof data.rowCount === 'number') {
-                return `Success: Parsed data (${data.rowCount} rows).`;
-            }
+             if (data.parsedData && typeof data.rowCount === 'number') {
+                // Check if parsedData is array for accurate summary
+                 const rowCount = Array.isArray(data.parsedData) ? data.parsedData.length : data.rowCount;
+                 return `Success: Parsed data (${rowCount} rows).`;
+             }
             if (typeof data.rowCount === 'number' && Array.isArray(data.columns)) {
                  return `Success: Retrieved data, rows: ${data.rowCount}, columns: [${data.columns.join(', ')}]`;
             }
@@ -35,13 +43,13 @@ function summarizeToolResult(result) {
              if (typeof data.react_code === 'string') {
                  return `Success: Generated React report code snippet (length: ${data.react_code.length}).`;
              }
-             if (Array.isArray(data) && data.length > 0 && data[0]._id && data[0].name) {
+             if (Array.isArray(data.datasets) && data.datasets.length > 0 && data.datasets[0]._id && data.datasets[0].name) {
                 // Heuristic for list_datasets result
-                return `Success: Found ${data.length} dataset(s).`;
+                return `Success: Found ${data.datasets.length} dataset(s).`;
              }
-              if (Array.isArray(data.schemaInfo) && typeof data.rowCount === 'number') {
+              if (Array.isArray(data.schemaInfo)) { // Removed rowCount check as it might not always be present
                  // Heuristic for get_dataset_schema result
-                 return `Success: Retrieved schema (${data.schemaInfo.length} columns, ${data.rowCount} rows).`;
+                 return `Success: Retrieved schema (${data.schemaInfo.length} columns).`;
              }
              if (typeof data.isFinalAnswer === 'boolean' && data.isFinalAnswer) {
                  return 'Success: Final answer signal received.';
@@ -61,91 +69,6 @@ function summarizeToolResult(result) {
 
     // Handle case where tool succeeded but returned no specific 'result' payload
     return 'Tool executed successfully with no specific output.';
-}
-
-
-/**
- * Parses the LLM's complete raw response text (potentially containing JSON) to identify
- * either a valid tool call or determine it's a final textual answer.
- *
- * Looks for a JSON object matching the expected tool call structure {"tool": "<name>", "args": {...}},
- * optionally enclosed in markdown code fences (```json ... ``` or ``` ... ```).
- *
- * If a valid, known tool call is found, it's returned. Otherwise, the entire input
- * text is treated as the final answer.
- *
- * @param {string} llmResponse - The raw text response from the LLM.
- * @param {Array<string>} knownToolNames - An array of valid tool names recognized by the system.
- * @returns {{tool: string, args: object, isFinalAnswer: boolean, textResponse: string|null}} An object indicating the parsed action:
- *   - `tool`: The name of the tool to call, or '_answerUserTool' if it's a final answer.
- *   - `args`: The arguments object for the tool call, or { textResponse: ... } for the final answer.
- *   - `isFinalAnswer`: Boolean indicating if this represents a final answer rather than a tool call.
- *   - `textResponse`: The extracted text if `isFinalAnswer` is true, otherwise null.
- */
-function parseLLMResponse(llmResponse, knownToolNames) {
-    const defaultAnswer = { tool: '_answerUserTool', args: { textResponse: llmResponse?.trim() || '' }, isFinalAnswer: true, textResponse: llmResponse?.trim() || '' };
-
-    if (!llmResponse || typeof llmResponse !== 'string') {
-        logger.warn('LLM response is empty or not a string.');
-        return { ...defaultAnswer, args: { textResponse: 'An error occurred: Empty response from AI.' }, textResponse: 'An error occurred: Empty response from AI.' };
-    }
-
-    const trimmedResponse = llmResponse.trim();
-
-    // Regex to find a JSON object enclosed in optional markdown fences
-    const jsonRegex = /^```(?:json)?\s*(\{[\s\S]*\})\s*```$|^(\{[\s\S]*\})$/m;
-    const jsonMatch = trimmedResponse.match(jsonRegex);
-
-    if (jsonMatch) {
-        const potentialJson = jsonMatch[1] || jsonMatch[2];
-        if (potentialJson) {
-            let sanitizedJsonString = null;
-            try {
-                // Basic sanitization for common issues like unescaped newlines/quotes in code args
-                 sanitizedJsonString = potentialJson.replace(/("code"\s*:\s*")([\s\S]*?)("(?!\\))/gs, (match, p1, p2, p3) => {
-                     const escapedCode = p2
-                         .replace(/\\/g, '\\\\') // Escape backslashes FIRST
-                         .replace(/"/g, '\\"')  // Escape double quotes
-                         .replace(/\n/g, '\\n') // Escape newlines
-                         .replace(/\r/g, '\\r'); // Escape carriage returns
-                     return p1 + escapedCode + p3;
-                 });
-
-                const parsed = JSON.parse(sanitizedJsonString);
-
-                if (parsed && typeof parsed.tool === 'string' && typeof parsed.args === 'object' && parsed.args !== null) {
-                    if (knownToolNames.includes(parsed.tool)) {
-                        logger.debug(`Parsed tool call via regex: ${parsed.tool}`, parsed.args);
-                         // If it's the answer tool called via JSON, ensure textResponse is valid
-                         if (parsed.tool === '_answerUserTool') {
-                             const textResponse = parsed.args.textResponse;
-                            if (typeof textResponse === 'string' && textResponse.trim() !== '') {
-                                 return { tool: parsed.tool, args: parsed.args, isFinalAnswer: true, textResponse: textResponse.trim() };
-                             } else {
-                                 logger.warn('_answerUserTool called via JSON but missing/empty textResponse. Using raw response.');
-                                 return defaultAnswer; // Fallback to raw response
-                            }
-                         }
-                        // Valid tool call found
-                        return { tool: parsed.tool, args: parsed.args, isFinalAnswer: false, textResponse: null };
-                    } else {
-                        logger.warn(`LLM requested unknown tool via JSON: ${parsed.tool}. Treating as final answer.`);
-                        return defaultAnswer;
-                    }
-                } else {
-                    logger.warn('Parsed JSON does not match expected tool structure. Treating as final answer.', parsed);
-                    return defaultAnswer;
-                }
-            } catch (e) {
-                logger.error(`Failed to parse extracted JSON: ${e.message}. Content: ${potentialJson}. Treating as final answer.`);
-                return defaultAnswer;
-            }
-        }
-    }
-
-    // If no valid JSON tool call found, treat the entire response as the final answer.
-    logger.debug('LLM response treated as final answer text (no valid JSON tool call found).');
-    return defaultAnswer;
 }
 
 
@@ -172,7 +95,7 @@ function formatToolResultForLLM(toolName, toolResult) {
      }
      if (toolResult.result !== undefined && toolResult.result !== null) {
          // Special handling for code generation results to avoid flooding context
-         if (toolName === 'generate_analysis_code' || toolName === 'generate_report_code') {
+          if ((toolName === 'generate_analysis_code' || toolName === 'generate_report_code') && typeof toolResult.result === 'object') {
              const codeKey = toolResult.result.code ? 'code' : 'react_code';
              const codeSnippet = toolResult.result[codeKey] || '';
              return JSON.stringify({
@@ -183,7 +106,7 @@ function formatToolResultForLLM(toolName, toolResult) {
              });
          }
           // Special handling for data parsing results
-         if (toolName === 'parse_csv_data' && toolResult.result.parsedData) {
+         if (toolName === 'parse_csv_data' && typeof toolResult.result === 'object' && toolResult.result.parsedData) {
              const rowCount = Array.isArray(toolResult.result.parsedData) ? toolResult.result.parsedData.length : 0;
               // Provide a summary instead of the full data
              return JSON.stringify({
@@ -193,12 +116,25 @@ function formatToolResultForLLM(toolName, toolResult) {
                  // Avoid sending parsed data back into context
              });
          }
+         // Special handling for code execution result
+         if (toolName === 'execute_analysis_code' && typeof toolResult.result === 'object') {
+             try {
+                 const resultString = JSON.stringify(toolResult.result);
+                 const truncatedResult = resultString.substring(0, 500) + (resultString.length > 500 ? '...' : '');
+                 return JSON.stringify({ tool_name: toolName, status: 'success', result_summary: 'Code executed successfully.', result_preview: JSON.parse(truncatedResult) });
+             } catch (e) {
+                 logger.warn(`Could not stringify execute_analysis_code result for LLM context: ${e.message}`);
+                 return JSON.stringify({ tool_name: toolName, status: 'success', result_summary: 'Code executed successfully, result preview unavailable.' });
+             }
+         }
 
          // For other tools, try to stringify the result, truncating if necessary
          try {
              const resultString = JSON.stringify(toolResult.result);
              const truncatedResult = resultString.substring(0, 500) + (resultString.length > 500 ? '...' : '');
-             return JSON.stringify({ tool_name: toolName, status: 'success', result: JSON.parse(truncatedResult) }); // Parse back to object after truncating string
+              // Parse back only if truncation happened, otherwise keep original type
+             const finalResultPayload = resultString.length > 500 ? JSON.parse(truncatedResult) : toolResult.result;
+             return JSON.stringify({ tool_name: toolName, status: 'success', result: finalResultPayload });
          } catch (e) {
              logger.warn(`Could not stringify tool result for LLM context: ${e.message}`);
              return JSON.stringify({ tool_name: toolName, status: 'success', result_summary: 'Tool executed successfully, but result could not be summarized for context.' });
@@ -211,6 +147,6 @@ function formatToolResultForLLM(toolName, toolResult) {
 
 module.exports = {
     summarizeToolResult,
-    parseLLMResponse,
+    // parseLLMResponse, // Removed - logic moved to LLMOrchestrator
     formatToolResultForLLM,
-}; 
+};
