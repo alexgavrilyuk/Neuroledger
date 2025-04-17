@@ -1,14 +1,14 @@
 // ================================================================================
 // FILE: NeuroLedger copy/backend/src/features/chat/agent/ToolExecutor.js
 // PURPOSE: Loads and executes agent tools. Assumes tools are wrapped.
-// NEW FILE
+// MODIFIED: Ignore BaseToolWrapper.js during dynamic loading.
 // ================================================================================
 
 const logger = require('../../../shared/utils/logger');
 const path = require('path');
 const fs = require('fs');
 
-// --- Dynamic Tool Loading (same as in agent.service.js before) ---
+// --- Dynamic Tool Loading ---
 const toolsDirectory = path.join(__dirname, '../tools');
 /** @type {Object<string, Function>} */
 const toolImplementations = {};
@@ -16,7 +16,14 @@ const knownToolNames = [];
 
 try {
     fs.readdirSync(toolsDirectory)
-        .filter(file => file.endsWith('.js') && file !== 'tool.definitions.js' && !file.startsWith('.'))
+        // **** MODIFIED FILTER ****
+        .filter(file =>
+            file.endsWith('.js') &&
+            file !== 'tool.definitions.js' && // Ignore definitions
+            file !== 'BaseToolWrapper.js' && // Ignore the wrapper utility
+            !file.startsWith('.') // Ignore hidden files
+        )
+        // ***********************
         .forEach(file => {
             const toolName = path.basename(file, '.js');
             // Adjust tool name if filename differs (e.g., answer_user.js -> _answerUserTool)
@@ -31,6 +38,7 @@ try {
                      logger.warn(`[ToolExecutor] Failed to load tool ${adjustedToolName}: Module from ${file} does not export a function.`);
                  }
             } catch (error) {
+                // Log the detailed error including the stack if require fails
                 logger.error(`[ToolExecutor] Failed to load tool ${adjustedToolName} from ${file}: ${error.message}`, { stack: error.stack });
             }
         });
@@ -55,7 +63,10 @@ class ToolExecutor {
      * @param {object} args - The arguments provided by the LLM for the tool.
      * @param {object} executionContext - Context required by the tool (e.g., userId, sessionId, callbacks).
      * @param {string} executionContext.userId - The ID of the user.
+     * @param {string} [executionContext.teamId] - The ID of the team context (optional).
      * @param {string} executionContext.sessionId - The ID of the chat session.
+     * @param {any} [executionContext.analysisResult] - Result from previous code execution (passed conditionally).
+     * @param {object} [executionContext.datasetSchemas] - Preloaded schemas (passed conditionally).
      * @param {function(string): Promise<Array<object>|null>} [executionContext.getParsedDataCallback] - Callback for tools needing parsed data.
      * @returns {Promise<object>} The result object from the executed tool (includes status, result/error, args).
      */

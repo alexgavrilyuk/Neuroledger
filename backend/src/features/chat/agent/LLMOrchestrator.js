@@ -1,11 +1,15 @@
 // ================================================================================
 // FILE: NeuroLedger copy/backend/src/features/chat/agent/LLMOrchestrator.js
 // PURPOSE: Handles streaming LLM interaction and parsing the final response.
-// NEW FILE
+// MODIFIED: Corrected import path for getUserModelPreference.
 // ================================================================================
 
 const logger = require('../../../shared/utils/logger');
 const { streamLLMReasoningResponse } = require('../prompt.service'); // Use only the streaming one
+const SystemPromptBuilder = require('./SystemPromptBuilder');
+// **** CORRECTED IMPORT PATH ****
+const { getUserModelPreference } = require('../../../shared/llm_providers/ProviderFactory');
+// *******************************
 
 /**
  * Parses the LLM's complete raw response text (potentially containing JSON) to identify
@@ -15,7 +19,7 @@ const { streamLLMReasoningResponse } = require('../prompt.service'); // Use only
  * @private
  */
 function _parseCompleteLLMResponse(llmResponse, knownToolNames) {
-    // This logic is moved directly from agent.utils.parseLLMResponse
+    // This logic remains the same as provided in the previous step
     const defaultAnswer = { tool: '_answerUserTool', args: { textResponse: llmResponse?.trim() || '' }, isFinalAnswer: true, textResponse: llmResponse?.trim() || '' };
 
     if (!llmResponse || typeof llmResponse !== 'string') {
@@ -90,17 +94,41 @@ function _parseCompleteLLMResponse(llmResponse, knownToolNames) {
  * @returns {Promise<{tool: string, args: object, isFinalAnswer: boolean, textResponse: string|null}>} The parsed action.
  */
 async function getNextActionFromLLM(llmContext, streamCallback, knownToolNames) {
+    // Use the SystemPromptBuilder
+    const builder = new SystemPromptBuilder();
+    const systemPrompt = builder.build(llmContext);
+
+    // Log length for debugging
+    logger.debug(`[LLM Orchestrator] Generated System Prompt Length: ${systemPrompt.length}`);
+
+    // Get user's preferred model using the CORRECTED import
+    const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(llmContext.userId);
+    logger.info(`[LLM Orchestrator] Using ${preferredProvider} model: ${modelToUse} for user ${llmContext.userId}`);
+
+
+    // Prepare API options
+    const apiOptions = {
+        model: modelToUse,
+        system: systemPrompt,
+        messages: [ // Combine history and current query from context
+            ...(llmContext.fullChatHistory || []),
+            { role: "user", content: llmContext.originalQuery }
+        ],
+        max_tokens: 24096,
+        temperature: 0.1,
+        stream: true,
+        userId: llmContext.userId // Pass userId in options if provider needs it
+    };
+
+
     logger.debug(`[LLM Orchestrator] Calling streamLLMReasoningResponse for user ${llmContext.userId}`);
 
     try {
-        // Call the streaming function from prompt.service
-        // It yields events via the streamCallback AND returns the full text response
-        const fullLLMResponseText = await streamLLMReasoningResponse(llmContext, streamCallback);
+        // Call the streaming function from prompt.service with constructed options
+        const fullLLMResponseText = await streamLLMReasoningResponse(apiOptions, streamCallback); // Pass apiOptions
 
         if (fullLLMResponseText === null) {
-             // This indicates an error occurred during the stream handled by the callback
              logger.error('[LLM Orchestrator] streamLLMReasoningResponse returned null, indicating a stream error.');
-             // Throw or return an error indication? Let's return an error state.
              return { tool: '_answerUserTool', args: { textResponse: 'An error occurred during AI processing.' }, isFinalAnswer: true, textResponse: 'An error occurred during AI processing.' };
         }
 
