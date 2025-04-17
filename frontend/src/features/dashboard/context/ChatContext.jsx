@@ -13,7 +13,7 @@ import {
 import { useSocket } from '../hooks/useSocket';
 import logger from '../../../shared/utils/logger';
 // Use the shared Modal component and the existing ReportViewer
-import Modal from '../../../shared/ui/Modal'; 
+import Modal from '../../../shared/ui/Modal';
 import ReportViewer from '../../report_display/components/ReportViewer';
 
 const ChatContext = createContext();
@@ -47,27 +47,24 @@ export const ChatProvider = ({ children }) => {
   const [error, setError] = useState(null);
   // NEW State: Track agent status for each message being processed
   // Maps messageId to { status: AGENT_STATUS, toolName?: string, error?: string }
-  const [agentMessageStatuses, setAgentMessageStatuses] = useState({});
+  // --> We will now directly update the message object instead of this separate state
+  // const [agentMessageStatuses, setAgentMessageStatuses] = useState({});
 
   // NEW State: Track streaming status for the current streaming response
   const [isStreaming, setIsStreaming] = useState(false);
   // Streaming message/token state
-  const [streamingMessageId, setStreamingMessageId] = useState(null);
-  // Streaming tool state
-  const [currentToolCall, setCurrentToolCall] = useState(null);
-  const [lastToolResult, setLastToolResult] = useState(null);
-  // Streaming code state
-  const [generatedCode, setGeneratedCode] = useState(null);
-  const [streamError, setStreamError] = useState(null);
+  const [streamingMessageId, setStreamingMessageId] = useState(null); // ID of the message BEING streamed
   // Stream controller (for cleanup)
   const [streamController, setStreamController] = useState(null);
+  const [streamError, setStreamError] = useState(null);
   const [lastTokenTimestamp, setLastTokenTimestamp] = useState(null);
+
 
   // NEW State for Report Modal
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [reportModalData, setReportModalData] = useState({ code: null, datasets: null });
 
-  // --- Add Ref to track current streaming ID immediately --- 
+  // --- Add Ref to track current streaming ID immediately ---
   const currentStreamingIdRef = useRef(null);
 
   const { connectSocket, subscribeToEvents } = useSocket();
@@ -84,30 +81,39 @@ export const ChatProvider = ({ children }) => {
   useEffect(() => {
     return () => {
       if (streamController) {
+        logger.info('[ChatContext Cleanup] Aborting active stream controller.');
         streamController.close();
+        setStreamController(null);
+        setIsStreaming(false);
+        currentStreamingIdRef.current = null;
       }
     };
-  }, [currentSession]);
+  }, [currentSession, streamController]); // Depend on streamController as well
 
   /**
    * Load user's chat sessions
    */
   const loadSessions = useCallback(async () => {
     setIsLoadingSessions(true);
+    setError(null); // Clear previous errors
     try {
       const data = await apiGetChatSessions();
-      setChatSessions(data);
-      // Select the first session if none is currently selected
-      if (data.length > 0 && !currentSession) {
+      setChatSessions(data || []); // Ensure it's an array
+      // Select the first session if none is currently selected and data exists
+      if (data && data.length > 0 && !currentSession) {
         setCurrentSession(data[0]);
+      } else if (!data || data.length === 0) {
+         setCurrentSession(null); // Ensure currentSession is null if no sessions exist
       }
     } catch (err) {
       logger.error('Error loading chat sessions:', err);
       setError(err.message || 'Failed to load chat sessions.');
+      setChatSessions([]);
+      setCurrentSession(null);
     } finally {
       setIsLoadingSessions(false);
     }
-  }, [currentSession]); // Dependency on currentSession might be removed if logic changes
+  }, [currentSession]); // Keep dependency if initial selection logic relies on it
 
   /**
    * Load messages for the specified session
@@ -116,11 +122,12 @@ export const ChatProvider = ({ children }) => {
     if (!sessionId) return;
     setIsLoadingMessages(true);
     setMessages([]); // Clear old messages
-    setAgentMessageStatuses({}); 
+    // setAgentMessageStatuses({}); // Clear old agent statuses
+    setError(null); // Clear previous errors
     try {
       const data = await apiGetChatMessages(sessionId);
-      // <<< ADDED: Map fetched messageFragments to fragments
-      const messagesWithFragments = data.map(msg => ({
+      // Map fetched messageFragments to fragments
+      const messagesWithFragments = (data || []).map(msg => ({ // Ensure data is an array
           ...msg,
           fragments: msg.messageFragments || [], // Use fetched fragments, default to empty array
           // Ensure aiResponseText is populated from fragments for older messages or as fallback
@@ -130,100 +137,92 @@ export const ChatProvider = ({ children }) => {
                             .join(''),
       }));
       setMessages(messagesWithFragments);
-      // END ADDED >>>
     } catch (err) {
       logger.error('Error loading chat messages:', err);
       setError(err.message || 'Failed to load messages.');
+      setMessages([]); // Clear messages on error
     } finally {
       setIsLoadingMessages(false);
     }
   }, []);
 
   /**
-   * Send a message in the current chat session using the standard API
+   * Send a message in the current chat session using the standard API (non-streaming)
+   * DEPRECATED IN FAVOR OF STREAMING - Kept for potential fallback/reference
    */
   const sendMessage = useCallback(async (promptText, selectedDatasetIds = []) => {
-    if (!currentSession?._id) return null;
-    setError(null);
-    setIsSendingMessage(true);
-    try {
-      const result = await apiSendChatMessage(
-        currentSession._id,
-        promptText,
-        selectedDatasetIds
-      );
-
-      // Add the user message immediately
-      setMessages(prev => [...prev, result.userMessage]);
-
-      // Add the AI placeholder and set its initial agent status
-      setMessages(prev => [...prev, result.aiMessage]);
-      setAgentMessageStatuses(prev => ({
-        ...prev,
-        [result.aiMessage._id]: { status: AGENT_STATUS.IDLE } // Start as idle before agent:thinking
-      }));
-
-      // Update the current session if needed (e.g., associatedDatasetIds)
-      if (result.updatedSession) {
-        setCurrentSession(result.updatedSession);
-        setChatSessions(prev => prev.map(session =>
-          session._id === result.updatedSession._id ? result.updatedSession : session
-        ));
-      }
-
-      return result;
-    } catch (err) {
-      logger.error('Error sending message:', err);
-      setError(err.message || 'Failed to send message.');
-      // Optionally remove the placeholder AI message on send failure?
-      throw err;
-    } finally {
-      setIsSendingMessage(false);
-    }
+    // ... (keep existing non-streaming logic if needed, or remove) ...
+     logger.warn('[ChatContext] sendMessage (non-streaming) is deprecated. Use sendStreamingMessage.');
+     // Simplified version just calling streaming for now
+     return sendStreamingMessage(promptText, selectedDatasetIds);
   }, [currentSession]);
+
+
+  /**
+   * Centralized state update logic for streaming messages
+   */
+  const updateStreamingMessage = useCallback((id, updateFn) => {
+    setMessages(prevMessages =>
+        prevMessages.map(msg => (msg._id === id ? updateFn(msg) : msg))
+    );
+  }, []);
+
 
   /**
    * Send a message in the current chat session using streaming API
    */
   const sendStreamingMessage = useCallback(async (promptText, selectedDatasetIds = []) => {
-    if (!currentSession?._id) return null;
-    
+    if (!currentSession?._id) {
+      logger.error('Cannot send streaming message: No current session.');
+      return null;
+    }
+    if (isStreaming) {
+        logger.warn('[ChatContext] Ignoring sendStreamingMessage call, already streaming.');
+        return; // Don't start a new stream if one is active
+    }
+
+    // Abort previous controller if it exists (safety check)
     if (streamController) {
       streamController.close();
     }
 
     setError(null);
-    setIsSendingMessage(true);
-    setIsStreaming(true);
-    setStreamingMessageId(null);
-    currentStreamingIdRef.current = null; 
     setStreamError(null);
+    setIsSendingMessage(true); // Indicate submission process started
+    setIsStreaming(true); // Mark streaming as active
+    setStreamingMessageId(null); // Clear previous streaming ID
+    currentStreamingIdRef.current = null; // Clear ref
 
     try {
+      // Define event handlers using the centralized updater
       const eventHandlers = {
         onUserMessageCreated: (data) => {
           logger.info(`User message created: ${data.messageId}`);
-          // Add the user message to the chat
           const userMessage = {
             _id: data.messageId,
             messageType: 'user',
             promptText,
+            selectedDatasetIds: selectedDatasetIds, // Store datasets used for this prompt
             status: 'completed',
-            createdAt: new Date()
+            createdAt: new Date().toISOString(), // Use ISO string for consistency
+            fragments: [],
+            steps: [],
           };
           setMessages(prev => [...prev, userMessage]);
         },
 
         onAiMessageCreated: (data) => {
-          logger.info(`AI message created: ${data.messageId}`);
+          logger.info(`AI message created: ${data.messageId}, status: ${data.status}`);
           const aiMessage = {
             _id: data.messageId,
             messageType: 'ai_report',
-            status: 'processing',
+            status: data.status || 'processing', // Use status from event or default
+            aiResponseText: '', // Initialize empty text
             fragments: [],
             steps: [],
-            createdAt: new Date(),
+            createdAt: new Date().toISOString(),
             isStreaming: true,
+            // Tool state initialization
             toolName: null,
             toolInput: null,
             toolStatus: null,
@@ -231,20 +230,23 @@ export const ChatProvider = ({ children }) => {
             toolError: null,
           };
           setMessages(prev => [...prev, aiMessage]);
+          // --- Set the ref and state ID ---
           setStreamingMessageId(data.messageId);
           currentStreamingIdRef.current = data.messageId;
+          // --- End set ref ---
+          setIsSendingMessage(false); // Sending complete, now streaming begins
         },
 
         onThinking: () => {
           const currentId = currentStreamingIdRef.current;
           if (currentId) {
-              setMessages(prevMessages =>
-                  prevMessages.map(msg =>
-                      msg._id === currentId
-                          ? { ...msg, status: 'thinking', toolName: null, toolStatus: null }
-                          : msg
-                  )
-              );
+            updateStreamingMessage(currentId, msg => ({
+                ...msg,
+                status: 'thinking',
+                toolName: null,
+                toolStatus: null,
+                isStreaming: true // Ensure streaming flag is true
+            }));
           }
         },
 
@@ -252,197 +254,205 @@ export const ChatProvider = ({ children }) => {
           const currentId = currentStreamingIdRef.current;
           logger.info(`[ChatContext onUsingTool] Agent using tool: ${data.toolName} (for ref ID: ${currentId})`);
           if (currentId) {
-              const newStep = {
-                  tool: data.toolName, 
-                  args: data.args,
-                  attempt: (messages.find(m => m._id === currentId)?.steps?.filter(s => s.tool === data.toolName).length || 0) + 1,
-                  resultSummary: 'Running...',
-                  error: null
-              };
-              setMessages(prevMessages =>
-                prevMessages.map(msg =>
-                  msg._id === currentId
-                    ? { 
-                        ...msg, 
-                        status: 'using_tool',
-                        toolName: data.toolName,
-                        toolInput: data.args,
-                        toolStatus: 'running',
-                        toolOutput: null,
-                        toolError: null,
-                        steps: [...(msg.steps || []), newStep]
-                      } 
-                    : msg
-                )
-              );
+            const newStep = { // Create the step structure
+                tool: data.toolName,
+                args: data.args,
+                attempt: (messages.find(m => m._id === currentId)?.steps?.filter(s => s.tool === data.toolName).length || 0) + 1,
+                resultSummary: 'Running...', // Initial status
+                error: null
+            };
+            updateStreamingMessage(currentId, msg => ({
+                ...msg,
+                status: 'using_tool',
+                toolName: data.toolName,
+                toolInput: data.args,
+                toolStatus: 'running',
+                toolOutput: null,
+                toolError: null,
+                steps: [...(msg.steps || []), newStep], // Add the step to the message
+                isStreaming: true // Ensure streaming flag is true
+            }));
           }
         },
 
         onToken: (data) => {
             const currentId = currentStreamingIdRef.current;
             if (currentId && data.content) {
-                setMessages(prevMessages =>
-                    prevMessages.map(msg => {
-                        if (msg._id === currentId) {
-                            const lastFragment = msg.fragments[msg.fragments.length - 1];
-                            let updatedFragments = [...msg.fragments];
-                            if (lastFragment && lastFragment.type === 'text') {
-                                updatedFragments[updatedFragments.length - 1] = {
-                                    ...lastFragment,
-                                    content: lastFragment.content + data.content
-                                };
-                            } else {
-                                updatedFragments.push({ type: 'text', content: data.content });
-                            }
-                            return { ...msg, fragments: updatedFragments };
-                        }
-                        return msg;
-                    })
-                );
+                updateStreamingMessage(currentId, msg => {
+                    // Ensure fragments array exists
+                    const currentFragments = msg.fragments || [];
+                    const lastFragment = currentFragments[currentFragments.length - 1];
+                    let updatedFragments;
+
+                    if (lastFragment && lastFragment.type === 'text') {
+                        // Append to last text fragment
+                        updatedFragments = [...currentFragments];
+                        updatedFragments[currentFragments.length - 1] = {
+                            ...lastFragment,
+                            content: lastFragment.content + data.content
+                        };
+                    } else {
+                        // Add new text fragment
+                        updatedFragments = [...currentFragments, { type: 'text', content: data.content }];
+                    }
+                    // Also update the flat aiResponseText for simplicity if needed elsewhere
+                    const updatedText = updatedFragments.filter(f => f.type === 'text').map(f => f.content).join('');
+
+                    return { ...msg, fragments: updatedFragments, aiResponseText: updatedText, isStreaming: true };
+                });
                 setLastTokenTimestamp(Date.now());
-            } 
+            } else if (currentId && !data.content) {
+                 logger.debug(`[ChatContext onToken] Received token event for ${currentId} but content was empty.`);
+            }
         },
 
         onAgentToolResult: (data) => {
             const currentId = currentStreamingIdRef.current;
             logger.info(`[ChatContext onAgentToolResult] Agent tool result: ${data.toolName}, summary: ${data.resultSummary} (for ID: ${currentId})`);
             if (currentId) {
-                const newStepFragment = {
+                const newStepFragment = { // Fragment for UI display
                     type: 'step',
                     tool: data.toolName,
                     resultSummary: data.resultSummary,
                     error: data.error || null,
-                     status: data.error ? 'error' : 'completed'
+                    status: data.error ? 'error' : 'completed'
                 };
-
-                setMessages(prevMessages =>
-                    prevMessages.map(msg => {
-                        if (msg._id === currentId) {
-                            const updatedInternalSteps = (msg.steps || []).map((step, index, arr) => { 
-                                 if (index === arr.length - 1 && step.tool === data.toolName) {
-                                     return { ...step, resultSummary: data.resultSummary, error: data.error || null };
-                                 }
-                                 return step;
-                             });
-                            
-                            return { 
-                                ...msg, 
-                                status: 'thinking',
-                                fragments: [...msg.fragments, newStepFragment],
-                                steps: updatedInternalSteps,
-                                toolName: null,
-                                toolStatus: null,
-                                toolInput: null,
-                                toolOutput: null,
-                                toolError: null
-                            };
+                updateStreamingMessage(currentId, msg => {
+                    // Update the internal 'steps' array for persistence
+                    const updatedInternalSteps = (msg.steps || []).map((step, index, arr) => {
+                        // Find the last step matching the tool name (handles retries better)
+                        if (step.tool === data.toolName && index === arr.length -1) {
+                            return { ...step, resultSummary: data.resultSummary, error: data.error || null };
                         }
-                        return msg;
-                    })
-                );
+                        return step;
+                    });
+                    // Ensure fragments exists before spreading
+                    const currentFragments = msg.fragments || [];
+                    return {
+                        ...msg,
+                        status: 'thinking', // Go back to thinking after tool use
+                        fragments: [...currentFragments, newStepFragment], // Add the step fragment for UI
+                        steps: updatedInternalSteps, // Update the internal steps array
+                        // Reset tool-specific status fields
+                        toolName: null,
+                        toolStatus: null,
+                        toolInput: null,
+                        toolOutput: null,
+                        toolError: null,
+                        isStreaming: true // Ensure streaming flag is true
+                    };
+                });
             }
         },
 
         onAgentFinalAnswer: (data) => {
             const currentId = currentStreamingIdRef.current;
-            logger.info(`[ChatContext onAgentFinalAnswer] Received final answer (for ID: ${currentId}). Code included: ${!!data.aiGeneratedCode}, Data included: ${!!data.analysisResult}`);
+            logger.info(`[ChatContext onAgentFinalAnswer] Received final answer (for ID: ${currentId}). Code: ${!!data.aiGeneratedCode}, Data: ${!!data.analysisResult}`);
             if (currentId) {
-                const finalAnswerText = data.text || ''; 
-                const generatedCode = data.aiGeneratedCode || null;
-                const analysisData = data.analysisResult || null;
+                 const finalAnswerText = data.text || '';
+                 const generatedCode = data.aiGeneratedCode || null;
+                 const analysisData = data.analysisResult || null;
 
-                setMessages(prevMessages =>
-                    prevMessages.map(msg => {
-                        if (msg._id === currentId) {
-                            let updatedFragments = [...msg.fragments]; 
-                            
-                            if (!generatedCode && finalAnswerText) { 
-                                const lastFragment = msg.fragments[msg.fragments.length - 1];
-                                if (lastFragment && lastFragment.type === 'text') {
-                                    updatedFragments[updatedFragments.length - 1] = {
-                                        ...lastFragment,
-                                        content: lastFragment.content + finalAnswerText
-                                    };
-                                } else {
-                                    updatedFragments.push({ type: 'text', content: finalAnswerText });
-                                }
-                            } 
+                 updateStreamingMessage(currentId, msg => {
+                      // Ensure fragments exists before spreading
+                     const currentFragments = msg.fragments || [];
+                     let updatedFragments = [...currentFragments];
+                     // Append or add the final text fragment
+                      const lastFragment = updatedFragments[updatedFragments.length - 1];
+                     if (lastFragment && lastFragment.type === 'text') {
+                         updatedFragments[updatedFragments.length - 1].content += finalAnswerText; // Append if last was text
+                     } else if (finalAnswerText) {
+                         updatedFragments.push({ type: 'text', content: finalAnswerText }); // Add new text fragment
+                     }
+                     // Update the flat aiResponseText
+                     const updatedText = updatedFragments.filter(f => f.type === 'text').map(f => f.content).join('');
 
-                            return { 
-                                ...msg, 
-                                fragments: updatedFragments, 
-                                status: 'completed', 
-                                isStreaming: false,
-                                aiGeneratedCode: generatedCode, 
-                                reportAnalysisData: analysisData
-                            }; 
-                        }
-                        return msg;
-                    })
-                );
-                
-                // Stop streaming etc.
+                     return {
+                         ...msg,
+                         fragments: updatedFragments,
+                         aiResponseText: updatedText, // Update flat text
+                         status: 'completed',
+                         isStreaming: false, // Streaming is finished
+                         aiGeneratedCode: generatedCode,
+                         reportAnalysisData: analysisData,
+                          // Clear transient tool status fields
+                         toolName: null,
+                         toolStatus: null,
+                         toolInput: null,
+                         toolOutput: null,
+                         toolError: null,
+                     };
+                 });
+
+                // --- THIS IS THE POINT TO RESET STREAMING STATE ---
+                logger.info(`[ChatContext] Resetting streaming state after final answer for ${currentId}`);
                 setIsStreaming(false);
                 setIsSendingMessage(false);
-                setStreamingMessageId(null); 
-                currentStreamingIdRef.current = null; 
-                if(streamController) streamController.close();
+                setStreamingMessageId(null);
+                currentStreamingIdRef.current = null; // Reset the ref
+                if (streamController) {
+                     logger.debug('[ChatContext] Closing stream controller after final answer.');
+                     streamController.close();
+                     setStreamController(null);
+                }
             }
         },
 
-        onCompleted: (data) => {
-            const finalMsgId = data.messageId || currentStreamingIdRef.current;
-            logger.info(`Streaming completed for message: ${finalMsgId}`);
-            if (finalMsgId) {
-                setMessages(prev => prev.map(msg => 
-                    msg._id === finalMsgId 
-                        ? { ...msg, status: 'completed', isStreaming: false, toolName: null, toolStatus: null } 
-                        : msg
-                ));
-            }
-             // --- Reset state and ref --- 
-             setIsStreaming(false);
-             setIsSendingMessage(false);
-             setStreamingMessageId(null); 
-             currentStreamingIdRef.current = null; 
-             setStreamController(null);
+        // --- Modified Handlers (Do NOT reset currentStreamingIdRef.current) ---
+        onCompleted: (data) => { // From LLM stream finishing
+             const finalMsgId = data.messageId || currentStreamingIdRef.current;
+             logger.info(`LLM Stream completed event received for message: ${finalMsgId || 'UNKNOWN'}`);
+             // Note: Don't change message status or reset streaming state here,
+             // wait for agent:final_answer or agent:error
         },
-
-        onError: (data) => {
-             const errorMsgId = currentStreamingIdRef.current; 
+        onError: (data) => { // From SSE stream or agent error event
+             const errorMsgId = currentStreamingIdRef.current;
              const errorMessage = data.error || data.message;
-             logger.error(`Streaming error: ${errorMessage} (for ref ID: ${errorMsgId})`);
+             logger.error(`Streaming error received: ${errorMessage} (for ref ID: ${errorMsgId || 'UNKNOWN'})`);
              setStreamError(errorMessage);
-          
-             if (errorMsgId) {
-                setMessages(prev => prev.map(msg => 
-                    msg._id === errorMsgId 
-                        ? { 
-                            ...msg, 
-                            status: 'error', 
-                            errorMessage: errorMessage,
-                            isStreaming: false,
-                            toolName: null, toolInput: null, toolStatus: 'error', toolOutput: null, toolError: errorMessage,
-                          } 
-                        : msg
-                ));
-            }
-            // --- Reset state and ref --- 
-            setIsStreaming(false);
-            setIsSendingMessage(false);
-            setStreamingMessageId(null); 
-            currentStreamingIdRef.current = null; 
-            setStreamController(null);
-        },
 
-        onEnd: () => {
-            logger.info('Streaming connection ended');
-            // --- Reset state and ref --- 
-            setIsStreaming(false);
-            setIsSendingMessage(false);
-            setStreamingMessageId(null); 
-            currentStreamingIdRef.current = null; 
-            setStreamController(null);
+             if (errorMsgId) {
+                 updateStreamingMessage(errorMsgId, msg => ({
+                     ...msg,
+                     status: 'error',
+                     errorMessage: errorMessage,
+                     isStreaming: false, // Stop streaming on error
+                     toolName: null, toolInput: null, toolStatus: 'error', toolOutput: null, toolError: errorMessage,
+                 }));
+             }
+             // --- Reset state ONLY IF final answer hasn't already done so ---
+             if (currentStreamingIdRef.current) {
+                  logger.info(`[ChatContext onError] Resetting streaming state due to error for ${errorMsgId}`);
+                  setIsStreaming(false);
+                  setIsSendingMessage(false);
+                  setStreamingMessageId(null);
+                  currentStreamingIdRef.current = null; // Reset ref on error
+                  if (streamController) {
+                      logger.debug('[ChatContext onError] Closing stream controller due to error.');
+                      streamController.close();
+                      setStreamController(null);
+                  }
+             } else {
+                 logger.warn(`[ChatContext onError] Error event received, but currentStreamingIdRef was already null.`);
+             }
+        },
+        onEnd: () => { // SSE connection closed
+            logger.info('Streaming connection ended event received');
+             // --- Reset state ONLY IF final answer/error hasn't already done so ---
+             if (currentStreamingIdRef.current) {
+                  const lastMsgId = currentStreamingIdRef.current;
+                  logger.info(`[ChatContext onEnd] Resetting streaming state due to connection end for ${lastMsgId}`);
+                  // Optionally mark the message as interrupted if it wasn't completed?
+                  updateStreamingMessage(lastMsgId, msg => msg.status !== 'completed' && msg.status !== 'error' ? ({ ...msg, isStreaming: false, status: msg.status === 'processing' ? 'interrupted' : msg.status }) : msg);
+
+                  setIsStreaming(false);
+                  setIsSendingMessage(false);
+                  setStreamingMessageId(null);
+                  currentStreamingIdRef.current = null; // Reset ref on end
+                  setStreamController(null); // Clear controller ref
+             } else {
+                  logger.warn(`[ChatContext onEnd] End event received, but currentStreamingIdRef was already null.`);
+             }
         }
       };
 
@@ -460,28 +470,40 @@ export const ChatProvider = ({ children }) => {
       return { success: true };
     } catch (err) {
       logger.error('Error starting streaming chat:', err);
-      setError(err.message || 'Failed to start streaming chat.');
+      const errorMsg = err.message || 'Failed to start streaming chat.';
+      setError(errorMsg); // Set context-level error
+      setStreamError(errorMsg); // Set specific stream error
       setIsStreaming(false);
       setIsSendingMessage(false);
-      setStreamingMessageId(null); 
-      currentStreamingIdRef.current = null; 
+      setStreamingMessageId(null);
+      currentStreamingIdRef.current = null;
       setStreamController(null);
-      throw err;
+      throw err; // Re-throw for the component to potentially handle
     }
-  }, [currentSession, streamController, messages]);
+  }, [currentSession, streamController, isStreaming, updateStreamingMessage]); // Added isStreaming and updateStreamingMessage
+
 
   /**
    * Create a new chat session
    */
   const createNewSession = useCallback(async (title = "New Chat", teamId = null) => {
+    // Abort any active stream before creating/switching session
+    if (streamController) {
+         logger.info('[ChatContext createNewSession] Aborting active stream before creating new session.');
+         streamController.close();
+         setStreamController(null);
+         setIsStreaming(false);
+         currentStreamingIdRef.current = null;
+    }
+
     setError(null);
     setIsLoadingSessions(true);
     try {
       const newSession = await apiCreateChatSession(title, teamId);
-      setChatSessions(prev => [newSession, ...prev]);
+      setChatSessions(prev => [newSession, ...prev].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))); // Add and re-sort
       setCurrentSession(newSession);
       setMessages([]);
-      setAgentMessageStatuses({}); // Clear agent statuses
+      // setAgentMessageStatuses({}); // Clear agent statuses
       return newSession;
     } catch (err) {
       logger.error('Error creating chat session:', err);
@@ -490,7 +512,7 @@ export const ChatProvider = ({ children }) => {
     } finally {
       setIsLoadingSessions(false);
     }
-  }, []);
+  }, [streamController]); // Added streamController dependency
 
   /**
    * Update Chat Session Title
@@ -501,11 +523,11 @@ export const ChatProvider = ({ children }) => {
       const updatedSession = await apiUpdateChatSession(sessionId, newTitle);
       setChatSessions(prevSessions =>
         prevSessions.map(session =>
-          session._id === sessionId ? { ...session, title: updatedSession.title } : session
-        )
+          session._id === sessionId ? { ...session, title: updatedSession.title, updatedAt: updatedSession.updatedAt } : session
+        ).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)) // Re-sort after update
       );
       if (currentSession && currentSession._id === sessionId) {
-        setCurrentSession(prev => ({ ...prev, title: updatedSession.title }));
+        setCurrentSession(prev => ({ ...prev, title: updatedSession.title, updatedAt: updatedSession.updatedAt }));
       }
       return updatedSession;
     } catch (err) {
@@ -519,42 +541,47 @@ export const ChatProvider = ({ children }) => {
    * Delete Chat Session
    */
   const deleteChatSession = useCallback(async (sessionId) => {
+     // Abort any active stream if deleting the current session
+     if (currentSession?._id === sessionId && streamController) {
+         logger.info('[ChatContext deleteChatSession] Aborting active stream before deleting current session.');
+         streamController.close();
+         setStreamController(null);
+         setIsStreaming(false);
+         currentStreamingIdRef.current = null;
+     }
     setError(null);
     try {
       await apiDeleteChatSession(sessionId);
       const remainingSessions = chatSessions.filter(session => session._id !== sessionId);
       setChatSessions(remainingSessions);
       if (currentSession && currentSession._id === sessionId) {
-        // Select the next session or null if none remain
-        setCurrentSession(remainingSessions[0] || null);
+        // Select the next session or null if none remain (most recently updated first)
+        setCurrentSession(remainingSessions.length > 0 ? remainingSessions[0] : null);
         setMessages([]);
-        setAgentMessageStatuses({});
+        // setAgentMessageStatuses({});
       }
     } catch (err) {
       logger.error("Error deleting chat session:", err);
       setError(err.message || 'Failed to delete chat session.');
       throw err;
     }
-  }, [currentSession, chatSessions]);
+  }, [currentSession, chatSessions, streamController]); // Added streamController dependency
 
   // Function to open the report modal
   const openReportModal = useCallback((data) => {
     if (data && data.code) {
       logger.info('Opening report modal.');
-      // ---- ADD DEBUG LOG ----
-      logger.debug('Report data received by openReportModal:', { 
-        hasCode: !!data.code, 
-        codeLength: data.code?.length, 
-        hasDatasets: !!data.datasets, 
-        datasetsLength: data.datasets?.length 
+      logger.debug('Report data received by openReportModal:', {
+        hasCode: !!data.code,
+        codeLength: data.code?.length,
+        hasAnalysisData: !!data.analysisData, // Check new field
       });
-      // ---- END DEBUG LOG ----
       // Ensure datasets is always an array, even if null/undefined initially
-      setReportModalData({ code: data.code, datasets: data.datasets || [] });
+      // Pass analysisData instead of datasets
+      setReportModalData({ code: data.code, analysisData: data.analysisData || {} });
       setIsReportModalOpen(true);
     } else {
       logger.error('Attempted to open report modal without code or data object.', data);
-      // Optionally, show a user-facing error notification here
     }
   }, []);
 
@@ -562,133 +589,77 @@ export const ChatProvider = ({ children }) => {
   const closeReportModal = useCallback(() => {
     logger.info('Closing report modal.');
     setIsReportModalOpen(false);
-    // Delay clearing data slightly to avoid flicker during modal close animation
     setTimeout(() => {
-       setReportModalData({ code: null, datasets: null });
-    }, 300); // Adjust delay based on modal animation duration
+       setReportModalData({ code: null, analysisData: null }); // Clear analysisData too
+    }, 300);
   }, []);
 
   // Effect to load messages when currentSession changes
   useEffect(() => {
+    // Abort active stream when changing session
+    if (streamController) {
+         logger.info('[ChatContext Session Change] Aborting active stream.');
+         streamController.close();
+         setStreamController(null);
+         setIsStreaming(false);
+         currentStreamingIdRef.current = null;
+    }
     if (currentSession?._id) {
       loadMessages(currentSession._id);
+    } else {
+        setMessages([]); // Clear messages if no session selected
     }
-  }, [currentSession, loadMessages]);
+  }, [currentSession, loadMessages, streamController]);
 
-  // Set up socket listeners for real-time updates
+  // Set up socket listeners for real-time updates (NON-STREAMING)
+  // This might be redundant if SSE handles all updates, but kept for now
   useEffect(() => {
     const setupListeners = () => {
       try {
-        logger.info(`Setting up socket listeners for session: ${currentSession?._id}`);
+        logger.info(`Setting up WebSocket listeners for session: ${currentSession?._id}`);
         const listeners = {
-          // --- Agent Status Updates --- 
-          'agent:thinking': (data) => {
-            if (data.sessionId !== currentSession?._id) return;
-            logger.debug(`[WS Received] agent:thinking - Message ID: ${data.messageId}`);
-            setAgentMessageStatuses(prev => ({
-              ...prev,
-              [data.messageId]: { status: AGENT_STATUS.THINKING, toolName: null, error: null },
-            }));
-          },
-          'agent:using_tool': (data) => {
-            if (data.sessionId !== currentSession?._id) return;
-            logger.debug(`[WS Received] agent:using_tool - Message ID: ${data.messageId}, Tool: ${data.toolName}`);
-            setAgentMessageStatuses(prev => ({
-              ...prev,
-              [data.messageId]: { status: AGENT_STATUS.USING_TOOL, toolName: data.toolName, error: null },
-            }));
-          },
-          'agent:tool_result': (data) => {
-            if (data.sessionId !== currentSession?._id) return;
-            logger.debug(`[WS Received] agent:tool_result - Message ID: ${data.messageId}, Tool: ${data.toolName}, Summary: ${data.resultSummary}`);
-            // Revert status to thinking after tool use, let UI decide how to show summary briefly
-            setAgentMessageStatuses(prev => ({
-              ...prev,
-              [data.messageId]: { status: AGENT_STATUS.THINKING, toolName: null, error: null }, // Back to thinking
-            }));
-          },
-          'agent:error': (data) => {
-            if (data.sessionId !== currentSession?._id) return;
-            logger.warn(`[WS Received] agent:error - Message ID: ${data.messageId}, Error: ${data.error}`);
-            setAgentMessageStatuses(prev => ({
-              ...prev,
-              [data.messageId]: { status: AGENT_STATUS.ERROR, toolName: null, error: data.error },
-            }));
-            // Agent loop error might be followed by chat:message:error, which finalizes the message state
-          },
-
-          // --- Final Message Updates --- 
+          // --- Final Message Updates (WebSocket Fallback/Confirmation) ---
           'chat:message:completed': (data) => {
-            if (data.sessionId !== currentSession?._id) return;
-            logger.debug(`[WS Received] chat:message:completed - Message ID: ${data.message?._id}`);
-            
-            // ---- ADD DEBUG LOG ----
-            if (data.message) {
-                logger.debug('[Chat Context] Received completed message data via socket:', { 
-                    messageId: data.message._id, 
-                    status: data.message.status, 
-                    hasCode: !!data.message.aiGeneratedCode, 
-                    codeLength: data.message.aiGeneratedCode?.length 
-                });
-            } else {
-                logger.warn('[Chat Context] Received chat:message:completed event without message data.', data);
-            }
-            // ---- END DEBUG LOG ----
-            
-            setMessages(prev =>
-              prev.map(msg =>
-                msg._id === data.message._id ? data.message : msg
-              )
-            );
-            // Clear agent status for this message ID
-            setAgentMessageStatuses(prev => {
-              const newState = { ...prev };
-              delete newState[data.message._id];
-              return newState;
-            });
+            // Only update if it's for the current session AND not currently streaming this message
+             if (data.sessionId !== currentSession?._id || currentStreamingIdRef.current === data.message?._id) return;
+             logger.debug(`[WS Received] chat:message:completed - Message ID: ${data.message?._id}`);
+             // Update the specific message, ensuring fragments/steps are included
+             setMessages(prev =>
+                 prev.map(msg =>
+                     msg._id === data.message._id ? { ...data.message, isStreaming: false } : msg // Mark as not streaming
+                 )
+             );
           },
           'chat:message:error': (data) => {
-            if (data.sessionId !== currentSession?._id) return;
-            logger.error(`[WS Received] chat:message:error - Message ID: ${data.messageId}, Error: ${data.error}`);
-            setMessages(prev =>
-              prev.map(msg =>
-                msg._id === data.messageId ? {...msg, status: 'error', errorMessage: data.error} : msg
-              )
-            );
-             // Clear agent status for this message ID
-             setAgentMessageStatuses(prev => {
-              const newState = { ...prev };
-              delete newState[data.messageId];
-              return newState;
-            });
+             // Only update if it's for the current session AND not currently streaming this message
+             if (data.sessionId !== currentSession?._id || currentStreamingIdRef.current === data.messageId) return;
+             logger.error(`[WS Received] chat:message:error - Message ID: ${data.messageId}, Error: ${data.error}`);
+             setMessages(prev =>
+                 prev.map(msg =>
+                     msg._id === data.messageId ? {...msg, status: 'error', errorMessage: data.error, isStreaming: false} : msg
+                 )
+             );
           },
-          // 'chat:message:fetching_data' and 'chat:message:processing' are deprecated
         };
-
         const unsubscribe = subscribeToEvents(listeners);
-
-        // Cleanup function
         return () => {
           if (unsubscribe) {
-            logger.info(`Cleaning up socket listeners for session: ${currentSession?._id}`);
+            logger.info(`Cleaning up WebSocket listeners for session: ${currentSession?._id}`);
             unsubscribe();
           }
         };
       } catch (error) {
-        logger.error('Error setting up socket listeners:', error);
-        return undefined; // Return undefined or similar to indicate no cleanup needed
+        logger.error('Error setting up WebSocket listeners:', error);
+        return undefined;
       }
     };
-
     let cleanup;
     if (currentSession?._id) {
       cleanup = setupListeners();
     }
+    return () => { if (cleanup) cleanup(); };
+  }, [currentSession, subscribeToEvents]); // Depend on currentSession
 
-    return () => {
-      if (cleanup) cleanup();
-    };
-  }, [currentSession, subscribeToEvents]);
 
   const contextValue = {
     chatSessions,
@@ -701,20 +672,20 @@ export const ChatProvider = ({ children }) => {
     loadSessions,
     loadMessages,
     setCurrentSession,
-    sendMessage,
+    sendMessage, // Kept for potential future use/fallback
     sendStreamingMessage,
     createNewSession,
     updateChatSessionTitle,
     deleteChatSession,
-    agentMessageStatuses,
-    AGENT_STATUS,
+    // agentMessageStatuses, // Removed, status is on the message object now
+    AGENT_STATUS, // Export enum for use in components
     isStreaming,
     streamingMessageId,
-    currentToolCall,
-    lastToolResult,
-    generatedCode,
     streamError,
-    STREAMING_STATUS,
+    // currentToolCall, // Tool info is now directly on the message object
+    // lastToolResult,
+    // generatedCode,
+    STREAMING_STATUS, // Export enum
     isReportModalOpen,
     reportModalData,
     openReportModal,
@@ -730,22 +701,15 @@ export const ChatProvider = ({ children }) => {
         isOpen={isReportModalOpen}
         onClose={closeReportModal}
         title="Generated Report"
-        size="4xl" // Use a large size for reports
+        size="xl" // Use a large size for reports
       >
         {/* Render ReportViewer inside the modal only when open and data is ready */}
         {isReportModalOpen && reportModalData.code && (
-          <div className="mt-4 h-[70vh] overflow-y-auto"> {/* Add fixed height and scroll */}
+          <div className="h-[70vh] overflow-y-auto"> {/* Add fixed height and scroll */}
              <ReportViewer
-               // ---- ADD KEY ----
                key={reportModalData.code} // Force re-mount when code changes
-               // ---- END KEY ----
-               // Pass code and datasets via a single prop if ReportViewer expects that,
-               // or individually. Adjust based on ReportViewer's actual props.
-               // Assuming it takes separate props based on architecture doc examples:
-               code={reportModalData.code}
-               datasets={reportModalData.datasets} 
-               // Example if it takes a single prop:
-               // reportInfo={reportModalData} 
+               // Pass analysisData instead of datasets
+               reportInfo={{ code: reportModalData.code, analysisData: reportModalData.analysisData }}
             />
           </div>
         )}
