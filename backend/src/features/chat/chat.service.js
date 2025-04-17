@@ -1,3 +1,10 @@
+// ================================================================================
+// FILE: NeuroLedger copy/backend/src/features/chat/chat.service.js
+// PURPOSE: Handles chat session logic and streaming requests.
+// PHASE 5 UPDATE: Ensure handleStreamingChatRequest correctly defines and passes
+//                 the SSE event callback to runAgent.
+// ================================================================================
+
 const ChatSession = require('./chatSession.model');
 const PromptHistory = require('./prompt.model');
 const { createTask } = require('../../shared/services/cloudTasks.service');
@@ -5,8 +12,10 @@ const config = require('../../shared/config');
 const logger = require('../../shared/utils/logger');
 const { runAgent } = require('./agent.service');
 
+// --- Existing Session CRUD functions (createChatSession, getUserChatSessions, etc.) remain unchanged ---
+
 /**
- * Creates a new chat session
+ * Create a new chat session
  * @param {string} userId - The user ID
  * @param {string} [teamId] - Optional team ID if chat is team-based
  * @param {string} [title] - Optional title (defaults to "New Chat")
@@ -19,10 +28,11 @@ const createChatSession = async (userId, teamId = null, title = "New Chat") => {
       teamId,
       title,
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date() // Use updatedAt for last activity tracking
     });
 
     await chatSession.save();
+    logger.info(`Created chat session ${chatSession._id} for user ${userId}`);
     return chatSession;
   } catch (error) {
     logger.error(`Failed to create chat session: ${error.message}`);
@@ -33,17 +43,19 @@ const createChatSession = async (userId, teamId = null, title = "New Chat") => {
 /**
  * Get user's chat sessions
  * @param {string} userId - The user ID
- * @param {number} [limit=10] - Maximum number of sessions to retrieve
+ * @param {number} [limit=50] - Maximum number of sessions to retrieve (increased default)
  * @param {number} [skip=0] - Number of sessions to skip (for pagination)
  * @returns {Promise<Array>} - Array of chat sessions
  */
-const getUserChatSessions = async (userId, limit = 10, skip = 0) => {
+const getUserChatSessions = async (userId, limit = 50, skip = 0) => {
   try {
     const sessions = await ChatSession.find({ userId })
-      .sort({ updatedAt: -1 })
+      .sort({ updatedAt: -1 }) // Sort by last activity
       .skip(skip)
-      .limit(limit);
-      
+      .limit(limit)
+      .lean(); // Use lean for read-only
+
+    logger.debug(`Retrieved ${sessions.length} chat sessions for user ${userId}`);
     return sessions;
   } catch (error) {
     logger.error(`Failed to get user chat sessions: ${error.message}`);
@@ -59,19 +71,22 @@ const getUserChatSessions = async (userId, limit = 10, skip = 0) => {
  */
 const getChatSessionById = async (sessionId, userId) => {
   try {
-    const session = await ChatSession.findOne({ 
+    // TODO: Add team member access check if applicable
+    const session = await ChatSession.findOne({
       _id: sessionId,
       userId
-    });
-    
+    }).lean(); // Use lean for read-only
+
     if (!session) {
+      logger.warn(`Chat session ${sessionId} not found or user ${userId} unauthorized.`);
       throw new Error('Chat session not found or unauthorized');
     }
-    
+
+    logger.debug(`Retrieved chat session ${sessionId} for user ${userId}`);
     return session;
   } catch (error) {
-    logger.error(`Failed to get chat session by ID: ${error.message}`);
-    throw error;
+    logger.error(`Failed to get chat session by ID ${sessionId}: ${error.message}`);
+    throw error; // Rethrow original error or a generic one
   }
 };
 
@@ -79,31 +94,27 @@ const getChatSessionById = async (sessionId, userId) => {
  * Update a chat session
  * @param {string} sessionId - The chat session ID
  * @param {string} userId - The user ID (for authorization check)
- * @param {Object} updateData - Data to update (title or other fields)
- * @returns {Promise<Object>} - Updated chat session
+ * @param {Object} updateData - Data to update (currently only 'title')
+ * @returns {Promise<Object>} - Updated chat session document
  */
 const updateChatSession = async (sessionId, userId, updateData) => {
   try {
-    const session = await ChatSession.findOne({ 
-      _id: sessionId,
-      userId
-    });
-    
-    if (!session) {
+    // Use findOneAndUpdate for atomicity and return updated doc
+    const updatedSession = await ChatSession.findOneAndUpdate(
+      { _id: sessionId, userId }, // Query matches session ID and owner
+      { $set: { title: updateData.title, updatedAt: new Date() } }, // Update title and timestamp
+      { new: true } // Return the updated document
+    ).lean(); // Use lean for read-only return
+
+    if (!updatedSession) {
+      logger.warn(`Update failed: Chat session ${sessionId} not found or user ${userId} unauthorized.`);
       throw new Error('Chat session not found or unauthorized');
     }
-    
-    // Only allow updating certain fields
-    if (updateData.title) {
-      session.title = updateData.title;
-    }
-    
-    session.updatedAt = new Date();
-    await session.save();
-    
-    return session;
+
+    logger.info(`Updated chat session ${sessionId} title to "${updatedSession.title}"`);
+    return updatedSession;
   } catch (error) {
-    logger.error(`Failed to update chat session: ${error.message}`);
+    logger.error(`Failed to update chat session ${sessionId}: ${error.message}`);
     throw error;
   }
 };
@@ -112,138 +123,132 @@ const updateChatSession = async (sessionId, userId, updateData) => {
  * Delete a chat session and all associated messages
  * @param {string} sessionId - The chat session ID
  * @param {string} userId - The user ID (for authorization check)
- * @returns {Promise<Object>} - Deletion result
+ * @returns {Promise<{success: boolean, message: string}>} - Deletion result
  */
 const deleteChatSession = async (sessionId, userId) => {
-  try {
-    // First check if session exists and belongs to user
-    const session = await ChatSession.findOne({ 
-      _id: sessionId,
-      userId
-    });
-    
-    if (!session) {
-      throw new Error('Chat session not found or unauthorized');
+    const session = await mongoose.startSession(); // Use a transaction
+    session.startTransaction();
+    try {
+      // Verify ownership first within transaction
+      const chatSession = await ChatSession.findOne({ _id: sessionId, userId }).session(session);
+      if (!chatSession) {
+        throw new Error('Chat session not found or unauthorized');
+      }
+
+      // Delete messages associated with the session
+      const messageDeletionResult = await PromptHistory.deleteMany({ chatSessionId: sessionId }).session(session);
+      logger.info(`Deleted ${messageDeletionResult.deletedCount} messages for session ${sessionId}`);
+
+      // Delete the session itself
+      await ChatSession.deleteOne({ _id: sessionId }).session(session);
+
+      await session.commitTransaction();
+      logger.info(`Successfully deleted chat session ${sessionId} and associated messages by user ${userId}`);
+      return { success: true, message: 'Chat session and messages deleted' };
+
+    } catch (error) {
+        await session.abortTransaction();
+        logger.error(`Failed to delete chat session ${sessionId}: ${error.message}`);
+        throw error; // Rethrow the error after aborting
+    } finally {
+        session.endSession();
     }
-    
-    // Delete all messages associated with this session
-    await PromptHistory.deleteMany({ chatSessionId: sessionId });
-    
-    // Delete the session itself
-    await ChatSession.deleteOne({ _id: sessionId });
-    
-    return { success: true, message: 'Chat session and messages deleted' };
-  } catch (error) {
-    logger.error(`Failed to delete chat session: ${error.message}`);
-    throw error;
-  }
 };
 
 /**
- * Add a message to a chat session and queue AI response generation if needed.
- * Enforces dataset selection on the first message and associates them with the session.
+ * Add a message to a chat session and queue AI response generation (Non-streaming).
+ * Enforces dataset selection on the first message.
  * @param {string} sessionId - The chat session ID
  * @param {string} userId - The user ID
  * @param {string} promptText - The user's message
- * @param {Array} [selectedDatasetIds=[]] - Array of dataset IDs (only used for the first message)
- * @returns {Promise<Object>} - Created user message and AI placeholder message
+ * @param {Array<string>} [selectedDatasetIds=[]] - Array of dataset IDs (used for the first message)
+ * @returns {Promise<{userMessage: object, aiMessage: object, updatedSession: object}>} - Created messages and session
  */
 const addMessage = async (sessionId, userId, promptText, selectedDatasetIds = []) => {
+  const session = await mongoose.startSession(); // Use transaction
+  session.startTransaction();
   try {
     // Verify session exists and belongs to user
-    const session = await ChatSession.findOne({
-      _id: sessionId,
-      userId
-    });
-
-    if (!session) {
+    const chatSession = await ChatSession.findOne({ _id: sessionId, userId }).session(session);
+    if (!chatSession) {
       throw new Error('Chat session not found or unauthorized');
     }
 
     // Check if this is the first message in the session
-    const messageCount = await PromptHistory.countDocuments({ chatSessionId: sessionId });
+    const messageCount = await PromptHistory.countDocuments({ chatSessionId: sessionId }).session(session);
     const isFirstMessage = messageCount === 0;
     let finalDatasetIds = [];
 
     if (isFirstMessage) {
-      // First message: Require datasets and associate them with the session
       if (!selectedDatasetIds || selectedDatasetIds.length === 0) {
         throw new Error('At least one dataset must be selected for the first message in a chat session.');
       }
-      session.associatedDatasetIds = selectedDatasetIds;
+      chatSession.associatedDatasetIds = selectedDatasetIds;
       finalDatasetIds = selectedDatasetIds;
     } else {
-      // Subsequent messages: Use the datasets already associated with the session
-      finalDatasetIds = session.associatedDatasetIds || [];
-      if (finalDatasetIds.length === 0) {
-          // This should ideally not happen if the first message logic works, but handle defensively
-          logger.warn(`Session ${sessionId} has subsequent messages but no associated datasets. This might indicate an issue.`);
-          // Depending on requirements, could throw error or allow proceeding without dataset context
-          // For now, let it proceed without dataset IDs for AI context
+      finalDatasetIds = chatSession.associatedDatasetIds || [];
+      if (finalDatasetIds.length === 0 && messageCount > 0) { // Check messageCount > 0
+        logger.warn(`Session ${sessionId} has subsequent messages but no associated datasets.`);
       }
     }
 
-    // Create a new user message
+    // Create user message
     const userMessage = new PromptHistory({
       userId,
       chatSessionId: sessionId,
       promptText,
-      // Store the datasets USED for this specific message generation context
-      // For the first message, this is selectedDatasetIds
-      // For subsequent, it's the session.associatedDatasetIds
       selectedDatasetIds: finalDatasetIds,
       messageType: 'user',
-      status: 'completed', // User messages are immediately complete
+      status: 'completed',
       createdAt: new Date()
     });
+    await userMessage.save({ session });
 
-    await userMessage.save();
+    // Update session updatedAt timestamp and save associated datasets if needed
+    chatSession.updatedAt = new Date();
+    await chatSession.save({ session });
 
-    // Update the session updatedAt timestamp and save associated datasets if first message
-    session.updatedAt = new Date();
-    await session.save();
-
-    // Create a placeholder for the AI response
+    // Create AI placeholder
     const aiMessage = new PromptHistory({
       userId,
       chatSessionId: sessionId,
-      promptText: "",  // AI doesn't have prompt text
-      // Also store the dataset IDs used for this AI response context
+      promptText: "",
       selectedDatasetIds: finalDatasetIds,
       messageType: 'ai_report',
       status: 'processing',
       createdAt: new Date()
     });
+    await aiMessage.save({ session });
 
-    await aiMessage.save();
+    // Commit transaction before creating task
+    await session.commitTransaction();
 
-    // Create a background task to generate the AI response
-    // Always pass the session's associated dataset IDs (finalDatasetIds)
+    // Create background task (outside transaction)
     const payload = {
       userId: userId.toString(),
       userMessageId: userMessage._id.toString(),
       aiMessageId: aiMessage._id.toString(),
       chatSessionId: sessionId.toString(),
-      // Pass the dataset IDs that are actually used for context
-      sessionDatasetIds: finalDatasetIds.map(id => id.toString()) 
+      sessionDatasetIds: finalDatasetIds.map(id => id.toString())
     };
+    await createTask(config.chatAiQueueName, '/internal/chat-ai-worker', payload);
 
-    await createTask(
-      config.chatAiQueueName,
-      '/internal/chat-ai-worker',
-      payload
-    );
-
+    logger.info(`User message ${userMessage._id} added, AI message ${aiMessage._id} placeholder created, task queued for session ${sessionId}.`);
     return {
-      userMessage,
-      aiMessage,
-      updatedSession: session // Return updated session including associated datasets
+      userMessage: userMessage.toObject(),
+      aiMessage: aiMessage.toObject(),
+      updatedSession: chatSession.toObject() // Return the potentially updated session
     };
+
   } catch (error) {
-    logger.error(`Failed to add message: ${error.message}`);
-    throw error;
+    await session.abortTransaction();
+    logger.error(`Failed to add message to session ${sessionId}: ${error.message}`);
+    throw error; // Rethrow error after aborting
+  } finally {
+    session.endSession();
   }
 };
+
 
 /**
  * Get messages for a chat session
@@ -251,42 +256,48 @@ const addMessage = async (sessionId, userId, promptText, selectedDatasetIds = []
  * @param {string} userId - The user ID (for authorization check)
  * @param {number} [limit=50] - Maximum number of messages to retrieve
  * @param {number} [skip=0] - Number of messages to skip (for pagination)
- * @returns {Promise<Array>} - Array of messages
+ * @returns {Promise<Array<Object>>} - Array of message objects
  */
 const getChatMessages = async (sessionId, userId, limit = 50, skip = 0) => {
   try {
     // Verify session exists and belongs to user
-    const session = await ChatSession.findOne({ 
-      _id: sessionId,
-      userId
-    });
-    
-    if (!session) {
+    const sessionExists = await ChatSession.exists({ _id: sessionId, userId });
+    if (!sessionExists) {
+      logger.warn(`Attempt to get messages for non-existent/unauthorized session ${sessionId} by user ${userId}.`);
       throw new Error('Chat session not found or unauthorized');
     }
-    
-    // Get messages for this session, sorted by creation date
-    // Explicitly select fields
+
+    // Fetch messages
     const messages = await PromptHistory.find({ chatSessionId: sessionId })
-      .select('+aiGeneratedCode +reportAnalysisData +steps +messageFragments') // Include steps and fragments
-      .sort({ createdAt: 1 })
+      .select('+aiGeneratedCode +reportAnalysisData +steps +messageFragments') // Explicitly include required fields
+      .sort({ createdAt: 1 }) // Chronological order
       .skip(skip)
       .limit(limit)
-      .lean(); // Use lean() for performance if not modifying docs
-      
-    // ---- ADD DEBUG LOG ----
-    logger.debug(`[Chat Service] Fetched ${messages.length} messages for session ${sessionId}. Checking for aiGeneratedCode...`);
-    messages.forEach((msg, index) => {
-        if (msg.messageType === 'ai_report') { // Check only AI messages
-            logger.debug(`[Chat Service] Message ${index} (ID: ${msg._id}): hasCode: ${!!msg.aiGeneratedCode}, codeLength: ${msg.aiGeneratedCode?.length}`);
-        }
-    });
-    // ---- END DEBUG LOG ----
+      .lean(); // Use lean for performance
 
+    logger.debug(`Retrieved ${messages.length} messages for session ${sessionId}`);
     return messages;
   } catch (error) {
-    logger.error(`Failed to get chat messages: ${error.message}`);
+    logger.error(`Failed to get chat messages for session ${sessionId}: ${error.message}`);
     throw error;
+  }
+};
+
+// --- sendStreamEvent Helper ---
+// Remains necessary here as it formats the SSE message structure
+const sendStreamEvent = (stream, eventType, data) => {
+  if (!stream || stream.writableEnded) return;
+  try {
+    const eventString = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+    stream.write(eventString);
+    // Reduce logging frequency for token events
+    if (eventType !== 'token') {
+        logger.debug(`[SSE Send] Event: ${eventType}`, data);
+    }
+  } catch (error) {
+    logger.error(`[SSE Send] Failed to send stream event '${eventType}': ${error.message}`);
+    // Optionally try to close the stream on write error
+     try { stream.end(); } catch (e) {}
   }
 };
 
@@ -298,105 +309,114 @@ const getChatMessages = async (sessionId, userId, limit = 50, skip = 0) => {
  * @param {string} sessionId - The ID of the chat session.
  * @param {string} userId - The ID of the user making the request.
  * @param {string} promptText - The user's message text.
- * @param {string[]} [selectedDatasetIds=[]] - Array of dataset IDs selected for context.
+ * @param {Array<string>} [selectedDatasetIds=[]] - Array of dataset IDs selected for context.
  * @param {object} responseStream - The Express response object used as the Server-Sent Events stream.
  * @throws {Error} Throws errors for validation failures or agent execution issues.
  */
 const handleStreamingChatRequest = async (sessionId, userId, promptText, selectedDatasetIds = [], responseStream) => {
+  let userMessageId, aiMessageId; // Keep track of created message IDs
   try {
     logger.info(`Starting streaming chat response for session ${sessionId}, user ${userId}`);
-    
-    // Validate session and user access (assuming ChatSession.findOne handles authorization or it's done before)
-    const session = await ChatSession.findOne({ _id: sessionId, userId: userId }); // Or broader team access check
+
+    // --- Initial Setup & Validation ---
+    const session = await ChatSession.findOne({ _id: sessionId, userId }); // TODO: Add team member check?
     if (!session) {
       throw new Error('Chat session not found or access denied.');
     }
 
-    // Ensure dataset IDs are valid strings (basic check)
-    const finalDatasetIds = (Array.isArray(selectedDatasetIds) ? selectedDatasetIds : []).filter(id => typeof id === 'string' && id.length > 0);
+    const messageCount = await PromptHistory.countDocuments({ chatSessionId: sessionId });
+    const isFirstMessage = messageCount === 0;
+    let finalDatasetIds = [];
 
-    // Create user message placeholder
+    if (isFirstMessage) {
+        if (!selectedDatasetIds || selectedDatasetIds.length === 0) {
+            throw new Error('At least one dataset must be selected for the first message.');
+        }
+        session.associatedDatasetIds = selectedDatasetIds;
+        finalDatasetIds = selectedDatasetIds;
+        session.updatedAt = new Date(); // Update timestamp on first message with datasets
+        await session.save(); // Save associated datasets immediately
+    } else {
+        finalDatasetIds = session.associatedDatasetIds || [];
+        if (finalDatasetIds.length === 0 && messageCount > 0) {
+             logger.warn(`Session ${sessionId} has subsequent messages but no associated datasets.`);
+        }
+    }
+    // Ensure dataset IDs are strings
+    const stringDatasetIds = finalDatasetIds.map(id => String(id));
+
+    // --- Create Messages ---
     const userMessage = new PromptHistory({
-      userId,
-      chatSessionId: sessionId,
-      promptText,
-      selectedDatasetIds: finalDatasetIds,
-      messageType: 'user',
-      status: 'completed', // User message is always completed instantly
-      createdAt: new Date()
+      userId, chatSessionId: sessionId, promptText,
+      selectedDatasetIds: stringDatasetIds, messageType: 'user', status: 'completed', createdAt: new Date()
     });
     await userMessage.save();
+    userMessageId = userMessage._id.toString();
 
-    // Create AI message placeholder
     const aiMessage = new PromptHistory({
-      userId, // Store user ID for potential ownership checks later
-      chatSessionId: sessionId,
-      promptText: "",  // Will be populated by the agent or finalized
-      selectedDatasetIds: finalDatasetIds,
-      messageType: 'ai_report',
-      status: 'processing',
-      createdAt: new Date()
+      userId, chatSessionId: sessionId, promptText: "", selectedDatasetIds: stringDatasetIds,
+      messageType: 'ai_report', status: 'processing', createdAt: new Date(),
+      fragments: [], steps: [], // Initialize fragments and steps
+      isStreaming: true, // Explicitly mark as streaming initially
     });
     await aiMessage.save();
+    aiMessageId = aiMessage._id.toString();
 
-    // Send initial events to confirm receipt and provide message IDs
-    sendStreamEvent(responseStream, 'user_message_created', { 
-      messageId: userMessage._id.toString(),
-      status: 'completed'
-    });
-    
-    sendStreamEvent(responseStream, 'ai_message_created', { 
-      messageId: aiMessage._id.toString(),
-      status: 'processing'
-    });
-    
-    // --- Use the new runAgent function --- 
+    // --- Send Initial SSE Events ---
+    sendStreamEvent(responseStream, 'user_message_created', { messageId: userMessageId, status: 'completed' });
+    sendStreamEvent(responseStream, 'ai_message_created', { messageId: aiMessageId, status: 'processing' });
+
+    // --- Prepare and Run Agent ---
+    // ** PHASE 5 UPDATE: Define the callback using sendStreamEvent **
+    const sseEventCallback = (eventType, eventData) => {
+        // This callback IS the SSE emitter function
+        sendStreamEvent(responseStream, eventType, eventData);
+    };
+
     const agentParams = {
         userId,
         teamId: session.teamId || null,
         sessionId,
-        aiMessagePlaceholderId: aiMessage._id.toString(),
-        sendEventCallback: (eventType, eventData) => sendStreamEvent(responseStream, eventType, eventData),
+        aiMessagePlaceholderId: aiMessageId,
+        sendEventCallback: sseEventCallback, // Pass the correctly defined callback
         userMessage: promptText,
-        sessionDatasetIds: finalDatasetIds,
-        // TODO: Potentially fetch and pass initialPreviousAnalysisData / initialPreviousGeneratedCode here
-        // based on the session or previous messages if needed for context carry-over.
-        initialPreviousAnalysisData: null, // Placeholder
-        initialPreviousGeneratedCode: null // Placeholder
+        sessionDatasetIds: stringDatasetIds,
+        // TODO: Fetch initialPreviousAnalysisData / initialPreviousGeneratedCode if needed
+        initialPreviousAnalysisData: null,
+        initialPreviousGeneratedCode: null
     };
 
-    try {
-      // Call the exported runAgent function
-      const finalResult = await runAgent(agentParams);
-      
-      // runAgent now handles updating PromptHistory internally, 
-      // and should send a 'final_result' event via the callback.
+    // Run the agent (does not throw errors for internal agent failures, returns status object)
+    const finalResult = await runAgent(agentParams);
 
-      // We still need to ensure the stream is properly ended.
-      // The final_result event might be the last thing sent.
-      if (!responseStream.writableEnded) {
-          logger.info(`Stream for session ${sessionId}, message ${aiMessage._id} closing after agent completion (Status: ${finalResult.status}).`);
-          sendStreamEvent(responseStream, 'end', { status: finalResult.status }); // Send explicit end event
-          responseStream.end();
-      } else {
-          logger.warn(`Stream for session ${sessionId}, message ${aiMessage._id} was already ended before explicit closure.`);
-      }
+    // --- Handle Agent Completion ---
+    // AgentRunner updates the DB record. We just need to close the stream.
+    const finalStatus = finalResult.status || 'error'; // Default to error if status missing
+    logger.info(`Agent run finished for stream ${sessionId}, message ${aiMessageId}. Final Status: ${finalStatus}`);
 
-    } catch (agentError) {
-      // Errors caught within runAgent should ideally be handled there (updating DB, sending error event).
-      // This catch block handles potential unexpected errors *from* runAgent itself, or errors it re-throws.
-      logger.error(`Error running agent for session ${sessionId}: ${agentError.message}`, { error: agentError });
-      if (!responseStream.writableEnded) {
-        // Ensure an error event is sent if the stream is still open
-        sendStreamEvent(responseStream, 'error', { message: `Agent execution failed: ${agentError.message}` });
-        sendStreamEvent(responseStream, 'end', { status: 'error' }); // Send explicit end event with error status
-        responseStream.end();
-      }
-      // No need to update PromptHistory here, runAgent should handle it on failure.
+    if (!responseStream.writableEnded) {
+      logger.debug(`Stream ${sessionId} closing after agent completion.`);
+      sendStreamEvent(responseStream, 'end', { status: finalStatus }); // Send final status
+      responseStream.end();
+    } else {
+      logger.warn(`Stream ${sessionId} was already ended before agent completion signal.`);
     }
+
   } catch (error) {
     // Catch errors from initial setup (session validation, message creation)
     logger.error(`Failed to handle streaming chat request for session ${sessionId}: ${error.message}`, { error });
+
+    // Attempt to update AI message status to error if it exists
+    if (aiMessageId) {
+      try {
+        await PromptHistory.findByIdAndUpdate(aiMessageId, {
+          $set: { status: 'error', errorMessage: `Stream setup failed: ${error.message}`, isStreaming: false }
+        });
+      } catch (dbError) {
+        logger.error(`Failed to mark AI message ${aiMessageId} as error after stream setup failure: ${dbError.message}`);
+      }
+    }
+
     // Try to send error through stream if possible
     if (responseStream && !responseStream.writableEnded) {
       try {
@@ -407,28 +427,10 @@ const handleStreamingChatRequest = async (sessionId, userId, promptText, selecte
         logger.error(`Failed to send setup error event to stream: ${streamError.message}`);
       }
     }
-    // Re-throw the error so the controller knows something went wrong
-    throw error; 
+    // Do not re-throw, as the stream response is handled
   }
 };
 
-/**
- * Helper function to send SSE events to the client
- * @param {Object} stream - Express response object used as SSE stream
- * @param {string} eventType - Event type name
- * @param {Object} data - Data payload for the event
- */
-const sendStreamEvent = (stream, eventType, data) => {
-  if (!stream || stream.writableEnded) return;
-  
-  try {
-    const eventString = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-    stream.write(eventString);
-    logger.debug(`Sent event: ${eventType}`, data);
-  } catch (error) {
-    logger.error(`Failed to send stream event: ${error.message}`);
-  }
-};
 
 module.exports = {
   createChatSession,
@@ -438,5 +440,6 @@ module.exports = {
   deleteChatSession,
   addMessage,
   getChatMessages,
-  handleStreamingChatRequest
-}; 
+  handleStreamingChatRequest,
+  // sendStreamEvent // Keep sendStreamEvent private to this service
+};

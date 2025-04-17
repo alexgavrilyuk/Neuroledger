@@ -222,7 +222,7 @@ Okay, here is an **insanely detailed, phased refactoring plan** for the NeuroLed
 
 ---
 
-## Phase 3: Decompose `AgentExecutor` Class
+## Phase 3: Decompose `AgentExecutor` Class ✅ COMPLETED
 
 **Goal:** Break down the responsibilities of the monolithic `AgentExecutor` class into smaller, focused modules for state, tools, events, and core orchestration.
 
@@ -455,7 +455,7 @@ Okay, here is an **insanely detailed, phased refactoring plan** for the NeuroLed
 
 ---
 
-## Phase 4: Refine System Prompt Generation
+## Phase 4: Refine System Prompt Generation ✅ COMPLETED
 
 **Goal:** Improve the maintainability and readability of the dynamic system prompt generation.
 
@@ -529,7 +529,7 @@ Okay, here is an **insanely detailed, phased refactoring plan** for the NeuroLed
 
 ---
 
-## Phase 5: Standardize Event Emission & Frontend Alignment
+## Phase 5: Standardize Event Emission & Frontend Alignment 
 
 **Goal:** Unify real-time event handling, likely prioritizing SSE, and ensure the frontend (`ChatContext.jsx`, `MessageBubble.jsx`) correctly consumes the standardized events.
 

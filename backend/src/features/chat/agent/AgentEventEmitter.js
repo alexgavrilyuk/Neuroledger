@@ -1,7 +1,8 @@
 // ================================================================================
 // FILE: NeuroLedger copy/backend/src/features/chat/agent/AgentEventEmitter.js
 // PURPOSE: Handles emitting standardized events (primarily for SSE).
-// NEW FILE
+// PHASE 5 UPDATE: No structural change needed, already uses sendEventCallback.
+//                 Ensure all relevant events are emitted via this mechanism.
 // ================================================================================
 
 const logger = require('../../../shared/utils/logger');
@@ -23,7 +24,8 @@ class AgentEventEmitter {
         this.contextInfo = contextInfo; // { userId, sessionId, messageId }
 
         if (typeof sendEventCallback !== 'function') {
-            logger.warn(`[AgentEventEmitter ${this.contextInfo.sessionId}] sendEventCallback is not a function. Events will not be sent.`);
+            // Log warning, but don't prevent operation if agent runs non-streaming
+            logger.warn(`[AgentEventEmitter ${this.contextInfo.sessionId}] sendEventCallback is not a function. Events will not be sent via callback.`);
         }
          logger.debug(`[AgentEventEmitter ${this.contextInfo.sessionId}] Initialized for Message ${this.contextInfo.messageId}`);
     }
@@ -33,6 +35,7 @@ class AgentEventEmitter {
      * @private
      */
     _emit(eventName, payload) {
+        // Only send via callback if it was provided (i.e., streaming context)
         if (typeof this.sendEventCallback !== 'function') return;
 
         // Combine base context with event-specific payload
@@ -46,7 +49,7 @@ class AgentEventEmitter {
             this.sendEventCallback(eventName, fullPayload);
             // Reduced logging noise for tokens
             if (eventName !== 'token') {
-                 logger.debug(`[AgentEventEmitter ${this.contextInfo.sessionId}] Sent event: ${eventName}`, payload);
+                 logger.debug(`[AgentEventEmitter ${this.contextInfo.sessionId}] Sent event via callback: ${eventName}`, payload);
             }
         } catch (e) {
             logger.error(`[AgentEventEmitter ${this.contextInfo.sessionId}] sendEventCallback failed for event ${eventName}: ${e.message}`, e);

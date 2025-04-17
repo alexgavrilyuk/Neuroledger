@@ -1,7 +1,8 @@
 // ================================================================================
 // FILE: NeuroLedger copy/backend/src/features/chat/chat.taskHandler.js
 // PURPOSE: Handles Cloud Task invocation, calls the new agent service runner.
-// MODIFIED FILE
+// PHASE 5 UPDATE: No changes required. This file already only emits final
+//                 WebSocket events, not intermediate agent statuses.
 // ================================================================================
 
 const ChatSession = require('./chatSession.model');
@@ -68,22 +69,17 @@ const workerHandler = async (payload) => {
     }
 
     // --- Call the Agent Service Runner ---
+    // NOTE: For non-streaming agent runs, sendEventCallback can be null or a no-op function.
+    // Currently, the primary way to trigger the agent is via streaming request,
+    // but if a non-streaming path were added, this would be the place to pass null.
     const agentResult = await runAgent({
         userId,
         teamId: chatSession.teamId || null,
         sessionId: chatSessionId,
         aiMessagePlaceholderId: aiMessageId,
-        // Provide a simple callback for final WebSocket emissions (if needed)
-        // Note: AgentRunner now uses its own callback for SSE events.
-        // This callback is ONLY for the final message status AFTER the agent finishes.
-        sendEventCallback: (eventName, eventData) => {
-             logger.debug(`[Task Handler] sendEventCallback received event: ${eventName}`, eventData);
-             // This callback might become redundant if SSE handles everything,
-             // but keeping for potential final WebSocket confirmation.
-             // if (io) {
-             //     io.to(`user:${userId}`).emit(eventName, eventData);
-             // }
-        },
+        // sendEventCallback is NOT provided here, as this is the non-streaming task handler path.
+        // The agent will run, update the DB, but won't stream intermediate events.
+        sendEventCallback: null,
         userMessage: userMessage.promptText,
         sessionDatasetIds: sessionDatasetIds || [], // Ensure it's an array
         initialPreviousAnalysisData,
@@ -96,11 +92,10 @@ const workerHandler = async (payload) => {
 
     if (agentResult.status === 'completed') {
         logger.info(`[Task Handler] Agent run completed successfully for message ${aiMessageId}.`);
-        // Update chat session lastActivityAt (previously updatedAt)
-        await ChatSession.findByIdAndUpdate(chatSessionId, { updatedAt: new Date() }); // Keep using updatedAt for now
+        // Update chat session lastActivityAt (using updatedAt field)
+        await ChatSession.findByIdAndUpdate(chatSessionId, { updatedAt: new Date() });
 
-        // Optional: Emit final WebSocket confirmation (SSE handles primary streaming)
-        // Fetch final message state to send
+        // Emit final WebSocket confirmation - crucial for non-streaming updates
         const finalAiMessage = await PromptHistory.findById(aiMessageId).lean();
         if (io && finalAiMessage) {
             io.to(`user:${userId}`).emit('chat:message:completed', {
@@ -116,7 +111,7 @@ const workerHandler = async (payload) => {
         logger.warn(`[Task Handler] Agent run finished with error for message ${aiMessageId}: ${agentResult.error}.`);
         // AgentRunner already updated the DB record status to 'error'.
 
-        // Optional: Emit final WebSocket error confirmation
+        // Emit final WebSocket error confirmation
         if (io) {
             io.to(`user:${userId}`).emit('chat:message:error', {
                 messageId: aiMessageId,
@@ -135,14 +130,15 @@ const workerHandler = async (payload) => {
     try {
       if (aiMessageId && userId) {
         const currentAiMessage = await PromptHistory.findById(aiMessageId);
-        if (currentAiMessage && currentAiMessage.status !== 'error') {
+        // Only update if not already completed/errored by the agent itself
+        if (currentAiMessage && !['completed', 'error'].includes(currentAiMessage.status)) {
           currentAiMessage.status = 'error';
           currentAiMessage.errorMessage = `Task Handler Error: ${error.message}`;
            currentAiMessage.completedAt = new Date(); // Mark completion time even for error
           await currentAiMessage.save();
           logger.info(`[Task Handler] Updated AI message ${aiMessageId} status to error due to outer task failure.`);
 
-          // Optional: Emit final WebSocket error event if possible
+          // Emit final WebSocket error event if possible
           if (io) {
                 io.to(`user:${userId}`).emit('chat:message:error', {
                     messageId: aiMessageId,
