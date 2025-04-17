@@ -2,6 +2,7 @@ const logger = require('../../../shared/utils/logger');
 const promptService = require('../prompt.service');
 const datasetService = require('../../datasets/dataset.service');
 const { Types } = require('mongoose');
+const { createToolWrapper } = require('./BaseToolWrapper');
 
 /**
  * @typedef {object} GeneratedCodeResult
@@ -9,11 +10,8 @@ const { Types } = require('mongoose');
  */
 
 /**
- * Tool implementation for generating executable Node.js code to perform data analysis.
- * Takes an analysis goal and dataset context, fetches the dataset schema if necessary,
- * calls the prompt service to generate the code, cleans the output (removes markdown fences),
- * and returns the generated code string.
- *
+ * Core logic for generating executable Node.js code to perform data analysis.
+ * 
  * @async
  * @param {object} args - Tool arguments provided by the LLM.
  * @param {string} args.analysis_goal - A detailed description of the analysis task requested by the user.
@@ -22,23 +20,14 @@ const { Types } = require('mongoose');
  * @param {string} context.userId - The ID of the user making the request.
  * @param {string} context.sessionId - The ID of the current chat session.
  * @param {object<string, object>} [context.datasetSchemas] - Optional map of pre-fetched dataset schemas ({ [datasetId]: schemaInfo }).
- * @returns {Promise<{status: 'success'|'error', result?: GeneratedCodeResult, error?: string}>} Result object containing:
- *   - `status`: Indicates success or error.
- *   - `result`: On success, an object containing the generated `code` string.
- *   - `error`: On error, a descriptive error message (e.g., schema missing, generation failed).
+ * @returns {Promise<{status: 'success'|'error', result?: GeneratedCodeResult, error?: string}>} Result object
  */
-async function generate_analysis_code(args, context) {
+async function generate_analysis_code_logic(args, context) {
     const { analysis_goal, dataset_id } = args;
     const { userId, sessionId, datasetSchemas = {} } = context;
 
-    logger.info(`[Tool:generate_analysis_code] Called for Dataset ${dataset_id} by User ${userId} in Session ${sessionId}`);
-
     if (!analysis_goal) {
         return { status: 'error', error: 'Missing required argument: analysis_goal.' };
-    }
-    if (!dataset_id || !Types.ObjectId.isValid(dataset_id)) {
-        logger.warn(`[Tool:generate_analysis_code] Invalid dataset_id provided: ${dataset_id}`);
-        return { status: 'error', error: `Invalid dataset ID format: '${dataset_id}'. Please provide a valid dataset ID.` };
     }
 
     try {
@@ -102,11 +91,10 @@ async function generate_analysis_code(args, context) {
 
     } catch (error) {
         logger.error(`[Tool:generate_analysis_code] Error generating code for Dataset ${dataset_id}, User ${userId}: ${error.message}`, { error });
-        return {
-            status: 'error',
-            error: `Failed to generate analysis code: ${error.message}`
-        };
+        // Re-throw for the wrapper to catch and format consistently
+        throw error;
     }
 }
 
-module.exports = generate_analysis_code; 
+// Export the wrapped function
+module.exports = createToolWrapper('generate_analysis_code', generate_analysis_code_logic); 

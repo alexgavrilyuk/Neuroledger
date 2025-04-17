@@ -1,6 +1,7 @@
 const logger = require('../../../shared/utils/logger');
 const codeExecutionService = require('../../../shared/services/codeExecution.service');
 const { Types } = require('mongoose');
+const { createToolWrapper } = require('./BaseToolWrapper');
 
 /**
  * @callback GetParsedDataCallback
@@ -10,11 +11,8 @@ const { Types } = require('mongoose');
  */
 
 /**
- * Tool implementation for executing previously generated Node.js analysis code in a secure sandbox.
- * Requires the `parse_csv_data` tool to have been run successfully for the specified `dataset_id` beforehand.
- * Uses a callback provided in the `context` to retrieve the parsed data, injects it as `inputData`
- * into the sandbox, and executes the code using the `codeExecutionService`.
- *
+ * Core logic for executing Node.js analysis code in a secure sandbox.
+ * 
  * @async
  * @param {object} args - Tool arguments provided by the LLM.
  * @param {string} args.code - The Node.js code string to execute.
@@ -23,24 +21,14 @@ const { Types } = require('mongoose');
  * @param {string} context.userId - The ID of the user making the request.
  * @param {string} context.sessionId - The ID of the current chat session.
  * @param {GetParsedDataCallback} context.getParsedDataCallback - The callback function to fetch parsed data.
- * @returns {Promise<{status: 'success'|'error', result?: any, error?: string, logs?: string[]}>} Result object containing:
- *   - `status`: Indicates success or error.
- *   - `result`: On success, the JSON result returned by the executed code.
- *   - `error`: On error, a descriptive error message (e.g., data not found, execution error).
- *   - `logs`: An array of console log messages captured during code execution.
+ * @returns {Promise<{status: 'success'|'error', result?: any, error?: string, logs?: string[]}>} Result object
  */
-async function execute_analysis_code(args, context) {
+async function execute_analysis_code_logic(args, context) {
     const { code, dataset_id } = args;
     const { userId, sessionId, getParsedDataCallback } = context;
 
-    logger.info(`[Tool:execute_analysis_code] Called for Dataset ${dataset_id} by User ${userId} in Session ${sessionId}`);
-
     if (!code) {
         return { status: 'error', error: 'Missing required argument: code.' };
-    }
-    if (!dataset_id || !Types.ObjectId.isValid(dataset_id)) {
-        logger.warn(`[Tool:execute_analysis_code] Invalid dataset_id provided: ${dataset_id}`);
-        return { status: 'error', error: `Invalid dataset ID format: '${dataset_id}'. Please provide a valid dataset ID.` };
     }
     if (typeof getParsedDataCallback !== 'function') {
         logger.error(`[Tool:execute_analysis_code] Internal error: Missing or invalid getParsedDataCallback.`);
@@ -86,12 +74,10 @@ async function execute_analysis_code(args, context) {
 
     } catch (error) {
         logger.error(`[Tool:execute_analysis_code] Error executing code for Dataset ${dataset_id}, User ${userId}: ${error.message}`, { error });
-        return {
-            status: 'error',
-            error: `Failed to execute analysis code: ${error.message}`,
-            logs: []
-        };
+        // Re-throw for the wrapper to catch and format consistently
+        throw error;
     }
 }
 
-module.exports = execute_analysis_code; 
+// Export the wrapped function
+module.exports = createToolWrapper('execute_analysis_code', execute_analysis_code_logic); 

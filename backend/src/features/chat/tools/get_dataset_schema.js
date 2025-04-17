@@ -1,6 +1,7 @@
 const logger = require('../../../shared/utils/logger');
 const datasetService = require('../../datasets/dataset.service');
 const { Types } = require('mongoose');
+const { createToolWrapper } = require('./BaseToolWrapper');
 
 /**
  * @typedef {import('../../datasets/dataset.model').DatasetSchemaInfo} DatasetSchemaInfo
@@ -13,29 +14,18 @@ const { Types } = require('mongoose');
  */
 
 /**
- * Tool implementation for retrieving the schema (column names, types, etc.) and row count of a specific dataset.
- * Validates the provided dataset ID and calls the dataset service.
- *
+ * Core logic for retrieving the dataset schema.
+ * 
  * @async
  * @param {object} args - Tool arguments provided by the LLM.
  * @param {string} args.dataset_id - The MongoDB ObjectId of the target dataset.
  * @param {object} context - Additional context provided by the orchestrator.
  * @param {string} context.userId - The ID of the user making the request (for access control).
- * @returns {Promise<{status: 'success'|'error', result?: SchemaResult, error?: string}>} Result object containing:
- *   - `status`: Indicates success or error.
- *   - `result`: On success, an object containing the `schemaInfo` array and `rowCount`.
- *   - `error`: On error, a descriptive error message.
+ * @returns {Promise<{status: 'success'|'error', result?: SchemaResult, error?: string}>} Result object
  */
-async function get_dataset_schema(args, context) {
+async function get_dataset_schema_logic(args, context) {
     const { dataset_id } = args;
     const { userId } = context;
-
-    logger.info(`[Tool:get_dataset_schema] Called for Dataset ${dataset_id} by User ${userId}`);
-
-    if (!dataset_id || !Types.ObjectId.isValid(dataset_id)) {
-        logger.warn(`[Tool:get_dataset_schema] Invalid dataset_id provided: ${dataset_id}`);
-        return { status: 'error', error: `Invalid dataset ID format: '${dataset_id}'. Please provide a valid dataset ID.` };
-    }
 
     try {
         // datasetService.getDatasetSchema is expected to handle access control (userId)
@@ -62,11 +52,10 @@ async function get_dataset_schema(args, context) {
         };
     } catch (error) {
         logger.error(`[Tool:get_dataset_schema] Error for Dataset ${dataset_id}, User ${userId}: ${error.message}`, { error });
-        return {
-            status: 'error',
-            error: `Failed to get dataset schema: ${error.message}`
-        };
+        // Re-throw for the wrapper to catch and format consistently
+        throw error;
     }
 }
 
-module.exports = get_dataset_schema; 
+// Export the wrapped function
+module.exports = createToolWrapper('get_dataset_schema', get_dataset_schema_logic); 

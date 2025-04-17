@@ -2,6 +2,7 @@ const logger = require('../../../shared/utils/logger');
 const datasetService = require('../../datasets/dataset.service');
 const Papa = require('papaparse');
 const { Types } = require('mongoose');
+const { createToolWrapper } = require('./BaseToolWrapper');
 
 /**
  * @typedef {object} ParsedDataResult
@@ -10,33 +11,19 @@ const { Types } = require('mongoose');
  */
 
 /**
- * Tool implementation for parsing the raw CSV content of a specific dataset.
- * Fetches the dataset's raw content, uses PapaParse to parse it into an array of objects,
- * and returns the parsed data along with the row count.
- * The AgentExecutor is responsible for storing the returned `parsedData` in its intermediate state
- * if it's needed for subsequent steps (like `execute_analysis_code`).
- *
+ * Core logic for parsing the raw CSV content of a specific dataset.
+ * 
  * @async
  * @param {object} args - Tool arguments provided by the LLM.
  * @param {string} args.dataset_id - The MongoDB ObjectId of the target dataset.
  * @param {object} context - Additional context provided by the orchestrator.
  * @param {string} context.userId - The ID of the user making the request (for access control).
  * @param {string} context.sessionId - The ID of the current chat session (for logging).
- * @returns {Promise<{status: 'success'|'error', result?: ParsedDataResult, error?: string}>} Result object containing:
- *   - `status`: Indicates success or error.
- *   - `result`: On success, an object containing the `parsedData` array and `rowCount`.
- *   - `error`: On error, a descriptive error message (e.g., dataset not found, parse error).
+ * @returns {Promise<{status: 'success'|'error', result?: ParsedDataResult, error?: string}>} Result object
  */
-async function parse_csv_data(args, context) {
+async function parse_csv_data_logic(args, context) {
     const { dataset_id } = args;
     const { userId, sessionId } = context;
-
-    logger.info(`[Tool:parse_csv_data] Called for Dataset ${dataset_id} by User ${userId} in Session ${sessionId}`);
-
-    if (!dataset_id || !Types.ObjectId.isValid(dataset_id)) {
-        logger.warn(`[Tool:parse_csv_data] Invalid dataset_id provided: ${dataset_id}`);
-        return { status: 'error', error: `Invalid dataset ID format: '${dataset_id}'. Please provide a valid dataset ID.` };
-    }
 
     try {
         // 1. Fetch Raw Content
@@ -101,11 +88,10 @@ async function parse_csv_data(args, context) {
         if (error.name === 'ValidationError' || error.name === 'CastError') {
              return { status: 'error', error: `Invalid dataset ID format provided: ${dataset_id}` };
         }
-        return {
-            status: 'error',
-            error: `Failed to parse CSV data: ${error.message}`
-        };
+        // Re-throw for the wrapper to catch and format consistently
+        throw error;
     }
 }
 
-module.exports = parse_csv_data; 
+// Export the wrapped function
+module.exports = createToolWrapper('parse_csv_data', parse_csv_data_logic); 
