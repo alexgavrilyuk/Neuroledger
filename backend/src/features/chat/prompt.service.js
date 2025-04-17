@@ -1,56 +1,16 @@
 // backend/src/features/chat/prompt.service.js
-// ** UPDATED FILE - Now includes team business context **
-const anthropic = require('../../shared/external_apis/claude.client');
-// --- NEW: Import Gemini client ---
-const geminiClient = require('../../shared/external_apis/gemini.client');
-// --- NEW: Import OpenAI client ---
-const openaiClient = require('../../shared/external_apis/openai.client');
+// ** UPDATED FILE - Now uses LLM provider abstraction **
+
+// Remove direct client imports
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
 const Team = require('../teams/team.model');
 const TeamMember = require('../teams/team-member.model');
-// PromptHistory is now updated by AgentService
-// const PromptHistory = require('./prompt.model');
 const logger = require('../../shared/utils/logger');
-// Import the NEW agent system prompt generator
+// Import the system prompt generator
 const generateAgentSystemPrompt = require('./system-prompt-template');
-
-// --- NEW: Helper function to get user model preference ---
-const getUserModelPreference = async (userId) => {
-    if (!userId) {
-        logger.warn('Cannot fetch model preference without userId. Defaulting to Claude.');
-        return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Consistent default
-    }
-    try {
-        // Select only the preferredAiModel field
-        const user = await User.findById(userId).select('settings.preferredAiModel').lean();
-        const preference = user?.settings?.preferredAiModel || 'claude'; // Default to claude if not found
-
-        if (preference === 'gemini') {
-             // Check if Gemini client is available before returning preference
-             if (!geminiClient.isAvailable()) {
-                 logger.warn(`User ${userId} prefers Gemini, but Gemini client is not available. Falling back to Claude.`);
-                 return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Fallback model
-             }
-             // Use a specific Gemini model
-             return { provider: 'gemini', model: 'gemini-2.5-pro-preview-03-25' }; // Example: Using Flash
-        } else if (preference === 'openai') {
-            // Check if OpenAI client is available
-            if (!openaiClient.isAvailable()) {
-                logger.warn(`User ${userId} prefers OpenAI, but OpenAI client is not available. Falling back to Claude.`);
-                return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Fallback model
-            }
-            // Use the specified OpenAI model
-            return { provider: 'openai', model: 'o3-mini-2025-01-31' }; // Using gpt-3.5-turbo for "o3 mini"
-        } else { // Default case is claude
-             // Use a specific Claude model
-             return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Default Claude model
-        }
-    } catch (error) {
-        logger.error(`Error fetching user model preference for user ${userId}: ${error.message}. Defaulting to Claude.`);
-        return { provider: 'claude', model: 'claude-3-7-sonnet-20250219' }; // Default model on error
-    }
-};
+// Import the provider factory
+const { getProvider, getUserModelPreference } = require('../../shared/llm_providers/ProviderFactory');
 
 // Enhanced context assembly function - now includes team context
 const assembleContext = async (userId, selectedDatasetIds) => {
@@ -107,18 +67,12 @@ const assembleContext = async (userId, selectedDatasetIds) => {
  * @returns {Promise<string>} - The raw text response from the LLM.
  */
 const getLLMReasoningResponse = async (agentContext) => {
-    // --- MODIFIED: Get user preference ---
+    // Get the user ID from the agent context
     const { userId } = agentContext;
-    const { provider, model: modelToUse } = await getUserModelPreference(userId);
-    logger.info(`[LLM Reasoning] Using ${provider} model: ${modelToUse} for user ${userId}`);
-
-    // Check provider availability - ADDED OpenAI check
-    if ((provider === 'claude' && !anthropic) ||
-        (provider === 'gemini' && !geminiClient.isAvailable()) ||
-        (provider === 'openai' && !openaiClient.isAvailable())) {
-        logger.error(`getLLMReasoningResponse called for ${provider} but client is not available.`);
-        throw new Error(`AI assistant (${provider}) is currently unavailable.`);
-    }
+    
+    // Get the user's model preference (for logging)
+    const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[LLM Reasoning] Using ${preferredProvider} model: ${modelToUse} for user ${userId}`);
 
     const startTime = Date.now();
     // Destructure fields needed, including fullChatHistory, excluding historySummary
@@ -126,84 +80,68 @@ const getLLMReasoningResponse = async (agentContext) => {
             analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = agentContext;
 
     try {
-        // 1. Generate the system prompt using the new template
-        //    Remove historySummary from the parameters passed
+        // 1. Get the appropriate LLM provider
+        const provider = await getProvider(userId);
+        
+        // 2. Generate the system prompt using the template
         const systemPrompt = generateAgentSystemPrompt({
             userContext,
             teamContext,
-            // historySummary REMOVED
             currentTurnSteps,
             availableTools,
             analysisResult,
             previousAnalysisResultSummary,
             hasPreviousGeneratedCode,
-            // ADD DATASET CONTEXT - This was missing!
             datasetSchemas: agentContext.datasetSchemas || {},
             datasetSamples: agentContext.datasetSamples || {}
         });
-        // Log the length, maybe log the prompt itself if needed for debugging (as before)
+        
+        // Log the length, maybe log the prompt itself if needed for debugging
         logger.debug(`Agent System Prompt generated. Length: ${systemPrompt.length}`);
-        // --- ADDED: Log the full system prompt being sent (as before) ---
-        logger.debug(`[Agent Reasoning] Full System Prompt being sent to ${provider} model ${modelToUse}:\n------ START SYSTEM PROMPT ------\n${systemPrompt}\n------ END SYSTEM PROMPT ------`);
-        // --- END ADDED LOG ---
+        logger.debug(`[Agent Reasoning] Full System Prompt being sent to ${preferredProvider} model ${modelToUse}:\n------ START SYSTEM PROMPT ------\n${systemPrompt}\n------ END SYSTEM PROMPT ------`);
 
-        // 2. Construct the messages array for the API call
-        //    Include the fullChatHistory before the current originalQuery.
+        // 3. Construct the messages array for the API call
         const messages = [
-            ...(fullChatHistory || []), // Spread the formatted history array, ensure it's an array
+            ...(fullChatHistory || []), // Spread the formatted history array
             { role: "user", content: originalQuery } // The user's latest query
         ];
 
         // Log the number of messages being sent
-        logger.debug(`[Agent Reasoning] Sending ${messages.length} messages (history + current) to ${provider}.`);
+        logger.debug(`[Agent Reasoning] Sending ${messages.length} messages (history + current) to provider.`);
 
-
-        // 3. Prepare API options based on provider
+        // 4. Prepare API options
         const apiOptions = {
             model: modelToUse,
-            // Adjusted token limits - ADDED OpenAI
-            max_tokens: provider === 'gemini' ? 28192 : (provider === 'openai' ? 24096 : 24096), // OpenAI similar to Claude
             system: systemPrompt,
             messages, // Pass the combined history + current message
+            max_tokens: 24096, // Default to 24k tokens
             temperature: 0.1
         };
 
+        // 5. Call the provider to generate content
+        logger.debug(`Calling provider API for Agent Reasoning with model ${apiOptions.model}...`);
+        const apiResponse = await provider.generateContent(apiOptions);
 
-        // 4. Call the appropriate API - ADDED OpenAI
-        let apiResponse;
-        logger.debug(`Calling ${provider} API for Agent Reasoning with model ${apiOptions.model}...`);
-
-        if (provider === 'gemini') {
-            apiResponse = await geminiClient.generateContent(apiOptions);
-        } else if (provider === 'openai') {
-            apiResponse = await openaiClient.createChatCompletion(apiOptions);
-        } else { // Default to claude
-            apiResponse = await anthropic.messages.create(apiOptions);
-        }
-
-        // 5. Extract raw response (Structure should be consistent due to client adaptation)
+        // 6. Extract raw response
         const rawResponse = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text : null;
 
         if (!rawResponse) {
-            logger.error(`Unexpected or empty response format from ${provider} API for agent reasoning:`, apiResponse);
-            throw new Error(`AI assistant (${provider}) provided an empty or unparseable response.`);
+            logger.error(`Unexpected or empty response format from provider API for agent reasoning:`, apiResponse);
+            throw new Error(`AI assistant provided an empty or unparseable response.`);
         }
 
-        logger.debug(`${provider} Agent RAW response received. Length: ${rawResponse?.length}`);
-        // Optional: Log only a snippet of raw response if too long
-        // logger.debug(`Raw Response Snippet: ${rawResponse.substring(0, 200)}...`); 
+        logger.debug(`Agent RAW response received. Length: ${rawResponse?.length}`);
         logger.debug(`Raw Response: ${rawResponse}`); // Keep full log for now
 
-
         const durationMs = Date.now() - startTime;
-        logger.info(`LLM Reasoning step via ${provider} completed in ${durationMs}ms.`);
+        logger.info(`LLM Reasoning step completed in ${durationMs}ms.`);
 
-        // 6. Return the raw response
+        // 7. Return the raw response
         return rawResponse;
 
     } catch (error) {
-        logger.error(`Error during ${provider} LLM reasoning API call: ${error.message}`, error);
-        throw new Error(`AI assistant (${provider}) failed to generate a response: ${error.message}`);
+        logger.error(`Error during LLM reasoning API call: ${error.message}`, error);
+        throw new Error(`AI assistant failed to generate a response: ${error.message}`);
     }
 };
 
@@ -244,31 +182,34 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
     7.  **DO NOT** define functions or variables outside the main script body unless necessary for clarity (helper functions are okay).
     8.  Handle potential data issues gracefully (e.g., missing values, unexpected types) using checks and default values where appropriate.
     9.  **CRITICAL - Data Access:** Column names in the \`inputData\` objects (derived from the CSV headers) might not exactly match the concepts mentioned in the \`Analysis Goal\` (e.g., \`row['Actual Income']\` vs \`row['Income']\`, case differences like \`row['budget expenses']\` vs \`row['BudgetExpenses']\`). Your code **MUST** dynamically find the correct column/property name for each required metric (like income, budget income, expenses, budget expenses, and specific expense categories). Do this by iterating through \`Object.keys(row)\` and using case-insensitive comparisons or keyword matching (e.g., find a key containing \`income\` but not \`budget\`, find a key containing \`expense\` but not \`budget\`) to locate the relevant data field within each \`row\` object before attempting to parse its value. Do NOT rely on hardcoded, case-sensitive property names found only in the schema example.
-    10. Output ONLY the raw Javascript code. Do not include any explanations, comments outside the code, or markdown formatting.
+    10. **CRITICAL - Number Parsing:** When reading numeric values (like income, expenses, budget figures), the values might be strings containing currency symbols (like '$'), commas (','), or other non-numeric characters. You **MUST** implement a robust parsing function. This function should first check if the value is null, undefined, or an empty string, returning 0 in those cases. If it's a string, it should remove common currency symbols and thousand separators (commas) BEFORE attempting to parse it as a number using \`parseFloat()\`. If parsing fails or results in NaN, return 0. Do NOT just remove all non-numeric characters, as this can break numbers with decimals. Use a helper function for this parsing logic.
+    11. Output ONLY the raw Javascript code. Do not include any explanations, comments outside the code, or markdown formatting.
 
-    **Example (Conceptual):**
+    **Example (Conceptual - Focus on Parsing Logic):**
     \`\`\`javascript
-    // Access the pre-parsed data
-    const data = inputData;
+    function safeParseFloat(value) {
+      if (value === null || value === undefined) return 0;
+      let numStr = String(value).trim();
+      if (numStr === '') return 0;
+      
+      // Remove common currency symbols ($) and commas (,)
+      numStr = numStr.replace(/\$|,/g, ''); 
+      
+      const parsed = parseFloat(numStr);
+      return isNaN(parsed) ? 0 : parsed;
+    }
 
-    // Perform calculations...
-    let total = 0;
+    const data = inputData;
+    let totalIncome = 0;
     data.forEach(row => {
-      // Safely access properties and perform calculations
-      const value = parseFloat(row?.['some_column']); // Example of safe access
-      if (!isNaN(value)) {
-        total += value;
-      }
+      // Assume incomeKey was found dynamically earlier
+      const incomeValue = row[incomeKey]; 
+      totalIncome += safeParseFloat(incomeValue); 
     });
 
-    // Prepare the result object
-    const result = {
-      calculatedTotal: total,
-      numberOfRows: data.length
-    };
-
-    // Send the result back
-    sendResult(result);
+    // ... rest of the analysis ...
+    
+    sendResult({ /* ... results ... */ });
     \`\`\`
     `;
 
@@ -284,48 +225,38 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
  * @returns {Promise<{code: string | null}>} - The generated code string or null on failure.
  */
 const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => {
-    const { provider, model: modelToUse } = await getUserModelPreference(userId);
-    logger.info(`[Analysis Code Gen] Using ${provider} model: ${modelToUse} for user ${userId}`);
-
-    // Check availability
-    if ((provider === 'claude' && !anthropic) ||
-        (provider === 'gemini' && !geminiClient.isAvailable()) ||
-        (provider === 'openai' && !openaiClient.isAvailable())) {
-        logger.error(`generateAnalysisCode called but selected provider (${provider}) client is not available.`);
-        throw new Error(`AI assistant (${provider}) is currently unavailable for code generation.`);
-    }
+    // Get the user's model preference (for logging)
+    const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[Analysis Code Gen] Using ${preferredProvider} model: ${modelToUse} for user ${userId}`);
 
     const startTime = Date.now();
-    logger.info('Generating analysis Node.js code for goal: \"%s...\" using %s', analysisGoal.substring(0, 50), provider);
+    logger.info('Generating analysis Node.js code for goal: \"%s...\" using provider', analysisGoal.substring(0, 50));
 
-    // Generate the system prompt using the renamed function
+    // Generate the system prompt
     const systemPrompt = generateAnalysisCodePrompt({ analysisGoal, datasetSchema });
 
     try {
-        const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the provided TASK and OUTPUT REQUIREMENTS in the system prompt."}]; // Simplified user message
+        // Get the appropriate LLM provider
+        const provider = await getProvider(userId);
+        
+        const messages = [{ role: "user", content: "Generate the Node.js analysis code based on the provided TASK and OUTPUT REQUIREMENTS in the system prompt."}];
 
         const apiOptions = {
             model: modelToUse,
-            max_tokens: provider === 'gemini' ? 18192 : (provider === 'openai' ? 8192 : 14096),
             system: systemPrompt,
             messages,
+            max_tokens: 14096, // Default to 14k tokens for code
             temperature: 0.0 // Low temp for code gen
         };
 
-        let apiResponse;
-        if (provider === 'gemini') {
-            apiResponse = await geminiClient.generateContent(apiOptions);
-        } else if (provider === 'openai') {
-            apiResponse = await openaiClient.createChatCompletion(apiOptions);
-        } else { // Default to Claude
-            apiResponse = await anthropic.messages.create(apiOptions);
-        }
-
+        // Call the provider to generate content
+        const apiResponse = await provider.generateContent(apiOptions);
+        
         const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
 
         if (!generatedCode) {
-            logger.error(`Analysis code generation by ${provider} returned empty content.`, apiResponse);
-            throw new Error(`AI assistant (${provider}) failed to generate analysis code.`);
+            logger.error(`Analysis code generation returned empty content.`, apiResponse);
+            throw new Error(`AI assistant failed to generate analysis code.`);
         }
 
         // Basic code validation
@@ -342,8 +273,8 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
 
     } catch (error) {
         const durationMs = Date.now() - startTime;
-        logger.error(`Error during ${provider} analysis code generation API call with model ${modelToUse}: ${error.message}. Time: ${durationMs}ms`, error);
-        throw new Error(`AI assistant (${provider}) failed to generate analysis code: ${error.message}`);
+        logger.error(`Error during analysis code generation API call with model ${modelToUse}: ${error.message}. Time: ${durationMs}ms`, error);
+        throw new Error(`AI assistant failed to generate analysis code: ${error.message}`);
     }
 };
 
@@ -356,19 +287,11 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
  * @returns {Promise<{react_code: string | null}>} - The generated React code string or null on failure.
  */
 const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
-    // --- MODIFIED: Get user preference ---
-    const { provider, model: modelToUse } = await getUserModelPreference(userId);
-    logger.info(`[Report Code Gen] Using ${provider} model: ${modelToUse} for user ${userId}`);
-
-    // Check availability - ADDED OpenAI check
-    if ((provider === 'claude' && !anthropic) ||
-        (provider === 'gemini' && !geminiClient.isAvailable()) ||
-        (provider === 'openai' && !openaiClient.isAvailable())) {
-         logger.error(`generateReportCode called but selected provider (${provider}) client is not available.`);
-         throw new Error(`AI assistant (${provider}) is currently unavailable for report code generation.`);
-    }
+    // Get the user's model preference (for logging)
+    const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[Report Code Gen] Using ${preferredProvider} model: ${modelToUse} for user ${userId}`);
     
-    // Fix 4: Add validation for analysis data
+    // Add validation for analysis data
     if (!analysisSummary || !dataJson) {
         const error = 'Missing analysis summary or data for report code generation.';
         logger.error(`[Report Gen] ${error}`, {
@@ -377,7 +300,6 @@ const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
         });
         throw new Error(error);
     }
-    // End Fix 4
 
     // Validate that dataJson is a string (as it should be passed from agent.service)
     if (typeof dataJson !== 'string') {
@@ -405,8 +327,7 @@ const generateReportCode = async ({ userId, analysisSummary, dataJson }) => {
         dataKeys: Object.keys(parsedDataJson)
     });
 
-    // --- MODIFIED: System Prompt for React Report Code Generation ---
-    // Updated to handle arbitrary JSON structures
+    // System Prompt for React Report Code Generation
     const systemPrompt = `\\
 You are an expert React developer specializing in data visualization using the Recharts library.
 Your task is to generate a **single, self-contained React functional component** named 'ReportComponent' based on the provided analysis data and summary.
@@ -496,7 +417,6 @@ function ReportComponent({ reportData }) {
       }
     \`;
 
-    // React component creation based on data analysis
     const renderMainMetrics = () => {
         // Example of intelligently determining what to render based on data structure
         if (reportData?.metrics || reportData?.summary || reportData?.overview) {
@@ -548,42 +468,30 @@ function ReportComponent({ reportData }) {
 Focus on creating a functional, well-structured, and visually clear report component based on your intelligent analysis of the provided \`reportData\` and \`analysisSummary\`.`;
 
     try {
+        // Get the appropriate LLM provider
+        const provider = await getProvider(userId);
+        
         const messages = [{ role: "user", content: "Generate a robust React component that intelligently analyzes the arbitrary JSON structure provided and creates appropriate visualizations. The code should handle any data structure gracefully with proper type checking and error handling."}];
-        // Use a capable model, maybe Sonnet is sufficient for this?
+        
         const apiOptions = {
             model: modelToUse,
-            // Adjusted token limits - ADDED OpenAI
-            max_tokens: provider === 'gemini' ? 16000 : (provider === 'openai' ? 16000 : 16000), // OpenAI gets 16k
             system: systemPrompt,
             messages,
+            max_tokens: 16000,
             temperature: 0.1 // Low temperature for more predictable code structure
         };
 
-        logger.debug(`Calling ${provider} API for Report Code Generation with model ${modelToUse}...`);
+        logger.debug(`Calling provider API for Report Code Generation with model ${modelToUse}...`);
 
-        // --- MODIFIED: Call appropriate API based on provider - ADDED OpenAI ---
-        let apiResponse;
-        if (provider === 'gemini') {
-            apiResponse = await geminiClient.generateContent(apiOptions);
-        } else if (provider === 'openai') {
-             apiResponse = await openaiClient.createChatCompletion(apiOptions);
-        } else if (provider === 'claude' && anthropic) { // Keep explicit Claude check
-             apiResponse = await anthropic.messages.create(apiOptions);
-        } else {
-             // Handle cases where the provider is unknown or the client isn't available after the initial check (shouldn't happen)
-             logger.error(`generateReportCode: Unsupported provider '${provider}' or client not available.`);
-             throw new Error(`Unsupported provider '${provider}' or client not available for report generation.`);
-        }
-        // --- END MODIFICATION ---
-
-        // --- MODIFIED: Extract content consistently ---
-        // Response structure is adapted in each client file to be consistent
+        // Call the provider to generate content
+        const apiResponse = await provider.generateContent(apiOptions);
+        
+        // Extract the generated code
         const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
-        // --- END MODIFICATION ---
 
         if (!generatedCode) {
-            logger.error(`Unexpected or empty response format from ${provider} API for report code gen:`, apiResponse);
-            throw new Error(`AI assistant (${provider}) failed to generate report code.`);
+            logger.error(`Unexpected or empty response format from provider API for report code gen:`, apiResponse);
+            throw new Error(`AI assistant failed to generate report code.`);
         }
 
         // Basic validation: Does it look like a React component using createElement?
@@ -597,7 +505,7 @@ Focus on creating a functional, well-structured, and visually clear report compo
 
     } catch (error) {
         logger.error(`Error during report code generation API call with model ${modelToUse}: ${error.message}`, error);
-        throw new Error(`AI assistant (${provider}) failed to generate report code: ${error.message}`);
+        throw new Error(`AI assistant failed to generate report code: ${error.message}`);
     }
 };
 
@@ -607,26 +515,23 @@ Focus on creating a functional, well-structured, and visually clear report compo
  * @param {Function} streamCallback - Function to call with each received chunk/event.
  *                                      Callback signature: (eventType, data)
  *                                      eventType: 'token', 'tool_call', 'completed', 'error'
+ * @returns {Promise<string>} - The complete text response from the LLM
  */
 const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
     const { userId } = agentContext;
-    const { provider, model: modelToUse } = await getUserModelPreference(userId);
-    logger.info(`[LLM Reasoning - STREAMING] Using ${provider} model: ${modelToUse} for user ${userId}`);
-
-    // Check provider availability
-    if ((provider === 'claude' && !anthropic) ||
-        (provider === 'gemini' && !geminiClient.isAvailable()) ||
-        (provider === 'openai' && !openaiClient.isAvailable())) {
-        logger.error(`streamLLMReasoningResponse called for ${provider} but client is not available.`);
-        streamCallback('error', { message: `AI assistant (${provider}) is currently unavailable.` });
-        return; // Stop processing
-    }
+    // Get the user's model preference (for logging)
+    const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(userId);
+    logger.info(`[LLM Reasoning - STREAMING] Using ${preferredProvider} model: ${modelToUse} for user ${userId}`);
 
     const startTime = Date.now();
     const { originalQuery, fullChatHistory, currentTurnSteps, availableTools, userContext, teamContext,
             analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode } = agentContext;
 
     try {
+        // 1. Get the appropriate LLM provider
+        const provider = await getProvider(userId);
+        
+        // 2. Generate the system prompt
         const systemPrompt = generateAgentSystemPrompt({
             userContext, teamContext, currentTurnSteps, availableTools,
             analysisResult, previousAnalysisResultSummary, hasPreviousGeneratedCode,
@@ -635,84 +540,79 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
         });
         logger.debug(`[Agent Reasoning - STREAMING] System Prompt Length: ${systemPrompt.length}`);
 
+        // 3. Construct the messages array for the API call
         const messages = [
             ...(fullChatHistory || []), 
             { role: "user", content: originalQuery }
         ];
-        logger.debug(`[Agent Reasoning - STREAMING] Sending ${messages.length} messages to ${provider}.`);
+        logger.debug(`[Agent Reasoning - STREAMING] Sending ${messages.length} messages to provider.`);
 
+        // 4. Prepare API options
         const apiOptions = {
             model: modelToUse,
-            max_tokens: provider === 'gemini' ? 28192 : (provider === 'openai' ? 24096 : 24096),
+            max_tokens: 24096,
             system: systemPrompt,
             messages,
             temperature: 0.1,
-            stream: true // <<< Enable streaming for all providers here
+            stream: true // Enable streaming
         };
 
-        // ADDED: Log the attempt to start streaming
-        logger.debug(`[Agent Reasoning - STREAMING] Starting ${provider} stream with model ${modelToUse}`);
+        // Log the attempt to start streaming
+        logger.debug(`[Agent Reasoning - STREAMING] Starting provider stream with model ${modelToUse}`);
         
-        let stream;
-        if (provider === 'gemini') {
-            stream = await geminiClient.streamGenerateContent(apiOptions);
-        } else if (provider === 'openai') {
-            stream = await openaiClient.streamChatCompletion(apiOptions);
-        } else { // Claude
-            stream = await anthropic.messages.create(apiOptions);
-        }
+        // 5. Start the stream
+        const stream = await provider.streamContent(apiOptions);
 
-        logger.info(`LLM Reasoning stream started via ${provider}.`);
+        logger.info(`LLM Reasoning stream started.`);
         
-        // ADDED: Track chunk count to help debug stream completion issues
+        // Track chunks and response
         let chunkCount = 0;
         let lastChunkTime = Date.now();
         let jsonBlockDetected = false; // Flag to stop sending tokens to FE
-        let fullLLMResponseText = ''; // <<< ADDED: Accumulate full response
+        let fullLLMResponseText = ''; // Accumulate full response
 
-        // Process the stream
+        // Process the stream - this section depends on the provider implementation
         for await (const chunk of stream) {
             // Update tracking variables
             chunkCount++;
             lastChunkTime = Date.now();
             
-            // --- Chunk processing logic needs to be provider-specific --- 
-            if (provider === 'openai') {
+            // This section will depend on the actual data structure returned by each provider's stream
+            // We can adapt this logic in Phase 2 of the refactoring if needed
+            // For now, we'll handle the specific providers differently
+            
+            if (preferredProvider === 'openai') {
                 const delta = chunk.choices?.[0]?.delta?.content;
                 if (delta) {
-                    fullLLMResponseText += delta; // <<< ACCUMULATE
-                    if (!jsonBlockDetected) { // Only send token if JSON not seen
-                         // Check if this delta contains the start of JSON
-                         const jsonMarkerIndex = delta.indexOf('```json'); // Use text variable consistent with gemini logic below?
-                         const toolMarkerIndex = delta.indexOf('{\n  "tool":'); 
-                         let markerFoundAt = -1;
-                         if (jsonMarkerIndex !== -1) markerFoundAt = jsonMarkerIndex;
-                         else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
+                    fullLLMResponseText += delta;
+                    if (!jsonBlockDetected) {
+                        const jsonMarkerIndex = delta.indexOf('```json');
+                        const toolMarkerIndex = delta.indexOf('{\n  "tool":'); 
+                        let markerFoundAt = -1;
+                        if (jsonMarkerIndex !== -1) markerFoundAt = jsonMarkerIndex;
+                        else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
 
-                         if (markerFoundAt !== -1) {
-                             jsonBlockDetected = true;
-                             const textToSend = delta.substring(0, markerFoundAt).trim();
-                             if (textToSend) streamCallback('token', { content: textToSend });
-                         } else {
-                              streamCallback('token', { content: delta });
-                         }
+                        if (markerFoundAt !== -1) {
+                            jsonBlockDetected = true;
+                            const textToSend = delta.substring(0, markerFoundAt).trim();
+                            if (textToSend) streamCallback('token', { content: textToSend });
+                        } else {
+                            streamCallback('token', { content: delta });
+                        }
                     }
                 }
-                // ADDED: More detailed finish tracking
+                
                 if(chunk.choices?.[0]?.finish_reason) {
                     const reason = chunk.choices?.[0]?.finish_reason;
                     logger.info(`OpenAI stream finished. Reason: ${reason}, Total chunks: ${chunkCount}`);
-                    // Signal completion with finish reason
                     streamCallback('finish', { finishReason: reason });
                 }
-            } else if (provider === 'gemini') {
-                // Gemini SDK yields chunks directly
+            } else if (preferredProvider === 'gemini') {
                 try {
                     const text = chunk.text(); 
-                    fullLLMResponseText += text; // <<< ACCUMULATE
+                    fullLLMResponseText += text;
                     logger.debug(`[STREAM DEBUG] Gemini chunk text content: "${text}"`);
 
-                    // Only process if JSON block hasn't been detected yet
                     if (!jsonBlockDetected) {
                         const jsonMarkerIndex = text.indexOf('```json');
                         const toolMarkerIndex = text.indexOf('{\n  "tool":'); 
@@ -721,7 +621,6 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
                         else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
 
                         if (markerFoundAt !== -1) {
-                            // Marker FOUND in this chunk
                             jsonBlockDetected = true; 
                             const textToSend = text.substring(0, markerFoundAt).trim();
                             if (textToSend) {
@@ -729,54 +628,50 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
                                 streamCallback('token', { content: textToSend });
                             }
                             logger.debug('[STREAM DEBUG] JSON block detected, stopping further token stream.');
-                            // Skip sending the rest of this chunk or any subsequent text tokens
                         } else {
-                            // Marker NOT found in this chunk, send the whole text
                             if (text) {
                                 streamCallback('token', { content: text });
                             }
-                        } // <<< End of marker check block
-                    } // <<< End of jsonBlockDetected check
+                        }
+                    }
                     
-                    // Check for finish info (this should still happen even if JSON was detected)
+                    // Check for finish info
                     if (chunk.candidates && chunk.candidates[0] && chunk.candidates[0].finishReason) {
                         const reason = chunk.candidates[0].finishReason;
                         logger.info(`Gemini stream chunk has finish info. Reason: ${reason}, Total chunks: ${chunkCount}`);
                         streamCallback('finish', { finishReason: reason });
                     }
                 } catch (e) {
-                    // Handle potential errors during text extraction from chunk
-                     logger.error(`Error processing Gemini stream chunk: ${e.message}`, chunk);
-                     streamCallback('error', { message: `Error processing AI response chunk: ${e.message}` });
+                    logger.error(`Error processing Gemini stream chunk: ${e.message}`, chunk);
+                    streamCallback('error', { message: `Error processing AI response chunk: ${e.message}` });
                 }
             } else { // Claude
-                 if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-                     const deltaText = chunk.delta.text;
-                     fullLLMResponseText += deltaText; // <<< ACCUMULATE
-                     if (!jsonBlockDetected) { // Check flag for Claude too
-                         // Check for JSON start (simpler check for now)
-                         const jsonMarkerIndex = deltaText.indexOf('```json');
-                         const toolMarkerIndex = deltaText.indexOf('{\n  "tool":');
-                         let markerFoundAt = -1;
-                         if (jsonMarkerIndex !== -1) markerFoundAt = jsonMarkerIndex;
-                         else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
+                if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+                    const deltaText = chunk.delta.text;
+                    fullLLMResponseText += deltaText;
+                    if (!jsonBlockDetected) {
+                        const jsonMarkerIndex = deltaText.indexOf('```json');
+                        const toolMarkerIndex = deltaText.indexOf('{\n  "tool":');
+                        let markerFoundAt = -1;
+                        if (jsonMarkerIndex !== -1) markerFoundAt = jsonMarkerIndex;
+                        else if (toolMarkerIndex !== -1) markerFoundAt = toolMarkerIndex;
 
-                         if (markerFoundAt !== -1) {
+                        if (markerFoundAt !== -1) {
                             jsonBlockDetected = true;
                             const textToSend = deltaText.substring(0, markerFoundAt).trim();
                             if (textToSend) streamCallback('token', { content: textToSend });
-                         } else {
-                             streamCallback('token', { content: deltaText });
-                         }
-                     }
-                 } 
-                 // ... (rest of Claude handling: message_stop, tool_use, etc.) ...
+                        } else {
+                            streamCallback('token', { content: deltaText });
+                        }
+                    }
+                }
+                // Handling for other Claude event types would go here
             }
         }
 
         // Stream ended normally
         const durationMs = Date.now() - startTime;
-        logger.info(`LLM Reasoning stream via ${provider} completed in ${durationMs}ms. Total chunks: ${chunkCount}, Last chunk received ${Date.now() - lastChunkTime}ms ago`);
+        logger.info(`LLM Reasoning stream completed in ${durationMs}ms. Total chunks: ${chunkCount}, Last chunk received ${Date.now() - lastChunkTime}ms ago`);
         
         // Check if we received a finish signal
         if (chunkCount > 0) {
@@ -786,23 +681,20 @@ const streamLLMReasoningResponse = async (agentContext, streamCallback) => {
         
         streamCallback('completed', { finalContent: null }); // Signal completion
         
-        // <<< ADDED: Return the fully accumulated text >>>
+        // Return the fully accumulated text
         return fullLLMResponseText;
 
     } catch (error) {
-        logger.error(`Error during ${provider} LLM streaming reasoning API call: ${error.message}`, error);
-        streamCallback('error', { message: `AI assistant (${provider}) failed to generate a streaming response: ${error.message}` });
+        logger.error(`Error during LLM streaming reasoning API call: ${error.message}`, error);
+        streamCallback('error', { message: `AI assistant failed to generate a streaming response: ${error.message}` });
         return null; // Return null or throw on error
     }
 };
 
 module.exports = {
     assembleContext, // Keep for potential future use
-    getLLMReasoningResponse, // New function for the agent
-    streamLLMReasoningResponse, // Export the NEW streaming function
-    generateAnalysisCode, // Export new function
-    generateReportCode, // Add the new function
-    // summarizeChatHistory REMOVED from exports
-    // generateCode, // Mark as removed/obsolete
-    // generateWithHistory // Mark as removed/obsolete
+    getLLMReasoningResponse, // For agent
+    streamLLMReasoningResponse, // For streaming
+    generateAnalysisCode, // For analysis
+    generateReportCode, // For reports
 };
