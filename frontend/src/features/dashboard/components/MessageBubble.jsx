@@ -2,15 +2,14 @@
 import React, { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 // Import Heroicons separately
-import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid'; 
+import { UserIcon, CpuChipIcon, ExclamationCircleIcon, DocumentChartBarIcon } from '@heroicons/react/24/solid';
 // Import React Icons (Font Awesome) separately
-import { FaCircleNotch, FaExclamationTriangle, FaList, FaSearch, FaCode, FaPlayCircle, FaMicrochip, FaTools, FaCheckCircle, FaTimesCircle } from 'react-icons/fa'; 
+import { FaCircleNotch, FaExclamationTriangle, FaList, FaSearch, FaCode, FaPlayCircle, FaMicrochip, FaTools, FaCheckCircle, FaTimesCircle } from 'react-icons/fa';
 import Spinner from '../../../shared/ui/Spinner';
 import Button from '../../../shared/ui/Button';
-import { useChat } from '../context/ChatContext'; 
-// Import logger
+import { useChat } from '../context/ChatContext';
 import logger from '../../../shared/utils/logger';
-import CodeBlock from './CodeBlock'; // Import the CodeBlock component (we'll create this later)
+import CodeBlock from './CodeBlock'; // Import the CodeBlock component
 
 // Define tool display map here as it's used within this component
 const toolDisplayMap = {
@@ -27,30 +26,21 @@ const toolDisplayMap = {
 };
 
 const MessageBubble = ({ message, onViewReport }) => {
-    const { 
-      isStreaming,
-      streamingMessageId,
-    } = useChat();
-    
     const bubbleRef = useRef(null);
 
-    useEffect(() => {
-      if (message.isStreaming && bubbleRef.current) { 
-        bubbleRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
-      }
-    }, [message.aiResponseText, message.isStreaming]);
-
+    // Log the message prop on every render for debugging
     useEffect(() => {
         console.log('[MessageBubble Render - Direct Log] Message ID:', message._id, 'Data:', JSON.stringify(message));
     }, [message]);
 
     const isUser = message.messageType === 'user';
-    
     const isError = message.status === 'error';
+    // Explicitly check for these statuses
     const isThinking = message.status === 'thinking';
     const isUsingTool = message.status === 'using_tool';
-    const isProcessing = message.status === 'processing' || isThinking || isUsingTool;
+    const isInitialProcessing = message.status === 'processing'; // Initial state after creation
     const isCompleted = message.status === 'completed';
+    const isStreaming = message.isStreaming; // Use the flag from context
 
     const isReportAvailable = message.messageType === 'ai_report' &&
                               isCompleted &&
@@ -72,41 +62,28 @@ const MessageBubble = ({ message, onViewReport }) => {
         ? `bg-gradient-to-br from-red-400 to-red-500 text-white`
         : `bg-gradient-to-br from-gray-200 to-gray-300 text-gray-700 dark:from-gray-600 dark:to-gray-700 dark:text-gray-200`;
 
-    const extractCodeBlocks = (text) => {
-      if (!text) return { textWithoutCode: '', codeBlocks: [] };
-      
-      const codeBlockRegex = /```(?:(\w+)\n)?([\s\S]*?)```/g;
-      const codeBlocks = [];
-      let match;
-      let lastIndex = 0;
-      let textWithoutCode = '';
-      
-      while ((match = codeBlockRegex.exec(text)) !== null) {
-        // Add text before this code block
-        textWithoutCode += text.substring(lastIndex, match.index);
-        
-        // Extract language and code
-        const language = match[1] || 'javascript';
-        const code = match[2];
-        
-        // Add a placeholder for the code block
-        textWithoutCode += `<CODE_BLOCK_${codeBlocks.length}>`;
-        
-        // Store the code block
-        codeBlocks.push({ language, code });
-        
-        lastIndex = match.index + match[0].length;
-      }
-      
-      // Add any remaining text
-      textWithoutCode += text.substring(lastIndex);
-      
-      return { textWithoutCode, codeBlocks };
+    // --- Code Block Extraction (Keep as is) ---
+     const extractCodeBlocks = (text) => {
+        if (!text) return { textWithoutCode: '', codeBlocks: [] };
+        const codeBlockRegex = /```(?:(\w+)\n)?([\s\S]*?)```/g;
+        const codeBlocks = [];
+        let match;
+        let lastIndex = 0;
+        let textWithoutCode = '';
+        while ((match = codeBlockRegex.exec(text)) !== null) {
+            textWithoutCode += text.substring(lastIndex, match.index);
+            const language = match[1] || 'javascript';
+            const code = match[2];
+            textWithoutCode += `<CODE_BLOCK_${codeBlocks.length}>`;
+            codeBlocks.push({ language, code });
+            lastIndex = match.index + match[0].length;
+        }
+        textWithoutCode += text.substring(lastIndex);
+        return { textWithoutCode, codeBlocks };
     };
 
+    // --- Modified renderContent Logic ---
     const renderContent = () => {
-        const { textWithoutCode, codeBlocks } = extractCodeBlocks(message.aiResponseText);
-        
         if (isUser) {
             return (
                 <div className="leading-relaxed">
@@ -120,6 +97,7 @@ const MessageBubble = ({ message, onViewReport }) => {
             );
         }
 
+        // AI Message Logic
         if (isError) {
             const errorMsg = message.errorMessage || "An unexpected error occurred.";
             return (
@@ -130,79 +108,93 @@ const MessageBubble = ({ message, onViewReport }) => {
             );
         }
 
-        const renderMarkdownContent = () => {
-             if (!textWithoutCode && codeBlocks.length === 0) return null; // Handle empty case
-
-             const parts = textWithoutCode.split(/<CODE_BLOCK_(\d+)>/);
-             return parts.map((part, index) => {
-                 if (index % 2 === 0) {
-                     // Only render markdown if part is not empty or just whitespace
-                     return part.trim() ? <ReactMarkdown key={index}>{part}</ReactMarkdown> : null;
-                 } else {
-                     const codeBlockIndex = parseInt(part, 10);
-                     if (codeBlocks[codeBlockIndex]) {
-                         return <CodeBlock key={index} language={codeBlocks[codeBlockIndex].language} code={codeBlocks[codeBlockIndex].code} />;
-                     } else {
-                         return null; // Should not happen if regex is correct
-                     }
-                 }
-             }).filter(Boolean); // Filter out nulls from empty markdown parts
-        };
-
-        let mainContentElement = null;
-        const renderedMarkdown = renderMarkdownContent();
-
-        if (message.aiResponseText || codeBlocks.length > 0) {
-             mainContentElement = (
-                 <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
-                     {renderedMarkdown}
-                     {/* Show blinking cursor only if actively streaming and not yet complete */}
-                     {message.isStreaming && !isCompleted && <span className="inline-block w-2 h-4 bg-gray-700 dark:bg-gray-300 ml-1 animate-blink"></span>}
-                 </div>
-             );
-        } else if (isProcessing && message.isStreaming) {
-             // Show indicator if processing but no text received yet
-             mainContentElement = (
+        // --- Handle Initial Processing States ---
+        if ((isInitialProcessing || isThinking) && (!message.fragments || message.fragments.length === 0)) {
+            // Show "Thinking..." if status is processing or thinking AND no fragments exist yet
+             return (
                  <div className="flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400">
-                     <FaCircleNotch className={`h-4 w-4 animate-spin`}/>
-                     <span className="italic font-medium">
-                         Receiving response...
-                     </span>
+                     <FaMicrochip className={`h-4 w-4 animate-pulse text-blue-500`}/>
+                     <span className="italic font-medium">Thinking...</span>
                  </div>
              );
-         } else if (isCompleted && !isReportAvailable && !message.aiResponseText) {
-             // Handle completed but empty response (not a report)
-            mainContentElement = <p className="italic text-gray-500 dark:text-gray-400">No response content.</p>;
-         }
+        }
+        // --- End Initial Processing States ---
 
-        // --- Tool Status Indicator (Live/Active Step) --- 
-        let toolStatusIndicator = null;
-        if (isThinking) {
-            toolStatusIndicator = (
-                <div className="mt-2 flex items-center gap-x-2 py-1 text-gray-500 dark:text-gray-400 border-t border-gray-200 dark:border-gray-600 pt-2">
-                    <FaMicrochip className={`h-4 w-4 animate-pulse`}/>
-                    <span className="italic font-medium">Thinking...</span>
-                </div>
+        // --- Render Fragments and Tool Status ---
+        const renderedFragments = (message.fragments || []).map((fragment, index) => {
+             if (fragment.type === 'text') {
+                 // --- MODIFICATION: Handle Markdown and Code Blocks within text fragments ---
+                 const { textWithoutCode, codeBlocks } = extractCodeBlocks(fragment.content);
+                 if (!textWithoutCode.trim() && codeBlocks.length === 0) return null;
+
+                 const parts = textWithoutCode.split(/<CODE_BLOCK_(\d+)>/);
+                 return (
+                     <div key={`frag-${index}-text`} className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
+                         {parts.map((part, partIndex) => {
+                             if (partIndex % 2 === 0) {
+                                 return part.trim() ? <ReactMarkdown key={partIndex}>{part}</ReactMarkdown> : null;
+                             } else {
+                                 const codeBlockIndex = parseInt(part, 10);
+                                 const codeBlock = codeBlocks[codeBlockIndex];
+                                 return codeBlock ? <CodeBlock key={partIndex} language={codeBlock.language} code={codeBlock.code} /> : null;
+                             }
+                         }).filter(Boolean)}
+                     </div>
+                 );
+                 // --- END MODIFICATION ---
+             } else if (fragment.type === 'step') {
+                 // Render the styled step UI element
+                 const toolInfo = toolDisplayMap[fragment.tool] || toolDisplayMap.default;
+                 const isSuccess = !fragment.error;
+                 const statusText = fragment.error ? `Error: ${fragment.error}` : fragment.resultSummary || 'Completed';
+
+                 return (
+                     <div
+                         key={`frag-${index}-step-${fragment.tool}`}
+                         title={statusText}
+                         className={`flex items-center gap-x-2 text-xs p-1.5 rounded mt-2 mb-1 ${isSuccess ? 'text-gray-600 dark:text-gray-300' : 'text-red-600 dark:text-red-300'}`}
+                     >
+                         {isSuccess ? (
+                             <FaCheckCircle className="h-3.5 w-3.5 flex-shrink-0 text-green-500" />
+                         ) : (
+                             <FaTimesCircle className="h-3.5 w-3.5 flex-shrink-0 text-red-500" />
+                         )}
+                         <toolInfo.Icon className="h-3.5 w-3.5 flex-shrink-0" />
+                         <span className="font-medium truncate">{toolInfo.text.replace(/ing\.\.\./, 'ed').replace(/\.\.\./, '')}</span>
+                     </div>
+                 );
+             } else if (fragment.type === 'error') {
+                  return (
+                      <div key={`frag-${index}-error`} className="text-red-600 dark:text-red-300 font-medium flex items-center gap-x-2 mt-2 text-xs">
+                          <FaExclamationTriangle className="h-4 w-4 flex-shrink-0" />
+                          <span>{fragment.content}</span>
+                      </div>
+                  );
+             }
+             return null;
+         }).filter(Boolean); // Filter out null fragments
+
+        // --- Live Tool Status Indicator (Only if actively using tool) ---
+        let liveToolIndicator = null;
+        if (isUsingTool && message.toolName) {
+            const toolInfo = toolDisplayMap[message.toolName] || toolDisplayMap.default;
+            liveToolIndicator = (
+                 <div className={`mt-2 border rounded-lg p-2 flex items-center gap-2 text-xs font-medium bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800/50 text-blue-700 dark:text-blue-300`}>
+                     <toolInfo.Icon className="h-4 w-4 animate-spin flex-shrink-0" />
+                     <span>{toolInfo.text}</span>
+                 </div>
             );
-        } else if (isUsingTool && message.toolName) {
-           const toolInfo = toolDisplayMap[message.toolName] || toolDisplayMap.default;
-           toolStatusIndicator = (
-                <div className={`mt-2 border rounded-lg p-2 flex items-center gap-2 text-xs font-medium bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800/50 text-blue-700 dark:text-blue-300`}>
-                    <toolInfo.Icon className="h-4 w-4 animate-spin flex-shrink-0" />
-                    <span>{toolInfo.text}</span>
-                </div>
-           );
         }
 
-        // --- Report Button --- 
+        // --- Report Button ---
         let reportButton = null;
         if (isReportAvailable) {
-             reportButton = (
+            reportButton = (
                 <div className="mt-3 flex items-center border-t border-gray-200 dark:border-gray-600 pt-3">
                     <Button
                         variant="primary"
                         size="sm"
-                        onClick={() => onViewReport(message)}
+                        onClick={() => onViewReport(message)} // Pass the whole message
                         leftIcon={DocumentChartBarIcon}
                         className="shadow-soft-md dark:shadow-soft-dark-md transform hover:scale-102 active:scale-98"
                     >
@@ -212,60 +204,24 @@ const MessageBubble = ({ message, onViewReport }) => {
             );
         }
 
-        // --- Render Fragments --- 
-        const renderedFragments = (message.fragments || []).map((fragment, index) => {
-            if (fragment.type === 'text') {
-                // Render markdown for text fragments
-                 return (
-                     <div key={`frag-${index}-text`} className="prose prose-sm dark:prose-invert max-w-none leading-relaxed">
-                         <ReactMarkdown>{fragment.content}</ReactMarkdown>
-                     </div>
-                 );
-            } else if (fragment.type === 'step') {
-                // Render the styled step UI element
-                const toolInfo = toolDisplayMap[fragment.tool] || toolDisplayMap.default;
-                const isSuccess = !fragment.error;
-                const statusText = fragment.error ? `Error: ${fragment.error}` : fragment.resultSummary || 'Completed';
-                
-                return (
-                    <div 
-                        key={`frag-${index}-step-${fragment.tool}`} 
-                        title={statusText} 
-                        className={`flex items-center gap-x-2 text-xs p-1.5 rounded mt-2 mb-1 ${isSuccess ? 'text-gray-600 dark:text-gray-300' : 'text-red-600 dark:text-red-300'}`}
-                    >
-                        {isSuccess ? (
-                            <FaCheckCircle className="h-3.5 w-3.5 flex-shrink-0 text-green-500" />
-                        ) : (
-                            <FaTimesCircle className="h-3.5 w-3.5 flex-shrink-0 text-red-500" />
-                        )}
-                        <toolInfo.Icon className="h-3.5 w-3.5 flex-shrink-0" />
-                        <span className="font-medium truncate">{toolInfo.text.replace(/ing\.\.\./, 'ed').replace(/\.\.\./, '')}</span> 
-                    </div>
-                );
-            } else if (fragment.type === 'error') { // Handle potential error fragments 
-                 return (
-                     <div key={`frag-${index}-error`} className="text-red-600 dark:text-red-300 font-medium flex items-center gap-x-2 mt-2 text-xs">
-                         <FaExclamationTriangle className="h-4 w-4 flex-shrink-0" />
-                         <span>{fragment.content}</span>
-                     </div>
-                 );
-            }
-            return null;
-        });
-
-        // --- Final Combined Return --- 
+        // --- Combine Rendered Elements ---
         return (
-            <div className="space-y-1"> 
-                 {renderedFragments} 
-                 {/* Blinking cursor */} 
-                 {message.isStreaming && !isUsingTool && !isThinking && <span className="inline-block w-2 h-4 bg-gray-700 dark:bg-gray-300 ml-1 animate-blink"></span>}
-                 {/* Live status indicator */} 
-                 {toolStatusIndicator} 
-                 {/* Report button */} 
-                 {reportButton}
-             </div>
+            <div className="space-y-1">
+                {renderedFragments.length > 0 && renderedFragments}
+                {/* Show blinking cursor if streaming and not completed/error */}
+                {isStreaming && !isCompleted && !isError && <span className="inline-block w-2 h-4 bg-gray-700 dark:bg-gray-300 ml-1 animate-blink"></span>}
+                 {/* Show the live tool indicator if applicable */}
+                {liveToolIndicator}
+                {/* Show report button if available */}
+                {reportButton}
+                 {/* Handle case where completed but no content/report */}
+                 {isCompleted && !isReportAvailable && renderedFragments.length === 0 && (
+                     <p className="italic text-gray-500 dark:text-gray-400">No response content.</p>
+                 )}
+            </div>
         );
     };
+    // --- End renderContent ---
 
     return (
         <div className={`flex items-start gap-x-3 my-3 lg:my-4`} ref={bubbleRef}>
