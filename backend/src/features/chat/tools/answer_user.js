@@ -1,3 +1,9 @@
+// ================================================================================
+// FILE: backend/src/features/chat/tools/answer_user.js
+// PURPOSE: Tool logic for signaling a final answer.
+// PHASE 2 UPDATE: No specific error codes needed, validation handled by wrapper.
+// ================================================================================
+
 const logger = require('../../../shared/utils/logger');
 const { createToolWrapper } = require('./BaseToolWrapper');
 
@@ -8,7 +14,7 @@ const { createToolWrapper } = require('./BaseToolWrapper');
 
 /**
  * Core logic for the answer_user tool that signals a final answer.
- * 
+ *
  * @async
  * @param {object} args - Tool arguments provided by the LLM.
  * @param {string} args.textResponse - The final textual response intended for the user (as formulated by the LLM).
@@ -21,21 +27,19 @@ async function answer_user_logic(args, context) {
     const { textResponse } = args;
     const { userId, sessionId } = context;
 
-    if (typeof textResponse !== 'string' || textResponse.trim() === '') {
-         logger.warn(`[Tool:_answerUserTool] Invoked with empty or invalid textResponse argument by LLM.`);
-         // Still signal success, as the intent is to answer. The orchestrator should have the raw response.
-         return { status: 'success', result: { isFinalAnswer: true } };
-    }
+    // Argument validation (presence of textResponse) is handled by the BaseToolWrapper via schema
 
-    // This tool doesn't need to *do* anything with the textResponse itself,
-    // the orchestrator uses the LLM's invocation of this tool as the signal to stop.
-    // We just return a success status to confirm the tool was correctly called.
+    logger.info(`[Tool:_answerUserTool] Signaling final answer for Session ${sessionId}.`);
+
+    // This tool's primary purpose is to signal the end state.
+    // The orchestrator/runner uses the fact that this tool was called.
+    // The actual text response is usually taken from the LLM's output that triggered this tool call.
     return {
         status: 'success',
         result: { isFinalAnswer: true } // Explicitly signal this is the final answer
     };
 }
 
-// Export the wrapped function 
-// Note: For this special tool we keep the wrapper minimal as it doesn't do dataset validation
-module.exports = createToolWrapper('_answerUserTool', answer_user_logic); 
+// Export the wrapped function
+// The wrapper handles basic validation (like ensuring textResponse exists).
+module.exports = createToolWrapper('_answerUserTool', answer_user_logic);

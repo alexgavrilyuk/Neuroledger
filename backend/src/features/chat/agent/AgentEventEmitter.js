@@ -1,8 +1,7 @@
 // ================================================================================
-// FILE: NeuroLedger copy/backend/src/features/chat/agent/AgentEventEmitter.js
+// FILE: backend/src/features/chat/agent/AgentEventEmitter.js
 // PURPOSE: Handles emitting standardized events (primarily for SSE).
-// PHASE 5 UPDATE: No structural change needed, already uses sendEventCallback.
-//                 Ensure all relevant events are emitted via this mechanism.
+// PHASE 2 UPDATE: Include errorCode in emitToolResult payload.
 // ================================================================================
 
 const logger = require('../../../shared/utils/logger');
@@ -24,7 +23,6 @@ class AgentEventEmitter {
         this.contextInfo = contextInfo; // { userId, sessionId, messageId }
 
         if (typeof sendEventCallback !== 'function') {
-            // Log warning, but don't prevent operation if agent runs non-streaming
             logger.warn(`[AgentEventEmitter ${this.contextInfo.sessionId}] sendEventCallback is not a function. Events will not be sent via callback.`);
         }
          logger.debug(`[AgentEventEmitter ${this.contextInfo.sessionId}] Initialized for Message ${this.contextInfo.messageId}`);
@@ -35,19 +33,12 @@ class AgentEventEmitter {
      * @private
      */
     _emit(eventName, payload) {
-        // Only send via callback if it was provided (i.e., streaming context)
         if (typeof this.sendEventCallback !== 'function') return;
 
-        // Combine base context with event-specific payload
-        const fullPayload = {
-            ...this.contextInfo,
-            ...payload,
-        };
+        const fullPayload = { ...this.contextInfo, ...payload };
 
         try {
-            // Use the callback directly provided by AgentRunner
             this.sendEventCallback(eventName, fullPayload);
-            // Reduced logging noise for tokens
             if (eventName !== 'token') {
                  logger.debug(`[AgentEventEmitter ${this.contextInfo.sessionId}] Sent event via callback: ${eventName}`, payload);
             }
@@ -58,20 +49,19 @@ class AgentEventEmitter {
 
     // --- Specific Event Emitters ---
 
-    /** Emits agent:thinking status. */
-    emitThinking() {
-        this._emit('agent:thinking', {});
+    /** Emits agent:thinking status with the reasoning text. */
+    emitThinking(thinkingText = 'Processing...') {
+        this._emit('agent:thinking', { thinking: thinkingText });
     }
 
     /** Emits agent:using_tool status. */
     emitUsingTool(toolName, args) {
-        // Avoid logging potentially large args here, logged elsewhere
-         this._emit('agent:using_tool', { toolName, args }); // Send full args for FE if needed
+         this._emit('agent:using_tool', { toolName, args });
     }
 
-    /** Emits agent:tool_result status. */
-    emitToolResult(toolName, summary, error = null) {
-        this._emit('agent:tool_result', { toolName, resultSummary: summary, error });
+    /** Emits agent:tool_result status including optional error code. */
+    emitToolResult(toolName, summary, error = null, errorCode = null) { // Added errorCode param
+        this._emit('agent:tool_result', { toolName, resultSummary: summary, error, errorCode }); // Include errorCode
     }
 
     /** Emits agent:final_answer status with text and code. */
@@ -79,18 +69,17 @@ class AgentEventEmitter {
          this._emit('agent:final_answer', {
              text: text,
              aiGeneratedCode: aiGeneratedCode,
-             analysisResult: analysisResult // Include analysis result
+             analysisResult: analysisResult
          });
      }
 
     /** Emits agent:error status. */
-    emitAgentError(errorMsg) {
-        this._emit('agent:error', { error: errorMsg });
+    emitAgentError(errorMsg, errorCode = null) { // Added optional errorCode
+        this._emit('agent:error', { error: errorMsg, errorCode: errorCode }); // Include errorCode
     }
 
     /** Passes through token events received from the LLM stream callback. */
     emitStreamToken(token) {
-        // Forward token directly, it's already formatted { content: ... } by prompt service
         this._emit('token', { content: token });
     }
 
@@ -101,12 +90,12 @@ class AgentEventEmitter {
 
      /** Passes through generic 'completed' signal from the LLM stream callback. */
      emitStreamCompleted() {
-         this._emit('completed', { finalContent: null }); // Payload structure matches prompt service
+         this._emit('completed', { finalContent: null });
      }
 
      /** Passes through error events from the LLM stream callback. */
      emitStreamError(errorMessage) {
-         this._emit('error', { message: errorMessage }); // Payload structure matches prompt service
+         this._emit('error', { message: errorMessage });
      }
 }
 

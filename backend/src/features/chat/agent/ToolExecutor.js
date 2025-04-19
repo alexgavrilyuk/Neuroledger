@@ -1,7 +1,7 @@
 // ================================================================================
-// FILE: NeuroLedger copy/backend/src/features/chat/agent/ToolExecutor.js
+// FILE: backend/src/features/chat/agent/ToolExecutor.js
 // PURPOSE: Loads and executes agent tools. Assumes tools are wrapped.
-// MODIFIED: Ignore BaseToolWrapper.js during dynamic loading.
+// FIX: Added tool.schemas.js to the exclusion filter during dynamic loading.
 // ================================================================================
 
 const logger = require('../../../shared/utils/logger');
@@ -21,6 +21,7 @@ try {
             file.endsWith('.js') &&
             file !== 'tool.definitions.js' && // Ignore definitions
             file !== 'BaseToolWrapper.js' && // Ignore the wrapper utility
+            file !== 'tool.schemas.js' && // *** ADDED: Ignore schemas file ***
             !file.startsWith('.') // Ignore hidden files
         )
         // ***********************
@@ -79,7 +80,7 @@ class ToolExecutor {
             const errorMsg = `Unknown tool requested: ${toolName}`;
             logger.error(`[ToolExecutor ${executionContext.sessionId}] ${errorMsg}`);
             // Return structure consistent with wrapped tools
-            return { status: 'error', error: errorMsg, args };
+            return { status: 'error', error: errorMsg, args, errorCode: 'UNKNOWN_TOOL' }; // Added errorCode
         }
 
         try {
@@ -95,7 +96,8 @@ class ToolExecutor {
             return {
                 status: 'error',
                 error: `Unexpected failure during tool execution: ${error.message}`,
-                args
+                args,
+                errorCode: 'TOOL_UNEXPECTED_ERROR' // Added errorCode
             };
         }
     }

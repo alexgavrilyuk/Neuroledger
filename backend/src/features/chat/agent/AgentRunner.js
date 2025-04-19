@@ -1,7 +1,7 @@
 // ================================================================================
-// FILE: NeuroLedger copy/backend/src/features/chat/agent/AgentRunner.js
+// FILE: backend/src/features/chat/agent/AgentRunner.js
 // PURPOSE: Main orchestrator replacing AgentExecutor logic, uses other agent modules.
-// MODIFIED: Pass analysisResult and datasetSchemas in executionContext to tools.
+// PHASE 5 UPDATE: Implemented iterative code refinement loop for execute_analysis_code.
 // ================================================================================
 
 const logger = require('../../../shared/utils/logger');
@@ -13,9 +13,10 @@ const AgentContextService = require('../agentContext.service'); // From parent d
 const PromptHistory = require('../prompt.model');
 const { summarizeToolResult } = require('../agent.utils'); // Keep summarize util
 
-// Constants from old AgentExecutor
+// Constants
 const MAX_AGENT_ITERATIONS = 10;
-const MAX_TOOL_RETRIES = 1;
+const MAX_TOOL_RETRIES = 1; // Retries for the *same* tool call (e.g., network hiccup)
+const MAX_CODE_REFINEMENT_ATTEMPTS = 2; // PHASE 5: Max attempts for generate->execute cycle
 
 /**
  * Orchestrates the agent's reasoning loop for a single turn.
@@ -35,12 +36,12 @@ class AgentRunner {
      */
     constructor(userId, teamId, sessionId, aiMessageId, sendEventCallback, initialContext = {}) {
         this.userId = userId;
-        this.teamId = teamId; // Added teamId property
+        this.teamId = teamId;
         this.sessionId = sessionId;
-        this.aiMessageId = aiMessageId; // Store for DB update
+        this.aiMessageId = aiMessageId;
 
         this.stateManager = new AgentStateManager(initialContext);
-        this.toolExecutor = new ToolExecutor(); // Tool definitions loaded internally
+        this.toolExecutor = new ToolExecutor();
         this.eventEmitter = new AgentEventEmitter(sendEventCallback, { userId, sessionId, messageId: aiMessageId });
         this.contextService = new AgentContextService(userId, teamId, sessionId);
 
@@ -56,44 +57,27 @@ class AgentRunner {
     async run(userMessage, sessionDatasetIds = []) {
         logger.info(`[AgentRunner ${this.sessionId}] Starting run for Message ${this.aiMessageId}. Query: "${userMessage.substring(0, 50)}..."`);
         this.stateManager.setQuery(userMessage);
-        this.eventEmitter.emitThinking();
 
         try {
             // --- Prepare Initial Context ---
+            // (Code remains the same as Phase 4)
             const initialContextPromise = this.contextService.getInitialUserTeamContext();
             const datasetContextPromise = this.contextService.preloadDatasetContext(sessionDatasetIds);
             const historyPromise = this.contextService.prepareChatHistoryAndArtifacts(this.aiMessageId);
-
-            // Settle promises and update state manager
             const [initialCtxResult, datasetCtxResult, historyResultSettled] = await Promise.allSettled([
                 initialContextPromise, datasetContextPromise, historyPromise
             ]);
-
-            if (initialCtxResult.status === 'fulfilled') {
-                 this.stateManager.setUserTeamContext(initialCtxResult.value.userContext, initialCtxResult.value.teamContext);
-            } // Log errors handled by contextService
-
-            if (datasetCtxResult.status === 'fulfilled') {
-                 this.stateManager.setDatasetSchemas(datasetCtxResult.value.datasetSchemas);
-                 this.stateManager.setDatasetSamples(datasetCtxResult.value.datasetSamples);
-            } // Log errors handled by contextService
-
-             if (historyResultSettled.status === 'fulfilled') {
+            if (initialCtxResult.status === 'fulfilled') this.stateManager.setUserTeamContext(initialCtxResult.value.userContext, initialCtxResult.value.teamContext);
+            if (datasetCtxResult.status === 'fulfilled') { this.stateManager.setDatasetSchemas(datasetCtxResult.value.datasetSchemas); this.stateManager.setDatasetSamples(datasetCtxResult.value.datasetSamples); }
+            if (historyResultSettled.status === 'fulfilled') {
                 const historyResult = historyResultSettled.value;
                 this.stateManager.setChatHistory(historyResult.fullChatHistory);
-                // Carry over previous artifacts if not already set by constructor
-                if (this.stateManager.getIntermediateResult('analysisResult') === null) { // Check analysisResult key
-                    this.stateManager.setIntermediateResult('_previousAnalysisResult', historyResult.previousAnalysisResult); // Use internal key? Or directly set analysisResult? Let's set analysisResult
-                     this.stateManager.context.intermediateResults.analysisResult = historyResult.previousAnalysisResult;
-                     logger.debug(`[AgentRunner] Carried over previous analysis result.`);
-                }
-                 if (this.stateManager.getIntermediateResult('generatedReportCode') === null) { // Check report code key
-                    this.stateManager.setIntermediateResult('generatedReportCode', historyResult.previousGeneratedCode);
-                     logger.debug(`[AgentRunner] Carried over previous generated report code.`);
-                 }
-            } // Log errors handled by contextService
-
+                if (this.stateManager.getIntermediateResult('analysisResult') === null) { this.stateManager.context.intermediateResults.analysisResult = historyResult.previousAnalysisResult; logger.debug(`[AgentRunner] Carried over previous analysis result.`); }
+                if (this.stateManager.getIntermediateResult('generatedReportCode') === null) { this.stateManager.setIntermediateResult('generatedReportCode', historyResult.previousGeneratedCode); logger.debug(`[AgentRunner] Carried over previous generated report code.`); }
+            }
             logger.debug(`[AgentRunner ${this.sessionId}] Initial context prepared.`);
+            // --- End Prepare Initial Context ---
+
 
             // --- Main Loop ---
             let iterations = 0;
@@ -103,19 +87,19 @@ class AgentRunner {
 
                 // 1. Get context for LLM
                 const llmContext = this.stateManager.getContextForLLM();
-                 llmContext.userId = this.userId; // Ensure userId is passed
+                 llmContext.userId = this.userId;
 
-                // 2. Call LLM Orchestrator (Handles streaming and parsing)
-                const streamCallback = (type, data) => {
-                    // Forward stream events using the EventEmitter
+                // 2. Call LLM Orchestrator
+                const streamCallback = (type, data) => { /* ... (event emitter calls, same as Phase 4) ... */
                     if (type === 'token') this.eventEmitter.emitStreamToken(data.content);
                     else if (type === 'finish') this.eventEmitter.emitStreamFinish(data.finishReason);
                     else if (type === 'completed') this.eventEmitter.emitStreamCompleted();
                     else if (type === 'error') this.eventEmitter.emitStreamError(data.message);
-                    // Add other potential event types if needed (e.g., tool_call from Claude)
                 };
-
                 const llmAction = await getNextActionFromLLM(llmContext, streamCallback, this.toolExecutor.getKnownToolNames());
+
+                // Emit thinking text if received
+                if (llmAction.thinking) { this.eventEmitter.emitThinking(llmAction.thinking); }
 
                 // 3. Process LLM Action
                 if (llmAction.isFinalAnswer) {
@@ -125,7 +109,7 @@ class AgentRunner {
                     this.eventEmitter.emitFinalAnswer(
                          this.stateManager.context.finalAnswer,
                          this.stateManager.getIntermediateResult('generatedReportCode'),
-                         this.stateManager.getIntermediateResult('analysisResult') // Pass analysis result
+                         this.stateManager.getIntermediateResult('analysisResult')
                      );
                     break; // Exit loop
                 }
@@ -133,111 +117,180 @@ class AgentRunner {
                 // 4. Prepare for Tool Execution
                 const toolName = llmAction.tool;
                 const toolArgs = llmAction.args;
-
-                 // --- Substitute generated code if needed ---
-                 let finalToolArgs = { ...toolArgs };
-                 if (toolName === 'execute_analysis_code') {
-                      const generatedCode = this.stateManager.getIntermediateResult('generatedAnalysisCode');
-                     if (generatedCode) {
-                         logger.info(`[AgentRunner ${this.sessionId}] Substituting generated analysis code into execute_analysis_code arguments.`);
-                         finalToolArgs.code = generatedCode;
-                     } else if (!finalToolArgs.code) { // If LLM didn't provide placeholder code either
-                         logger.error(`[AgentRunner ${this.sessionId}] execute_analysis_code requested, but no code found in context or args! Skipping tool.`);
-                         // Create an error step and continue loop (let LLM try again)
-                         this.stateManager.addStep({ tool: toolName, args: finalToolArgs, resultSummary: 'Error: Missing analysis code.', error: 'Missing analysis code.', attempt: 1 });
-                         this.eventEmitter.emitToolResult(toolName, 'Error: Missing analysis code.', 'Missing analysis code.');
-                         continue; // Skip execution, try next iteration
-                     } else {
-                          logger.warn(`[AgentRunner ${this.sessionId}] execute_analysis_code using code provided directly in LLM args (might be placeholder).`);
-                     }
-                 }
-                 // --- End Code Substitution ---
-
                 logger.info(`[AgentRunner ${this.sessionId}] Preparing to execute tool: ${toolName}`);
-                this.eventEmitter.emitUsingTool(toolName, finalToolArgs);
-                this.stateManager.addStep({ tool: toolName, args: finalToolArgs, resultSummary: 'Executing tool...', attempt: 1 });
 
-                // 5. Execute Tool
-                let toolResult;
-                let currentAttempt = 0;
+                // **** PHASE 5: CODE REFINEMENT LOGIC ****
+                if (toolName === 'execute_analysis_code') {
+                    let executionSuccess = false;
+                    let finalExecutionResult = null;
 
-                // **** MODIFICATION START ****
-                // Prepare the executionContext, now including analysisResult and schemas
-                const executionContext = {
-                     userId: this.userId,
-                     teamId: this.teamId, // Pass teamId
-                     sessionId: this.sessionId,
-                     // Pass analysis results IF the tool needs it (e.g., report generation)
-                     analysisResult: (toolName === 'generate_report_code')
-                         ? this.stateManager.getIntermediateResult('analysisResult')
-                         : undefined,
-                     // Pass schemas if needed (e.g., for context in some tools, maybe report gen)
-                     datasetSchemas: (toolName === 'generate_report_code') // Example: only pass for report gen
-                         ? this.stateManager.getIntermediateResult('datasetSchemas')
-                         : undefined,
-                     // Callback for tools needing parsed data (like code execution)
-                     getParsedDataCallback: (toolName === 'execute_analysis_code')
-                         ? async (datasetId) => { // Make callback async
-                            const data = this.stateManager.getIntermediateResult('parsedData', datasetId);
-                            if (!data) logger.warn(`[getParsedDataCallback] Parsed data for dataset ${datasetId} not found in state.`);
-                            return data;
-                           }
-                         : undefined,
-                 };
-                 logger.debug(`[AgentRunner ${this.sessionId}] Tool Execution Context Prepared:`, {
-                     userId: executionContext.userId,
-                     sessionId: executionContext.sessionId,
-                     hasAnalysisResult: !!executionContext.analysisResult, // Log if analysis result is included
-                     hasSchemas: !!executionContext.datasetSchemas, // Log if schemas are included
-                     hasCallback: !!executionContext.getParsedDataCallback
-                 });
-                 // **** MODIFICATION END ****
+                    for (let attempt = 1; attempt <= MAX_CODE_REFINEMENT_ATTEMPTS; attempt++) {
+                        logger.info(`[AgentRunner ${this.sessionId}] Attempting analysis code execution (Attempt ${attempt}/${MAX_CODE_REFINEMENT_ATTEMPTS})`);
+
+                        // Get the latest code (might be from initial gen or refinement gen)
+                        const codeToExecute = this.stateManager.getIntermediateResult('generatedAnalysisCode');
+                        if (!codeToExecute) {
+                            const errorMsg = 'Internal state error: No analysis code available for execution.';
+                            logger.error(`[AgentRunner ${this.sessionId}] ${errorMsg}`);
+                            finalExecutionResult = { status: 'error', error: errorMsg, errorCode: 'INTERNAL_CODE_MISSING' };
+                            break; // Exit refinement loop, cannot proceed
+                        }
+
+                        // Add/Update step for the *execution* attempt
+                        // If it's the first attempt, add a new step. If retrying, update the last step's attempt count.
+                         if (attempt === 1) {
+                             this.stateManager.addStep({ tool: toolName, args: { dataset_id: toolArgs.dataset_id }, resultSummary: `Executing code (Attempt ${attempt})...`, attempt: attempt }); // Log dataset_id arg
+                             this.eventEmitter.emitUsingTool(toolName, { dataset_id: toolArgs.dataset_id }); // Emit with args used
+                         } else {
+                             // Update existing step for retry
+                             const lastStepIndex = this.stateManager.context.steps.length - 1;
+                             if (lastStepIndex >= 0 && this.stateManager.context.steps[lastStepIndex].tool === toolName) {
+                                  this.stateManager.context.steps[lastStepIndex].attempt = attempt;
+                                  this.stateManager.context.steps[lastStepIndex].resultSummary = `Executing code (Attempt ${attempt})...`;
+                                  this.stateManager.context.steps[lastStepIndex].error = null; // Clear previous error for retry
+                                  this.stateManager.context.steps[lastStepIndex].errorCode = null;
+                                  this.eventEmitter.emitUsingTool(toolName, { dataset_id: toolArgs.dataset_id }); // Re-emit using tool for retry
+                             } else {
+                                logger.error(`[AgentRunner ${this.sessionId}] Could not find previous execution step to update for retry.`);
+                                // Fallback: Add a new step anyway
+                                this.stateManager.addStep({ tool: toolName, args: { dataset_id: toolArgs.dataset_id }, resultSummary: `Executing code (Attempt ${attempt})...`, attempt: attempt });
+                                this.eventEmitter.emitUsingTool(toolName, { dataset_id: toolArgs.dataset_id });
+                            }
+                         }
 
 
-                do {
-                    currentAttempt++;
-                    // Pass the FULL executionContext
-                    toolResult = await this.toolExecutor.execute(toolName, finalToolArgs, executionContext);
-                    const resultSummary = summarizeToolResult(toolResult);
+                        const executionContext = {
+                             userId: this.userId, teamId: this.teamId, sessionId: this.sessionId,
+                             getParsedDataCallback: async (id) => this.stateManager.getIntermediateResult('parsedData', id)
+                         };
 
-                    if (toolResult.error && currentAttempt <= MAX_TOOL_RETRIES) {
-                        logger.warn(`[AgentRunner ${this.sessionId}] Tool ${toolName} failed (Attempt ${currentAttempt}). Retrying. Error: ${toolResult.error}`);
-                         this.stateManager.incrementToolErrorCount(toolName);
-                        this.stateManager.updateLastStep(`Error (Attempt ${currentAttempt}): ${resultSummary}`, toolResult.error);
-                         this.stateManager.context.steps[this.stateManager.context.steps.length - 1].attempt = currentAttempt + 1; // Update attempt count on step
-                        this.eventEmitter.emitToolResult(toolName, `Error (Attempt ${currentAttempt}): ${resultSummary}`, toolResult.error);
-                        this.eventEmitter.emitUsingTool(toolName, finalToolArgs); // Re-emit using_tool for retry
-                    } else {
-                         this.stateManager.updateLastStep(resultSummary, toolResult.error, toolResult.result); // Update step with final attempt result
-                         this.eventEmitter.emitToolResult(toolName, resultSummary, toolResult.error);
-                         break; // Exit retry loop on success or max retries reached
+                        const execResult = await this.toolExecutor.execute(toolName, { code: codeToExecute, dataset_id: toolArgs.dataset_id }, executionContext);
+                        const execResultSummary = summarizeToolResult(execResult);
+                        finalExecutionResult = execResult; // Store the latest result
+
+                        if (execResult.status === 'success') {
+                            logger.info(`[AgentRunner ${this.sessionId}] Code execution successful (Attempt ${attempt}).`);
+                            this.stateManager.updateLastStep(execResultSummary, null, execResult.result, null);
+                            this.eventEmitter.emitToolResult(toolName, execResultSummary, null, null);
+                            this.stateManager.setIntermediateResult(toolName, execResult, { dataset_id: toolArgs.dataset_id }); // Store successful result
+                            executionSuccess = true;
+                            break; // Exit refinement loop on success
+                        } else {
+                            // Execution Failed
+                            logger.warn(`[AgentRunner ${this.sessionId}] Code execution failed (Attempt ${attempt}): ${execResult.error} (Code: ${execResult.errorCode})`);
+                            this.stateManager.updateLastStep(`Error (Attempt ${attempt}): ${execResultSummary}`, execResult.error, null, execResult.errorCode);
+                            this.eventEmitter.emitToolResult(toolName, `Error (Attempt ${attempt}): ${execResultSummary}`, execResult.error, execResult.errorCode);
+
+                            if (attempt < MAX_CODE_REFINEMENT_ATTEMPTS) {
+                                logger.info(`[AgentRunner ${this.sessionId}] Attempting code regeneration (Attempt ${attempt + 1})`);
+                                // Add a step indicating regeneration is happening
+                                this.stateManager.addStep({ tool: 'generate_analysis_code', args: { analysis_goal: 'Fixing previous execution error' }, resultSummary: `Regenerating code due to error (Attempt ${attempt + 1})...`, attempt: 1 });
+                                this.eventEmitter.emitUsingTool('generate_analysis_code', { analysis_goal: 'Fixing previous execution error' });
+
+                                // Prepare goal for regeneration, including the error
+                                const originalGoal = llmContext.originalQuery; // Or find the goal from previous generate_analysis_code step if possible
+                                const regenerationGoal = `The previous code execution failed with this error:\n\`\`\`error\n${execResult.error}\n\`\`\`\nPlease regenerate the Javascript code to achieve the original goal while avoiding this error.\nOriginal Goal: ${originalGoal}`;
+
+                                const regenContext = this.stateManager.getContextForLLM(); // Get current context
+                                regenContext.userId = this.userId; // Ensure userId
+
+                                // Call generate_analysis_code tool again
+                                const regenResult = await this.toolExecutor.execute(
+                                    'generate_analysis_code',
+                                    { analysis_goal: regenerationGoal, dataset_id: toolArgs.dataset_id },
+                                    { userId: this.userId, teamId: this.teamId, sessionId: this.sessionId, datasetSchemas: regenContext.datasetSchemas } // Provide necessary context
+                                );
+                                const regenSummary = summarizeToolResult(regenResult);
+                                this.stateManager.updateLastStep(regenSummary, regenResult.error, regenResult.result, regenResult.errorCode);
+                                this.eventEmitter.emitToolResult('generate_analysis_code', regenSummary, regenResult.error, regenResult.errorCode);
+
+                                if (regenResult.status !== 'success' || !regenResult.result?.code) {
+                                    logger.error(`[AgentRunner ${this.sessionId}] Code regeneration failed. Aborting refinement.`);
+                                    // Set final error based on regeneration failure
+                                    this.stateManager.setError(regenResult.error || 'Failed to regenerate code after execution error.', regenResult.errorCode || 'CODE_REGENERATION_FAILED');
+                                    break; // Exit refinement loop
+                                }
+                                // Store the newly generated code (overwrites previous attempt)
+                                this.stateManager.setIntermediateResult('generate_analysis_code', regenResult.result, { dataset_id: toolArgs.dataset_id });
+                                // Continue to the next iteration of the refinement loop
+                            } else {
+                                // Max refinement attempts reached
+                                logger.error(`[AgentRunner ${this.sessionId}] Max code refinement attempts (${MAX_CODE_REFINEMENT_ATTEMPTS}) reached. Execution failed.`);
+                                // Final error is already set by the last failed execution attempt updateLastStep
+                                this.stateManager.setError(finalExecutionResult.error, finalExecutionResult.errorCode);
+                                break; // Exit refinement loop
+                            }
+                        }
+                    } // End refinement loop for execute_analysis_code
+
+                    // If the refinement loop ended due to an error state being set, let the main loop terminate
+                    if (this.stateManager.isFinished()) {
+                        logger.warn(`[AgentRunner ${this.sessionId}] Refinement loop ended with a final error state.`);
+                        continue; // Let the main while loop condition handle termination
                     }
-                } while (currentAttempt <= MAX_TOOL_RETRIES);
+                    if (!executionSuccess) {
+                         logger.error(`[AgentRunner ${this.sessionId}] Code execution failed permanently after ${MAX_CODE_REFINEMENT_ATTEMPTS} attempts.`);
+                         // Set error state if not already set (e.g., if regen failed)
+                         if (!this.stateManager.context.error) {
+                              this.stateManager.setError(finalExecutionResult?.error || 'Code execution failed after multiple attempts.', finalExecutionResult?.errorCode || 'CODE_EXECUTION_FAILED');
+                         }
+                         this.eventEmitter.emitAgentError(this.stateManager.context.error, this.stateManager.context.errorCode);
+                         continue; // Let main loop terminate
+                    }
+                    // If execution was ultimately successful, the main loop continues normally
 
-                // 6. Process Tool Result
-                if (!toolResult.error) {
-                    this.stateManager.setIntermediateResult(toolName, toolResult.result, finalToolArgs);
                 } else {
-                    // Handle critical tool errors (like code execution failure after retries)
-                    if (toolName === 'execute_analysis_code') {
-                        const criticalErrorMsg = `Code Execution Failed after ${currentAttempt} attempt(s): ${summarizeToolResult(toolResult)}`;
-                        logger.error(`[AgentRunner ${this.sessionId}] CRITICAL ERROR: ${criticalErrorMsg}`);
-                         this.stateManager.setError(criticalErrorMsg); // Set final error state
-                         this.eventEmitter.emitAgentError(criticalErrorMsg); // Emit specific agent error
-                         // Loop will terminate in the next check
+                    // **** EXECUTE OTHER TOOLS (Non-code execution) ****
+                    this.stateManager.addStep({ tool: toolName, args: toolArgs, resultSummary: 'Executing tool...', attempt: 1 });
+                    this.eventEmitter.emitUsingTool(toolName, toolArgs);
+
+                    let toolResult;
+                    let currentAttempt = 0;
+                    const executionContext = { // Prepare context for other tools
+                        userId: this.userId, teamId: this.teamId, sessionId: this.sessionId,
+                        analysisResult: (toolName === 'generate_report_code') ? this.stateManager.getIntermediateResult('analysisResult') : undefined,
+                        datasetSchemas: (toolName === 'generate_report_code' || toolName === 'generate_analysis_code') ? this.stateManager.getIntermediateResult('datasetSchemas') : undefined,
+                        getParsedDataCallback: undefined, // Not needed for non-exec tools
+                    };
+
+                    do { // Simple retry loop for non-code-exec tools
+                        currentAttempt++;
+                        toolResult = await this.toolExecutor.execute(toolName, toolArgs, executionContext);
+                        const resultSummary = summarizeToolResult(toolResult);
+
+                        if (toolResult.error && currentAttempt <= MAX_TOOL_RETRIES) {
+                            logger.warn(`[AgentRunner ${this.sessionId}] Tool ${toolName} failed (Attempt ${currentAttempt}). Retrying. Error: ${toolResult.error} (Code: ${toolResult.errorCode})`);
+                            this.stateManager.incrementToolErrorCount(toolName);
+                            this.stateManager.updateLastStep(`Error (Attempt ${currentAttempt}): ${resultSummary}`, toolResult.error, null, toolResult.errorCode);
+                            this.stateManager.context.steps[this.stateManager.context.steps.length - 1].attempt = currentAttempt + 1;
+                            this.eventEmitter.emitToolResult(toolName, `Error (Attempt ${currentAttempt}): ${resultSummary}`, toolResult.error, toolResult.errorCode);
+                            this.eventEmitter.emitUsingTool(toolName, toolArgs); // Re-emit
+                        } else {
+                            this.stateManager.updateLastStep(resultSummary, toolResult.error, toolResult.result, toolResult.errorCode);
+                            this.eventEmitter.emitToolResult(toolName, resultSummary, toolResult.error, toolResult.errorCode);
+                            if (!toolResult.error) {
+                                this.stateManager.setIntermediateResult(toolName, toolResult.result, toolArgs);
+                            }
+                            break; // Exit retry loop
+                        }
+                    } while (currentAttempt <= MAX_TOOL_RETRIES);
+
+                    // If a non-code tool failed after retries, let LLM handle it in the next iteration
+                    if (toolResult.error) {
+                         logger.warn(`[AgentRunner ${this.sessionId}] Tool ${toolName} failed after retries. Error will be passed to LLM.`);
                     }
-                    // For non-critical errors, the loop continues, LLM sees the error summary
                 }
-            } // End while loop
+                // **** END PHASE 5 Logic ****
+
+            } // End main while loop
 
             // --- Handle Loop Exit Conditions ---
             if (!this.stateManager.isFinished()) {
-                 // Means max iterations were reached
                  const maxIterError = `Agent reached maximum iterations (${MAX_AGENT_ITERATIONS}).`;
                  logger.warn(`[AgentRunner ${this.sessionId}] ${maxIterError}`);
-                 this.stateManager.setError(maxIterError);
+                 this.stateManager.setError(maxIterError, 'MAX_ITERATIONS_REACHED');
                  this.stateManager.addStep({ tool: '_maxIterations', args: {}, resultSummary: 'Reached max iterations.', attempt: 1 });
-                 this.eventEmitter.emitAgentError(maxIterError);
+                 this.eventEmitter.emitAgentError(maxIterError, 'MAX_ITERATIONS_REACHED');
             }
 
             // Finalize and return status
@@ -247,10 +300,13 @@ class AgentRunner {
         } catch (error) {
             // Catch errors from context prep or unexpected loop errors
             logger.error(`[AgentRunner ${this.sessionId}] Unhandled error during agent run: ${error.message}`, { stack: error.stack });
-            this.stateManager.setError(error.message || 'Unknown agent run error');
-            this.eventEmitter.emitAgentError(this.stateManager.context.error);
+            this.stateManager.setError(error.message || 'Unknown agent run error', 'AGENT_RUNNER_ERROR');
+            this.eventEmitter.emitAgentError(this.stateManager.context.error, this.stateManager.context.errorCode);
             await this._finalizeRun(); // Still try to save state
             return this.stateManager.getFinalStatusObject(); // Return error status
+        } finally {
+             // PHASE 4: Cleanup tokenizer
+             this.contextService.cleanup();
         }
     }
 
@@ -268,13 +324,10 @@ class AgentRunner {
                  logger.error(`[AgentRunner ${this.sessionId}] CRITICAL: Failed to find PromptHistory record ${this.aiMessageId} during finalize.`);
             } else {
                 logger.info(`[AgentRunner ${this.sessionId}] PromptHistory record ${this.aiMessageId} finalized with status: ${dbData.status}`);
-                 // ---- ADD DEBUG LOG ----
                  logger.debug('[AgentRunner Finalize] DB Data:', dbData);
-                 // ---- END DEBUG LOG ----
             }
         } catch (dbError) {
             logger.error(`[AgentRunner ${this.sessionId}] Error saving final state to DB for ${this.aiMessageId}: ${dbError.message}`, { dbData });
-            // Continue without throwing, but log the failure
         }
     }
 }
