@@ -1,45 +1,42 @@
-// ================================================================================
-// FILE: backend/src/features/chat/agent/ToolExecutor.js
-// PURPOSE: Loads and executes agent tools. Assumes tools are wrapped.
-// FIX: Added tool.schemas.js to the exclusion filter during dynamic loading.
-// ================================================================================
+// backend/src/features/chat/agent/ToolExecutor.js
+// ENTIRE FILE - UPDATED FOR PHASE 6 FIX
 
 const logger = require('../../../shared/utils/logger');
 const path = require('path');
 const fs = require('fs');
 
-// --- Dynamic Tool Loading ---
+// --- Dynamic Tool Loading (No changes here) ---
 const toolsDirectory = path.join(__dirname, '../tools');
-/** @type {Object<string, Function>} */
 const toolImplementations = {};
 const knownToolNames = [];
 
 try {
     fs.readdirSync(toolsDirectory)
-        // **** MODIFIED FILTER ****
         .filter(file =>
             file.endsWith('.js') &&
-            file !== 'tool.definitions.js' && // Ignore definitions
-            file !== 'BaseToolWrapper.js' && // Ignore the wrapper utility
-            file !== 'tool.schemas.js' && // *** ADDED: Ignore schemas file ***
-            !file.startsWith('.') // Ignore hidden files
+            file !== 'tool.definitions.js' &&
+            file !== 'BaseToolWrapper.js' &&
+            file !== 'tool.schemas.js' &&
+            !file.startsWith('.')
         )
-        // ***********************
         .forEach(file => {
             const toolName = path.basename(file, '.js');
-            // Adjust tool name if filename differs (e.g., answer_user.js -> _answerUserTool)
-            const adjustedToolName = toolName === 'answer_user' ? '_answerUserTool' : toolName;
+            let adjustedToolName = toolName;
+            if (toolName === 'answer_user') adjustedToolName = '_answerUserTool';
+            if (toolName === 'ask_user_for_clarification') adjustedToolName = 'ask_user_for_clarification';
+            if (toolName === 'calculate_financial_ratios') adjustedToolName = 'calculate_financial_ratios';
+            // Add more mappings if needed
+
             try {
                 const toolModule = require(path.join(toolsDirectory, file));
                  if (typeof toolModule === 'function') {
-                    toolImplementations[adjustedToolName] = toolModule;
+                    toolImplementations[adjustedToolName] = toolModule; // Assumes exported function is wrapped
                     knownToolNames.push(adjustedToolName);
                     logger.info(`[ToolExecutor] Loaded tool: ${adjustedToolName} from ${file}`);
                  } else {
                      logger.warn(`[ToolExecutor] Failed to load tool ${adjustedToolName}: Module from ${file} does not export a function.`);
                  }
             } catch (error) {
-                // Log the detailed error including the stack if require fails
                 logger.error(`[ToolExecutor] Failed to load tool ${adjustedToolName} from ${file}: ${error.message}`, { stack: error.stack });
             }
         });
@@ -49,65 +46,50 @@ try {
 logger.info(`[ToolExecutor] Available tools: ${knownToolNames.join(', ')}`);
 // --- End Tool Loading ---
 
-/**
- * Responsible for executing agent tools based on name and arguments.
- * It uses the dynamically loaded tool implementations.
- */
 class ToolExecutor {
     /**
-     * Executes the specified tool with the given arguments and execution context.
-     * Assumes the tool functions loaded into `toolImplementations` are already wrapped
-     * by `createToolWrapper` (from Phase 2) to handle standard validation/error handling.
+     * Executes the specified tool.
+     * Validates llmArgs using BaseToolWrapper, then merges with substitutedArgs before calling handler.
      *
      * @async
      * @param {string} toolName - The name of the tool to execute.
-     * @param {object} args - The arguments provided by the LLM for the tool.
-     * @param {object} executionContext - Context required by the tool (e.g., userId, sessionId, callbacks).
-     * @param {string} executionContext.userId - The ID of the user.
-     * @param {string} [executionContext.teamId] - The ID of the team context (optional).
-     * @param {string} executionContext.sessionId - The ID of the chat session.
-     * @param {any} [executionContext.analysisResult] - Result from previous code execution (passed conditionally).
-     * @param {object} [executionContext.datasetSchemas] - Preloaded schemas (passed conditionally).
-     * @param {function(string): Promise<Array<object>|null>} [executionContext.getParsedDataCallback] - Callback for tools needing parsed data.
-     * @returns {Promise<object>} The result object from the executed tool (includes status, result/error, args).
+     * @param {object} llmArgs - The arguments provided BY THE LLM for the tool (e.g., { dataset_id: '...' }).
+     * @param {object} executionContext - Context required by the tool (userId, sessionId, callbacks, etc.).
+     * @param {object} [substitutedArgs={}] - Optional arguments substituted by the system (e.g., { code: '...' }).
+     * @returns {Promise<object>} The result object from the executed tool.
      */
-    async execute(toolName, args, executionContext) {
-        logger.debug(`[ToolExecutor ${executionContext.sessionId}] Attempting to execute tool: ${toolName}`, { args });
+    async execute(toolName, llmArgs, executionContext, substitutedArgs = {}) {
+        const { sessionId } = executionContext; // Extract sessionId for logging
+        logger.debug(`[ToolExecutor ${sessionId}] Attempting to execute tool: ${toolName}`);
 
         const toolFn = toolImplementations[toolName];
 
         if (!toolFn) {
             const errorMsg = `Unknown tool requested: ${toolName}`;
-            logger.error(`[ToolExecutor ${executionContext.sessionId}] ${errorMsg}`);
-            // Return structure consistent with wrapped tools
-            return { status: 'error', error: errorMsg, args, errorCode: 'UNKNOWN_TOOL' }; // Added errorCode
+            logger.error(`[ToolExecutor ${sessionId}] ${errorMsg}`);
+            return { status: 'error', error: errorMsg, args: llmArgs, errorCode: 'UNKNOWN_TOOL' };
         }
 
         try {
-            // Call the (wrapped) tool function
-            const result = await toolFn(args, executionContext);
-            logger.debug(`[ToolExecutor ${executionContext.sessionId}] Tool ${toolName} execution finished. Status: ${result.status}`);
-            // The wrapped tool function already formats the result correctly
+            // Call the (wrapped) tool function, passing llmArgs and substitutedArgs separately
+            const result = await toolFn(llmArgs, executionContext, substitutedArgs);
+            logger.debug(`[ToolExecutor ${sessionId}] Tool ${toolName} execution finished via wrapper. Status: ${result.status}`);
+            // The wrapped function handles merging, execution, and result formatting
             return result;
         } catch (error) {
-            // This catch block is a fallback for truly unexpected errors *during* the async call itself,
-            // although the wrapper inside toolFn should catch most standard execution errors.
-            logger.error(`[ToolExecutor ${executionContext.sessionId}] Unexpected error during toolFn call for ${toolName}: ${error.message}`, { stack: error.stack, toolArgs: args });
+            // This catch is a final fallback for errors during the async call to the wrapper itself
+            logger.error(`[ToolExecutor ${sessionId}] Unexpected error calling wrapped toolFn for ${toolName}: ${error.message}`, { stack: error.stack, llmArgs, substitutedArgs });
             return {
                 status: 'error',
-                error: `Unexpected failure during tool execution: ${error.message}`,
-                args,
-                errorCode: 'TOOL_UNEXPECTED_ERROR' // Added errorCode
+                error: `Unexpected failure during tool execution call: ${error.message}`,
+                args: { ...llmArgs, ...substitutedArgs }, // Report combined args on error
+                errorCode: 'TOOL_WRAPPER_ERROR'
             };
         }
     }
 
-    /**
-     * Returns an array of known tool names loaded by the executor.
-     * @returns {string[]} Array of tool names.
-     */
     getKnownToolNames() {
-        return knownToolNames;
+        return [...knownToolNames];
     }
 }
 

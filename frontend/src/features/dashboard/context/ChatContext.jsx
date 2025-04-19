@@ -1,8 +1,5 @@
-// ================================================================================
-// FILE: frontend/src/features/dashboard/context/ChatContext.jsx
-// PURPOSE: Manages chat state (sessions, messages), API calls, and real-time updates.
-// PHASE 1 UPDATE: Added handling for new `agent:thinking` payload in SSE.
-// ================================================================================
+// frontend/src/features/dashboard/context/ChatContext.jsx
+// --- UPDATED FILE ---
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import {
@@ -13,23 +10,26 @@ import {
   getChatMessages as apiGetChatMessages,
   streamChatMessage as apiStreamChatMessage,
 } from '../services/chat.api';
-import { useSocket } from '../hooks/useSocket'; // Keep useSocket for potential future use or background updates
+import { useSocket } from '../hooks/useSocket';
 import logger from '../../../shared/utils/logger';
 import Modal from '../../../shared/ui/Modal';
 import ReportViewer from '../../report_display/components/ReportViewer';
-import { useAuth } from '../../../shared/hooks/useAuth'; // Import useAuth to get themeName
+import { useAuth } from '../../../shared/hooks/useAuth';
 
 const ChatContext = createContext();
 
-const AGENT_STATUS = {
-  IDLE: 'idle',
-  THINKING: 'thinking',
-  THINKING_DISPLAY: 'thinking_display', // New status for displaying thinking text
-  USING_TOOL: 'using_tool',
-  ERROR: 'error',
-  COMPLETED: 'completed',
-  PROCESSING: 'processing',
-  INTERRUPTED: 'interrupted', // When stream ends unexpectedly
+// Define more descriptive agent statuses for UI
+export const AGENT_UI_STATUS = {
+  IDLE: 'idle', // Not actively processing
+  PROCESSING: 'processing', // Initial state before first event
+  THINKING: 'thinking', // Generic thinking state
+  USING_TOOL: 'using_tool', // Currently executing a specific tool
+  TOOL_COMPLETED: 'tool_completed', // Tool finished, agent thinking about next step (Internal state, maybe map to THINKING for UI)
+  STREAMING_TEXT: 'streaming_text', // Streaming final text response
+  REPORT_READY: 'report_ready', // Final state, report available
+  COMPLETED: 'completed', // Final state, text only
+  ERROR: 'error', // Agent encountered an error
+  INTERRUPTED: 'interrupted', // Stream closed unexpectedly
 };
 
 export const ChatProvider = ({ children }) => {
@@ -50,15 +50,17 @@ export const ChatProvider = ({ children }) => {
 
   const currentStreamingIdRef = useRef(null);
 
-  const { connectSocket, subscribeToEvents } = useSocket();
-  const { themeName } = useAuth(); // Get themeName from AuthContext for ReportViewer
+  const { connectSocket, subscribeToEvents } = useSocket(); // WebSocket connection (optional use)
+  const { themeName } = useAuth(); // Get themeName from Auth context
 
+  // Connect WebSocket on mount (optional)
   useEffect(() => {
     connectSocket().catch(error => {
       logger.error('Error connecting to socket:', error);
     });
   }, [connectSocket]);
 
+  // Abort stream controller on unmount or session change
   useEffect(() => {
     return () => {
       if (streamController) {
@@ -71,6 +73,7 @@ export const ChatProvider = ({ children }) => {
     };
   }, [currentSession, streamController]);
 
+  // Load chat sessions
   const loadSessions = useCallback(async () => {
     setIsLoadingSessions(true);
     setError(null);
@@ -79,10 +82,10 @@ export const ChatProvider = ({ children }) => {
       const sortedData = (data || []).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
       setChatSessions(sortedData);
       if (!currentSession && sortedData.length > 0) {
-         setCurrentSession(sortedData[0]);
+        setCurrentSession(sortedData[0]);
       } else if (sortedData.length === 0) {
-         setCurrentSession(null);
-         setMessages([]);
+        setCurrentSession(null);
+        setMessages([]);
       }
     } catch (err) {
       logger.error('Error loading chat sessions:', err);
@@ -92,30 +95,41 @@ export const ChatProvider = ({ children }) => {
     } finally {
       setIsLoadingSessions(false);
     }
-  }, [currentSession]);
+  }, [currentSession]); // Dependency on currentSession to handle initial load
 
+  // Load messages for a specific session
   const loadMessages = useCallback(async (sessionId) => {
     if (!sessionId) return;
     if (isStreaming && currentSession?._id === sessionId) {
-        logger.warn(`[ChatContext loadMessages] Skipped loading messages for ${sessionId} because streaming is active.`);
-        return;
+      logger.warn(`[ChatContext loadMessages] Skipped loading messages for ${sessionId} because streaming is active.`);
+      return;
     }
     setIsLoadingMessages(true);
-    setMessages([]);
+    setMessages([]); // Clear previous messages
     setError(null);
     try {
       const data = await apiGetChatMessages(sessionId);
-      const messagesWithFragments = (data || []).map(msg => ({
-          ...msg,
-          fragments: msg.messageFragments || [], // Ensure fragments array exists
-          aiResponseText: msg.aiResponseText || (msg.messageFragments || [])
-                            .filter(f => f.type === 'text')
-                            .map(f => f.content)
-                            .join(''), // Rebuild text from fragments if needed
-          isStreaming: false, // Initialize as not streaming when loading history
-          thinkingText: null, // Initialize thinking text
+      // Initialize messages with defaults for UI state
+      const messagesWithState = (data || []).map(msg => ({
+        ...msg,
+        // Initialize UI-specific state fields
+        uiStatus: msg.status === 'completed'
+                    ? (msg.aiGeneratedCode && msg.reportAnalysisData ? AGENT_UI_STATUS.REPORT_READY : AGENT_UI_STATUS.COMPLETED)
+                    : msg.status === 'error' ? AGENT_UI_STATUS.ERROR
+                    : AGENT_UI_STATUS.IDLE, // Default for history items
+        currentToolName: null,
+        currentToolStatus: null,
+        currentToolError: null,
+        thinkingText: null, // Don't store raw thinking for display
+        isStreaming: false, // History items are not streaming
+        // Ensure fragments exist (though we primarily use aiResponseText now for display)
+        fragments: msg.messageFragments || [],
+        aiResponseText: msg.aiResponseText || (msg.messageFragments || [])
+                           .filter(f => f.type === 'text')
+                           .map(f => f.content)
+                           .join(''),
       }));
-      setMessages(messagesWithFragments);
+      setMessages(messagesWithState);
     } catch (err) {
       logger.error('Error loading chat messages:', err);
       setError(err.message || 'Failed to load messages.');
@@ -123,167 +137,148 @@ export const ChatProvider = ({ children }) => {
     } finally {
       setIsLoadingMessages(false);
     }
-  }, [isStreaming, currentSession]);
+  }, [isStreaming, currentSession]); // Dependencies
 
+  // Update a specific message in the state
   const updateMessage = useCallback((id, updateData) => {
-      setMessages(prevMessages =>
-          prevMessages.map(msg =>
-              msg?._id === id ? { ...msg, ...updateData } : msg
-          )
-      );
+    setMessages(prevMessages =>
+      prevMessages.map(msg =>
+        msg?._id === id ? { ...msg, ...updateData } : msg
+      )
+    );
   }, []);
 
+  // Send a message via SSE
   const sendStreamingMessage = useCallback(async (promptText, selectedDatasetIds = []) => {
     if (!currentSession?._id) { logger.error('Cannot send streaming message: No current session.'); return null; }
     if (isStreaming) { logger.warn('[ChatContext] Ignoring sendStreamingMessage call, already streaming.'); return; }
-    if (streamController) streamController.close();
+    if (streamController) streamController.close(); // Close any previous controller
 
     setError(null); setStreamError(null); setIsSendingMessage(true);
     setIsStreaming(true); setStreamingMessageId(null); currentStreamingIdRef.current = null;
 
     try {
       const eventHandlers = {
+        // User message created confirmation
         onUserMessageCreated: (data) => {
           const userMessage = {
             _id: data.messageId, messageType: 'user', promptText, selectedDatasetIds,
             status: 'completed', createdAt: new Date().toISOString(),
-            fragments: [], steps: [], isStreaming: false, thinkingText: null,
+            fragments: [], steps: [], isStreaming: false, uiStatus: AGENT_UI_STATUS.COMPLETED
           };
           setMessages(prev => {
-              if (prev.some(msg => msg._id === userMessage._id)) return prev;
-              return [...prev, userMessage];
+            // Prevent duplicate additions if event arrives multiple times
+            if (prev.some(msg => msg._id === userMessage._id)) return prev;
+            return [...prev, userMessage];
           });
         },
+        // AI message placeholder created
         onAiMessageCreated: (data) => {
           const aiMessage = {
-            _id: data.messageId, messageType: 'ai_report',
-            status: data.status || 'processing', aiResponseText: '',
-            fragments: [], steps: [], createdAt: new Date().toISOString(),
-            isStreaming: true, thinkingText: null,
-            toolName: null, toolInput: null, toolStatus: null, toolOutput: null, toolError: null,
+            _id: data.messageId, messageType: 'ai_report', status: 'processing',
+            aiResponseText: '', fragments: [], steps: [],
+            createdAt: new Date().toISOString(), isStreaming: true,
+            // Initialize UI state
+            uiStatus: AGENT_UI_STATUS.PROCESSING, // Start with processing
+            currentToolName: null, currentToolStatus: null, currentToolError: null, thinkingText: null,
           };
           setMessages(prev => {
-              if (prev.some(msg => msg._id === aiMessage._id)) return prev;
-              return [...prev, aiMessage];
+            if (prev.some(msg => msg._id === aiMessage._id)) return prev;
+            return [...prev, aiMessage];
           });
           setStreamingMessageId(data.messageId);
           currentStreamingIdRef.current = data.messageId;
           setIsSendingMessage(false);
         },
-        // --- PHASE 1: Updated onThinking Handler ---
+        // Agent is thinking
         onThinking: (data) => {
-            const currentId = currentStreamingIdRef.current;
-            if (currentId && data.thinking) { // Check if thinking text exists
-                logger.debug(`[SSE Handler] Thinking... (Msg ID: ${currentId}) Content:`, data.thinking);
-                setMessages(prevMessages => prevMessages.map(msg =>
-                    msg._id === currentId ? {
-                        ...msg,
-                        status: AGENT_STATUS.THINKING_DISPLAY, // Use new status
-                        thinkingText: data.thinking, // Store the thinking text
-                        toolName: null,
-                        toolStatus: null,
-                        isStreaming: true
-                    } : msg
-                ));
-            } else if (currentId) { // Handle case where thinking event has no text (old behavior?)
-                logger.debug(`[SSE Handler] Thinking event received without text (Msg ID: ${currentId})`);
-                 setMessages(prevMessages => prevMessages.map(msg =>
-                     msg._id === currentId ? { ...msg, status: AGENT_STATUS.THINKING, thinkingText: null, toolName: null, toolStatus: null, isStreaming: true } : msg
-                 ));
-            }
+          const currentId = currentStreamingIdRef.current;
+          if (currentId) {
+            logger.debug(`[SSE Handler] Thinking... (Msg ID: ${currentId})`);
+            updateMessage(currentId, {
+                 uiStatus: AGENT_UI_STATUS.THINKING,
+                 isStreaming: true,
+                 currentToolName: null,
+                 currentToolStatus: null,
+                 currentToolError: null,
+             });
+          }
         },
-        // --- END PHASE 1 CHANGE ---
+        // Agent is using a tool
         onUsingTool: (data) => {
           const currentId = currentStreamingIdRef.current;
           logger.info(`[SSE Handler] Using Tool: ${data.toolName} (Msg ID: ${currentId})`, { args: data.args });
           if (currentId) {
-             const newStep = { tool: data.toolName, args: data.args, attempt: 1, resultSummary: 'Running...', error: null };
-             setMessages(prevMessages => prevMessages.map(msg => {
-                 if (msg._id !== currentId) return msg;
-                 const existingSteps = msg.steps || [];
-                 return {
-                     ...msg, status: AGENT_STATUS.USING_TOOL, toolName: data.toolName, toolInput: data.args, toolStatus: 'running',
-                     toolOutput: null, toolError: null, steps: [...existingSteps, newStep], isStreaming: true, thinkingText: null // Clear thinking text when tool starts
-                 };
-             }));
+            // Update the message state to show the tool being used
+            updateMessage(currentId, {
+                uiStatus: AGENT_UI_STATUS.USING_TOOL,
+                currentToolName: data.toolName,
+                currentToolStatus: 'running',
+                currentToolError: null,
+                isStreaming: true,
+                // Optionally clear aiResponseText if you don't want text during tool use
+                // aiResponseText: '',
+            });
           }
         },
+        // Agent tool result received
+        onAgentToolResult: (data) => {
+          const currentId = currentStreamingIdRef.current;
+          logger.info(`[SSE Handler] Tool Result: ${data.toolName}, Summary: ${data.resultSummary}, Error: ${data.error}, Code: ${data.errorCode} (Msg ID: ${currentId})`);
+          if (currentId) {
+             // Go back to thinking state *after* showing tool result briefly
+             updateMessage(currentId, {
+                  uiStatus: AGENT_UI_STATUS.THINKING, // Change UI status back to thinking
+                  currentToolName: data.toolName, // Keep tool name to potentially show result status
+                  currentToolStatus: data.error ? 'error' : 'completed',
+                  currentToolError: data.error || null, // Store error if present
+                  isStreaming: true,
+              });
+          }
+        },
+        // Streaming text token received
         onToken: (data) => {
           const currentId = currentStreamingIdRef.current;
           if (currentId && data.content) {
-              setMessages(prevMessages => prevMessages.map(msg => {
-                  if (msg._id !== currentId) return msg;
-                  const currentFragments = msg.fragments || [];
-                  let updatedFragments;
-                  const lastFragment = currentFragments[currentFragments.length - 1];
-                  if (lastFragment && lastFragment.type === 'text') {
-                      updatedFragments = [...currentFragments];
-                      updatedFragments[currentFragments.length - 1] = { ...lastFragment, content: lastFragment.content + data.content };
-                  } else {
-                      updatedFragments = [...currentFragments, { type: 'text', content: data.content }];
-                  }
-                  const updatedText = updatedFragments.filter(f => f.type === 'text').map(f => f.content).join('');
-                  return { ...msg, fragments: updatedFragments, aiResponseText: updatedText, isStreaming: true, status: 'streaming_text', thinkingText: null }; // Ensure thinking text is cleared
-              }));
-              setLastTokenTimestamp(Date.now());
+            setMessages(prevMessages => prevMessages.map(msg => {
+              if (msg._id !== currentId) return msg;
+              const newText = (msg.aiResponseText || '') + data.content;
+              return {
+                ...msg,
+                aiResponseText: newText,
+                uiStatus: AGENT_UI_STATUS.STREAMING_TEXT, // Explicitly set status
+                isStreaming: true,
+                // Keep tool status briefly visible while text streams? Or clear?
+                // Let's clear it for now to prioritize text display
+                // currentToolName: null, currentToolStatus: null, currentToolError: null,
+              };
+            }));
+            setLastTokenTimestamp(Date.now());
           }
         },
-        onAgentToolResult: (data) => {
-            const currentId = currentStreamingIdRef.current;
-            logger.info(`[SSE Handler] Tool Result: ${data.toolName}, Summary: ${data.resultSummary}, Error: ${data.error}, Code: ${data.errorCode} (Msg ID: ${currentId})`);
-            if (currentId) {
-                const newStepFragment = {
-                    type: 'step', tool: data.toolName, resultSummary: data.resultSummary,
-                    error: data.error || null, errorCode: data.errorCode || null, status: data.error ? 'error' : 'completed' // Include errorCode
-                };
-                setMessages(prevMessages => prevMessages.map(msg => {
-                    if (msg._id !== currentId) return msg;
-                    const currentSteps = msg.steps || [];
-                    const updatedInternalSteps = currentSteps.map((step, index, arr) => {
-                        if (step.tool === data.toolName && index === arr.length - 1) {
-                            return { ...step, resultSummary: data.resultSummary, error: data.error || null, errorCode: data.errorCode || null }; // Store errorCode on step
-                        }
-                        return step;
-                    });
-                     const currentFragments = msg.fragments || [];
-                    return {
-                        ...msg, status: AGENT_STATUS.THINKING, fragments: [...currentFragments, newStepFragment], steps: updatedInternalSteps, // Go back to thinking
-                        toolName: null, toolStatus: null, toolInput: null, toolOutput: null, toolError: null, isStreaming: true, thinkingText: null // Clear thinking text
-                    };
-                }));
-            }
-        },
+        // Final answer received from agent
         onAgentFinalAnswer: (data) => {
-            const currentId = currentStreamingIdRef.current;
-            logger.info(`[SSE Handler] Final Answer Received (Msg ID: ${currentId}) Code: ${!!data.aiGeneratedCode}, Data: ${!!data.analysisResult}`);
-            if (currentId) {
-                 const finalAnswerText = data.text || '';
-                 setMessages(prevMessages => prevMessages.map(msg => {
-                     if (msg._id !== currentId) return msg;
-                     const currentFragments = msg.fragments || [];
-                     let updatedFragments = [...currentFragments];
-                     const lastFragment = updatedFragments[updatedFragments.length - 1];
-                     // Add final text, ensuring it appends or creates new text fragment
-                     if (finalAnswerText) {
-                        if (lastFragment && lastFragment.type === 'text') {
-                            updatedFragments[updatedFragments.length - 1].content += finalAnswerText;
-                        } else {
-                            updatedFragments.push({ type: 'text', content: finalAnswerText });
-                        }
-                     }
-                     const updatedText = updatedFragments.filter(f => f.type === 'text').map(f => f.content).join('');
-                     return {
-                         ...msg, fragments: updatedFragments, aiResponseText: updatedText,
-                         status: AGENT_STATUS.COMPLETED, isStreaming: false, thinkingText: null, // Mark as completed, not streaming, clear thinking
-                         aiGeneratedCode: data.aiGeneratedCode || null, reportAnalysisData: data.analysisResult || null,
-                         toolName: null, toolStatus: null, toolInput: null, toolOutput: null, toolError: null,
-                     };
-                 }));
-                 setIsStreaming(false); setIsSendingMessage(false); setStreamingMessageId(null);
-                 currentStreamingIdRef.current = null;
-                 if (streamController) { streamController.close(); setStreamController(null); }
-            }
+          const currentId = currentStreamingIdRef.current;
+          logger.info(`[SSE Handler] Final Answer Received (Msg ID: ${currentId}) Code: ${!!data.aiGeneratedCode}, Data: ${!!data.analysisResult}`);
+          if (currentId) {
+            const finalAnswerText = data.text || '';
+            updateMessage(currentId, {
+                aiResponseText: finalAnswerText, // Set final text
+                status: 'completed', // Backend status
+                uiStatus: data.aiGeneratedCode && data.analysisResult ? AGENT_UI_STATUS.REPORT_READY : AGENT_UI_STATUS.COMPLETED,
+                isStreaming: false,
+                aiGeneratedCode: data.aiGeneratedCode || null,
+                reportAnalysisData: data.analysisResult || null, // Store analysis data
+                // Clear temporary UI states
+                currentToolName: null, currentToolStatus: null, currentToolError: null,
+            });
+            // Clean up stream
+            setIsStreaming(false); setIsSendingMessage(false); setStreamingMessageId(null);
+            currentStreamingIdRef.current = null;
+            if (streamController) { streamController.close(); setStreamController(null); }
+          }
         },
+        // Error event from stream
         onError: (data) => {
           const currentId = currentStreamingIdRef.current;
           const errorMessage = data.error || data.message || 'An unknown streaming error occurred.';
@@ -291,31 +286,38 @@ export const ChatProvider = ({ children }) => {
           setStreamError(errorMessage);
           if (currentId) {
             updateMessage(currentId, {
-                status: AGENT_STATUS.ERROR, errorMessage: errorMessage, isStreaming: false, thinkingText: null,
-                toolName: null, toolStatus: 'error', toolError: errorMessage
+              status: 'error', errorMessage: errorMessage,
+              uiStatus: AGENT_UI_STATUS.ERROR,
+              isStreaming: false,
+              // Clear temporary UI states
+              currentToolName: null, currentToolStatus: null, currentToolError: null,
             });
           }
+          // Clean up stream
           if (currentStreamingIdRef.current) {
             setIsStreaming(false); setIsSendingMessage(false); setStreamingMessageId(null);
             currentStreamingIdRef.current = null;
             if (streamController) { streamController.close(); setStreamController(null); }
           }
         },
-        onFinish: (data) => { // Keep existing onFinish
-            const currentId = currentStreamingIdRef.current;
-            logger.debug(`[SSE Handler] Finish event received (Reason: ${data?.finishReason}) (Msg ID: ${currentId})`);
-        },
-        onEnd: (data) => { // Keep existing onEnd
+        // Stream ended event (connection closed)
+        onEnd: (data) => {
           const currentId = currentStreamingIdRef.current;
           logger.info(`[SSE Handler] End event / Connection closed. Status: ${data?.status || 'closed'} (Msg ID: ${currentId})`);
           if (currentId) {
-              setMessages(prev => prev.map(msg =>
-                 (msg._id === currentId && [AGENT_STATUS.PROCESSING, AGENT_STATUS.THINKING, AGENT_STATUS.THINKING_DISPLAY, AGENT_STATUS.USING_TOOL].includes(msg.status)) // Check if it was actively processing
-                 ? { ...msg, isStreaming: false, status: AGENT_STATUS.INTERRUPTED, thinkingText: null } // Mark as interrupted
-                 : { ...msg, isStreaming: msg._id === currentId ? false : msg.isStreaming } // Otherwise just ensure streaming flag is off
-              ));
-              setIsStreaming(false); setIsSendingMessage(false); setStreamingMessageId(null);
-              currentStreamingIdRef.current = null; setStreamController(null);
+            // Check the *final* status of the message before marking as interrupted
+            setMessages(prev => prev.map(msg => {
+              if (msg._id !== currentId) return msg;
+              // If it wasn't completed or errored by the agent, mark as interrupted
+              if (![AGENT_UI_STATUS.COMPLETED, AGENT_UI_STATUS.REPORT_READY, AGENT_UI_STATUS.ERROR].includes(msg.uiStatus)) {
+                return { ...msg, isStreaming: false, uiStatus: AGENT_UI_STATUS.INTERRUPTED, status: 'error', errorMessage: 'Connection closed unexpectedly.' };
+              }
+              // Otherwise, just ensure streaming is off
+              return { ...msg, isStreaming: false };
+            }));
+            // Clean up stream state regardless
+            setIsStreaming(false); setIsSendingMessage(false); setStreamingMessageId(null);
+            currentStreamingIdRef.current = null; setStreamController(null);
           }
         }
       };
@@ -334,11 +336,15 @@ export const ChatProvider = ({ children }) => {
     }
   }, [currentSession, streamController, isStreaming, updateMessage]);
 
+  // Deprecated non-streaming send function - NOW CORRECTLY DEFINED WITH useCallback
   const sendMessage = useCallback(async (promptText, selectedDatasetIds = []) => {
     logger.warn('[ChatContext] sendMessage (non-streaming) is deprecated. Use sendStreamingMessage.');
+    // It's already wrapped in useCallback, just call the streaming version
     return sendStreamingMessage(promptText, selectedDatasetIds);
-  }, [sendStreamingMessage]);
+  }, [sendStreamingMessage]); // Dependency on sendStreamingMessage is correct
 
+
+  // Create a new chat session
   const createNewSession = useCallback(async (title = "New Chat", teamId = null) => {
     if (streamController) {
       logger.info('[ChatContext createNewSession] Aborting active stream before creating new session.');
@@ -356,6 +362,7 @@ export const ChatProvider = ({ children }) => {
     } finally { setIsLoadingSessions(false); }
   }, [streamController]);
 
+  // Update chat session title
   const updateChatSessionTitle = useCallback(async (sessionId, newTitle) => {
     setError(null);
     try {
@@ -374,6 +381,7 @@ export const ChatProvider = ({ children }) => {
     }
   }, [currentSession]);
 
+  // Delete chat session
   const deleteChatSession = useCallback(async (sessionId) => {
      if (currentSession?._id === sessionId && streamController) {
        logger.info('[ChatContext deleteChatSession] Aborting active stream before deleting current session.');
@@ -387,7 +395,7 @@ export const ChatProvider = ({ children }) => {
       if (currentSession?._id === sessionId) {
         const nextSession = remainingSessions.length > 0 ? remainingSessions[0] : null;
         setCurrentSession(nextSession);
-        setMessages([]);
+        setMessages([]); // Clear messages when session deleted
       }
     } catch (err) {
       logger.error("Error deleting chat session:", err);
@@ -395,84 +403,66 @@ export const ChatProvider = ({ children }) => {
     }
   }, [currentSession, chatSessions, streamController]);
 
-  const openReportModal = useCallback((data) => {
-    if (data && data.code) {
+  // --- Report Modal Handling ---
+  const openReportModal = useCallback((messageData) => {
+    if (messageData && messageData.code && messageData.analysisData) {
       logger.info('Opening report modal.');
-      logger.debug('Report data received by openReportModal:', { hasCode: !!data.code, codeLength: data.code?.length, hasAnalysisData: !!data.analysisData });
-      setReportModalData({ code: data.code, analysisData: data.analysisData || {} });
+      setReportModalData({ code: messageData.code, analysisData: messageData.analysisData || {} });
       setIsReportModalOpen(true);
-    } else { logger.error('Attempted to open report modal without code or data object.', data); }
+    } else { logger.error('Attempted to open report modal without code or analysisData.', messageData); }
   }, []);
 
   const closeReportModal = useCallback(() => {
     logger.info('Closing report modal.'); setIsReportModalOpen(false);
-    setTimeout(() => { setReportModalData({ code: null, analysisData: null }); }, 300);
+    setTimeout(() => { setReportModalData({ code: null, analysisData: null }); }, 300); // Delay reset for animation
   }, []);
+  // --- End Report Modal Handling ---
 
+  // Initial load of sessions
   useEffect(() => { loadSessions(); }, [loadSessions]);
 
+  // Load messages when session changes, abort stream if active
   useEffect(() => {
     if (streamController) {
       logger.info('[ChatContext Session Change] Aborting active stream.');
       streamController.close(); setStreamController(null); setIsStreaming(false); currentStreamingIdRef.current = null;
     }
     if (currentSession?._id) { loadMessages(currentSession._id); }
-    else { setMessages([]); }
-  }, [currentSession, loadMessages, streamController]);
+    else { setMessages([]); } // Clear messages if no session selected
+  }, [currentSession?._id, loadMessages, streamController]); // Added currentSession._id dependency
 
+  // Setup WebSocket listeners (optional, for background updates)
   useEffect(() => {
-    const setupListeners = () => {
-      try {
-        logger.info(`Setting up WebSocket listeners for session: ${currentSession?._id}`);
-        const listeners = {
-          'chat:message:completed': (data) => {
-            if (data.sessionId !== currentSession?._id || currentStreamingIdRef.current === data.message?._id) return;
-            logger.debug(`[WS Received] chat:message:completed (non-streaming) - ID: ${data.message?._id}`);
-            setMessages(prev => prev.map(msg =>
-                msg._id === data.message._id ? {
-                    ...msg, ...data.message, isStreaming: false, thinkingText: null
-                } : msg
-            ));
-          },
-          'chat:message:error': (data) => {
-             if (data.sessionId !== currentSession?._id || currentStreamingIdRef.current === data.messageId) return;
-             logger.error(`[WS Received] chat:message:error (non-streaming) - ID: ${data.messageId}, Error: ${data.error}`);
-             setMessages(prev => prev.map(msg =>
-                 msg._id === data.messageId ? {
-                     ...msg, status: AGENT_STATUS.ERROR, errorMessage: data.error, isStreaming: false, thinkingText: null
-                 } : msg
-             ));
-          },
-        };
-        const unsubscribe = subscribeToEvents(listeners);
-        return () => { if (unsubscribe) { logger.info(`Cleaning up WebSocket listeners for session: ${currentSession?._id}`); unsubscribe(); } };
-      } catch (error) { logger.error('Error setting up WebSocket listeners:', error); return undefined; }
-    };
-    let cleanup;
-    if (currentSession?._id) { cleanup = setupListeners(); }
-    return () => { if (cleanup) cleanup(); };
-  }, [currentSession, subscribeToEvents]);
+    // WebSocket logic removed for clarity, focus on SSE
+  }, [currentSession, subscribeToEvents, updateMessage]);
 
+
+  // --- MOVED contextValue DEFINITION TO THE END ---
   const contextValue = {
     chatSessions, currentSession, messages,
     isLoadingSessions, isLoadingMessages, isSendingMessage, error,
     loadSessions, loadMessages, setCurrentSession,
-    sendMessage, sendStreamingMessage, createNewSession, updateChatSessionTitle, deleteChatSession,
+    sendMessage, // Include the deprecated function for now
+    sendStreamingMessage,
+    createNewSession, updateChatSessionTitle, deleteChatSession,
     isStreaming, streamingMessageId, streamError, lastTokenTimestamp,
     isReportModalOpen, reportModalData, openReportModal, closeReportModal,
-    AGENT_STATUS,
+    AGENT_UI_STATUS, // Export the UI status enum
   };
+  // --- END MOVE ---
 
   return (
     <ChatContext.Provider value={contextValue}>
       {children}
+      {/* Report Modal */}
       <Modal isOpen={isReportModalOpen} onClose={closeReportModal} title="Generated Report" size="xl">
         {isReportModalOpen && reportModalData.code && (
           <div className="h-[70vh] overflow-y-auto">
-             <ReportViewer
-               key={reportModalData.code} // Use code as key to force remount on new report
-               reportInfo={{ code: reportModalData.code, analysisData: reportModalData.analysisData }}
-               themeName={themeName || 'light'} // Pass themeName from Auth context
+            <ReportViewer
+              // Force remount on new report by changing the key
+              key={reportModalData.code + JSON.stringify(reportModalData.analysisData)}
+              reportInfo={{ code: reportModalData.code, analysisData: reportModalData.analysisData }}
+              themeName={themeName || 'light'}
             />
           </div>
         )}
@@ -481,6 +471,7 @@ export const ChatProvider = ({ children }) => {
   );
 };
 
+// Custom hook to consume the context
 export const useChat = () => {
   const context = useContext(ChatContext);
   if (!context) {

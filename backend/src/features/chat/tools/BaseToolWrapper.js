@@ -1,130 +1,150 @@
+// backend/src/features/chat/agent/BaseToolWrapper.js
+// ENTIRE FILE - UPDATED FOR PHASE 6 FIX
+
 /**
  * @fileoverview This module provides a higher-order function to standardize tool execution,
- * including common validation, error handling, and logging patterns across all tools.
- * PHASE 2 UPDATE: Added Ajv validation for tool arguments.
+ * including common validation using Ajv, error handling, and logging patterns across all tools.
+ * Handles merging LLM args with system-substituted args (like generated code) after validation.
  */
 
 const { Types } = require('mongoose');
 const logger = require('../../../shared/utils/logger');
-const Ajv = require('ajv'); // PHASE 2: Import Ajv
-const toolSchemas = require('./tool.schemas'); // PHASE 2: Import schemas
+const Ajv = require('ajv');
+const toolSchemas = require('../tools/tool.schemas'); // Import the raw schemas
 
-// PHASE 2: Instantiate Ajv and compile schemas (can be done once)
-const ajv = new Ajv({ allErrors: true }); // allErrors provides more details on validation failure
+// Compile schemas efficiently
+const ajv = new Ajv({ allErrors: true, useDefaults: true });
 const compiledSchemas = {};
-for (const schemaName in toolSchemas) {
-    // Convert schemaName (e.g., 'getDatasetSchemaArgsSchema') to toolName (e.g., 'get_dataset_schema')
-    const toolNameMatch = schemaName.match(/^(.*)ArgsSchema$/);
-    if (toolNameMatch && toolNameMatch[1]) {
-        let toolName = toolNameMatch[1];
-        // Convert camelCase to snake_case if needed (adjust based on your naming)
-        // Example basic conversion, might need refinement:
-        toolName = toolName.replace(/([A-Z])/g, '_$1').toLowerCase();
-        if (toolName.startsWith('_')) toolName = toolName.substring(1);
-        // Special case for _answerUserTool
-        if(schemaName === 'answerUserToolArgsSchema') toolName = '_answerUserTool';
 
+// Helper function to map schema names (camelCase) to tool names (snake_case)
+function schemaNameToToolName(schemaName) {
+    const match = schemaName.match(/^(.*)ArgsSchema$/);
+    if (!match || !match[1]) return null;
+    let toolName = match[1];
+    toolName = toolName.replace(/([A-Z])/g, (g) => `_${g[0].toLowerCase()}`);
+    if (toolName.startsWith('_') && toolName.length > 1) {
+        if (!['_answerUserTool', 'ask_user_for_clarification'].includes(toolName)) { // Add other tools starting with _ if needed
+            toolName = toolName.substring(1);
+        }
+    }
+    // Specific overrides
+    if (schemaName === 'answerUserToolArgsSchema') return '_answerUserTool';
+    if (schemaName === 'askUserForClarificationArgsSchema') return 'ask_user_for_clarification';
+    if (schemaName === 'calculateFinancialRatiosArgsSchema') return 'calculate_financial_ratios';
+    return toolName;
+}
+
+for (const schemaName in toolSchemas) {
+    const toolName = schemaNameToToolName(schemaName);
+    if (toolName) {
         try {
             compiledSchemas[toolName] = ajv.compile(toolSchemas[schemaName]);
-             logger.debug(`[BaseToolWrapper] Compiled schema for tool: ${toolName}`);
+            logger.debug(`[BaseToolWrapper] Compiled schema for tool: ${toolName}`);
         } catch (compileError) {
-             logger.error(`[BaseToolWrapper] Failed to compile schema for tool ${toolName} (${schemaName}): ${compileError.message}`);
+            logger.error(`[BaseToolWrapper] Failed to compile schema '${schemaName}' for tool ${toolName}: ${compileError.message}`);
         }
+    } else {
+         logger.warn(`[BaseToolWrapper] Could not determine tool name from schema name: ${schemaName}`);
     }
 }
 logger.info(`[BaseToolWrapper] Ajv initialized and ${Object.keys(compiledSchemas).length} tool argument schemas compiled.`);
 
-/**
- * Formats Ajv validation errors into a user-friendly string.
- * @param {Array<object>} errors - Array of Ajv error objects.
- * @returns {string} A formatted error message string.
- */
 function formatAjvErrors(errors) {
     if (!errors) return 'Unknown validation error.';
-    return errors.map(err => `${err.instancePath || '/'}: ${err.message}`).join('; ');
+    return errors.map(err => {
+        const path = err.instancePath || (err.keyword === 'required' ? `/${err.params.missingProperty}` : '/');
+        return `${path}: ${err.message}`;
+    }).join('; ');
 }
 
 /**
- * Creates a standardized wrapper around tool implementation functions to handle
- * common validation, error handling, and logging.
+ * Creates a standardized wrapper around tool implementation functions.
+ * Validates `llmArgs` against the schema, then merges `llmArgs` with `substitutedArgs`
+ * before passing the combined arguments to the `handlerFn`.
  *
- * @param {string} toolName - The name of the tool being wrapped (for logging/identification)
- * @param {Function} handlerFn - The actual tool implementation function that contains the core logic
- * @returns {Function} A wrapped function that handles standard validation and error handling
+ * @param {string} toolName - The name of the tool being wrapped.
+ * @param {Function} handlerFn - The actual tool implementation function.
+ * @returns {Function} A wrapped function: async (llmArgs, context, substitutedArgs) => result.
  */
 function createToolWrapper(toolName, handlerFn) {
-    return async (args, context) => {
+    // The returned function now accepts an optional substitutedArgs
+    return async (llmArgs, context, substitutedArgs = {}) => {
         const { userId, sessionId } = context;
-        // Sanitize args for logging (e.g., truncate long strings like code)
-        const loggedArgs = { ...args };
-        if (loggedArgs.code && loggedArgs.code.length > 100) {
-            loggedArgs.code = loggedArgs.code.substring(0, 100) + '... [truncated]';
+        // Log sanitized LLM args and substituted args separately
+        const loggedLlmArgs = { ...llmArgs };
+        // Sanitize sensitive info if needed before logging
+        logger.info(`[ToolWrapper:${toolName}] Called by User ${userId} in Session ${sessionId}. LLM Args:`, loggedLlmArgs);
+        if (Object.keys(substitutedArgs).length > 0) {
+            const loggedSubstituted = { ...substitutedArgs };
+             if (loggedSubstituted.code) loggedSubstituted.code = '[code omitted]';
+            logger.info(`[ToolWrapper:${toolName}] System Substituted Args:`, loggedSubstituted);
         }
-        logger.info(`[ToolWrapper:${toolName}] Called by User ${userId} in Session ${sessionId} with args:`, loggedArgs);
 
-        // --- PHASE 2: Argument Validation using Ajv ---
+        // --- Argument Validation using Compiled Schemas (on llmArgs ONLY) ---
         const validate = compiledSchemas[toolName];
         if (validate) {
-            const isValid = validate(args);
+            const argsToValidate = (llmArgs && typeof llmArgs === 'object') ? llmArgs : {};
+            const isValid = validate(argsToValidate);
             if (!isValid) {
-                const errorMsg = `Invalid arguments provided for tool ${toolName}.`;
+                const errorMsg = `Invalid arguments provided by LLM for tool ${toolName}.`;
                 const formattedErrors = formatAjvErrors(validate.errors);
-                logger.warn(`[ToolWrapper:${toolName}] ${errorMsg} Errors: ${formattedErrors}`, { providedArgs: args });
+                logger.warn(`[ToolWrapper:${toolName}] Validation Failed. ${errorMsg} Errors: ${formattedErrors}`, { providedArgs: llmArgs });
                 return {
                     status: 'error',
                     error: `${errorMsg} Details: ${formattedErrors}`,
-                    args,
-                    errorCode: 'INVALID_ARGUMENT' // Standardized error code
+                    args: argsToValidate, // Return the args that failed validation
+                    errorCode: 'INVALID_ARGUMENT'
                 };
             }
-             logger.debug(`[ToolWrapper:${toolName}] Arguments successfully validated against schema.`);
+            logger.debug(`[ToolWrapper:${toolName}] LLM arguments successfully validated against schema.`);
         } else {
-             logger.warn(`[ToolWrapper:${toolName}] No compiled argument schema found. Skipping validation.`);
+            logger.warn(`[ToolWrapper:${toolName}] No compiled argument schema found. Skipping validation.`);
         }
-        // --- End Phase 2 Validation ---
+        // --- End Argument Validation ---
 
-        // --- Standard MongoDB ObjectId Validation (kept as an extra check) ---
-        if (args && args.hasOwnProperty('dataset_id') && (!args.dataset_id || !Types.ObjectId.isValid(args.dataset_id))) {
-            const errorMsg = `Invalid or missing dataset_id argument format for tool ${toolName}.`;
-            logger.warn(`[ToolWrapper:${toolName}] ${errorMsg}`);
-            return { status: 'error', error: errorMsg, args, errorCode: 'INVALID_ARGUMENT_FORMAT' }; // Specific error code
+        // --- Standard MongoDB ObjectId Check (keep for dataset_id in llmArgs) ---
+         if (llmArgs && llmArgs.hasOwnProperty('dataset_id') && llmArgs.dataset_id && !Types.ObjectId.isValid(llmArgs.dataset_id)) {
+            const errorMsg = `Invalid format for dataset_id argument provided to tool ${toolName}. Expected 24-hex ObjectId.`;
+            logger.warn(`[ToolWrapper:${toolName}] ${errorMsg}`, { providedId: llmArgs.dataset_id });
+            return { status: 'error', error: errorMsg, args: llmArgs, errorCode: 'INVALID_ARGUMENT_FORMAT' };
         }
-        // --- End Standard Validation ---
+         // --- End Standard ObjectId Check ---
+
+        // --- Merge LLM args and Substituted args ---
+        // Substituted args (like 'code') will overwrite LLM args if keys conflict
+        const finalArgs = { ...(llmArgs || {}), ...substitutedArgs };
+         logger.debug(`[ToolWrapper:${toolName}] Final merged args for handler:`, Object.keys(finalArgs)); // Log only keys for brevity
+
 
         try {
-            const result = await handlerFn(args, context); // Execute the specific tool logic
+            // Execute the specific tool logic with the FINAL merged arguments
+            const result = await handlerFn(finalArgs, context);
 
             // --- Standard Result Validation ---
-            if (typeof result !== 'object' || !result.status) {
+            if (typeof result !== 'object' || result === null || !result.status) {
                 logger.error(`[ToolWrapper:${toolName}] Tool returned invalid result structure:`, result);
-                return { status: 'error', error: `Tool ${toolName} returned an invalid result structure.`, args, errorCode: 'INVALID_TOOL_RESULT' };
+                return { status: 'error', error: `Tool ${toolName} returned an invalid result structure.`, args: finalArgs, errorCode: 'INVALID_TOOL_RESULT' };
             }
 
-            // Log success, potentially summarizing large results
+            // Log success, summarizing large results
             const loggedResult = { ...result };
-            if (loggedResult.result?.code && typeof loggedResult.result.code === 'string' && loggedResult.result.code.length > 100) {
-                loggedResult.result = { ...loggedResult.result, code: loggedResult.result.code.substring(0,100) + '... [truncated]' };
-            }
-            if (loggedResult.result?.react_code && typeof loggedResult.result.react_code === 'string' && loggedResult.result.react_code.length > 100) {
-                loggedResult.result = { ...loggedResult.result, react_code: loggedResult.result.react_code.substring(0,100) + '... [truncated]' };
-            }
-             if (loggedResult.result?.parsedData && Array.isArray(loggedResult.result.parsedData)) {
+            if (loggedResult.result?.code) loggedResult.result = { ...loggedResult.result, code: '[code omitted]' };
+            if (loggedResult.result?.react_code) loggedResult.result = { ...loggedResult.result, react_code: '[code omitted]' };
+            if (loggedResult.result?.parsedData && Array.isArray(loggedResult.result.parsedData)) {
                  loggedResult.result = { ...loggedResult.result, parsedData: `[${loggedResult.result.parsedData.length} rows]` };
-             }
-
+            }
 
             logger.info(`[ToolWrapper:${toolName}] Execution finished. Status: ${result.status}`, loggedResult);
-            // Ensure original args are passed back along with the result
-            return { ...result, args };
+            // Return the complete result from the tool, plus the FINAL args used
+            return { ...result, args: finalArgs };
 
         } catch (error) {
-            logger.error(`[ToolWrapper:${toolName}] Uncaught error during tool handler execution: ${error.message}`, { stack: error.stack, toolArgs: args });
-            // Return standardized error structure
+            logger.error(`[ToolWrapper:${toolName}] Uncaught error during tool handler execution: ${error.message}`, { stack: error.stack, finalArgs: finalArgs });
             return {
                 status: 'error',
                 error: `Tool execution failed unexpectedly: ${error.message}`,
-                args,
-                errorCode: 'TOOL_EXECUTION_ERROR' // Standardized code for unexpected failures
+                args: finalArgs,
+                errorCode: 'TOOL_EXECUTION_ERROR'
             };
         }
     };
