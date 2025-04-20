@@ -1,15 +1,18 @@
+// frontend/src/features/dashboard/services/chat.api.js
+// ENTIRE FILE - FULLY UPDATED
+
 import apiClient from '../../../shared/services/apiClient';
 import { auth } from '../../../shared/services/firebase';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import logger from '../../../shared/utils/logger';
 
-// Chat Sessions
+// Chat Sessions (No changes needed)
 export const createChatSession = async (title = "New Chat", teamId = null) => {
   const response = await apiClient.post('/chats', { title, teamId });
   return response.data.data;
 };
 
-export const getChatSessions = async (limit = 10, skip = 0) => {
+export const getChatSessions = async (limit = 50, skip = 0) => { // Increased default limit
   const response = await apiClient.get('/chats', { params: { limit, skip } });
   return response.data.data;
 };
@@ -29,7 +32,7 @@ export const deleteChatSession = async (sessionId) => {
   return response.data.data;
 };
 
-// Chat Messages
+// Chat Messages (No changes needed)
 export const sendChatMessage = async (sessionId, promptText, selectedDatasetIds = []) => {
   const response = await apiClient.post(`/chats/${sessionId}/messages`, {
     promptText,
@@ -55,7 +58,7 @@ export const getChatMessage = async (sessionId, messageId) => {
  * @param {string} sessionId - Chat session ID
  * @param {string} promptText - User's message text
  * @param {Array<string>} selectedDatasetIds - Array of dataset IDs
- * @param {Object} eventHandlers - Callbacks for stream events
+ * @param {Object} eventHandlers - Callbacks for stream events (e.g., onToken, onExplanation, onUsingTool, onAgentToolResult, onAgentFinalAnswer, onError, onEnd)
  * @returns {Object} - Control object with close method (AbortController signal)
  */
 export const streamChatMessage = (sessionId, promptText, selectedDatasetIds = [], eventHandlers = {}) => {
@@ -73,10 +76,8 @@ export const streamChatMessage = (sessionId, promptText, selectedDatasetIds = []
       if (!baseUrl) {
          throw new Error('VITE_API_BASE_URL environment variable is not set.');
       }
-      // Construct URL - no need for new URL() here, fetchEventSource takes a string
       let streamUrl = `${baseUrl}/chats/${sessionId}/stream`;
-      
-      // Append query parameters manually
+
       const params = new URLSearchParams();
       params.append('promptText', promptText);
       if (selectedDatasetIds.length > 0) {
@@ -93,146 +94,127 @@ export const streamChatMessage = (sessionId, promptText, selectedDatasetIds = []
           'Accept': 'text/event-stream',
         },
         signal: abortController.signal,
-        openWhenHidden: true, // Keep connection open even if tab is backgrounded
-        
+        openWhenHidden: true, // Keep connection open
+
         onopen: async (response) => {
           if (response.ok && response.headers.get('content-type')?.includes('text/event-stream')) {
             logger.info('[streamChatMessage] SSE Connection established.');
-            // Potentially call an onStart handler if needed, though SSE 'start' event is separate
-          } else if (response.status >= 400 && response.status < 500 && response.status !== 429) {
-            // Handle client-side errors (e.g., 401 Unauthorized, 403 Forbidden)
-             const errorText = await response.text(); // Attempt to get error body
-             logger.error(`[streamChatMessage] SSE Client Error ${response.status}: ${response.statusText}. Body: ${errorText}`);
-             const errorMessage = `Authentication/Authorization failed (${response.status}). Please check credentials or permissions.`;
-             if (eventHandlers.onError) eventHandlers.onError({ message: errorMessage, status: response.status });
-             throw new Error(errorMessage); // Stop further processing
+            // Optional: Call an onStart handler if provided
+            if (eventHandlers.onStart) eventHandlers.onStart();
           } else {
-             // Handle other errors (server errors, network issues)
-              const errorText = await response.text();
-              logger.error(`[streamChatMessage] SSE Server Error ${response.status}: ${response.statusText}. Body: ${errorText}`);
-              const errorMessage = `Server error (${response.status}) occurred while connecting to stream.`;
-              if (eventHandlers.onError) eventHandlers.onError({ message: errorMessage, status: response.status });
-              throw new Error(errorMessage); // Stop further processing
+             // Handle connection errors (4xx, 5xx)
+             const errorText = await response.text();
+             const status = response.status;
+             logger.error(`[streamChatMessage] SSE Connection Error ${status}: ${response.statusText}. Body: ${errorText}`);
+             const errorMessage = status >= 500
+                ? `Server error (${status}) connecting to stream.`
+                : `Connection error (${status}): ${errorText || response.statusText}. Check permissions or session details.`;
+             if (eventHandlers.onError) eventHandlers.onError({ message: errorMessage, status: status });
+             throw new Error(errorMessage); // Stop further processing
           }
         },
 
         onmessage: (event) => {
-          // --- MORE DETAILED LOGGING --- 
-          logger.info(`[streamChatMessage] Raw SSE Message Received: ID=${event.id}, EventType=\'${event.event}\', Data=\'${event.data}\'`);
-          // --- END LOGGING ---
-          
+          logger.debug(`[streamChatMessage] Raw SSE Message: Event='${event.event}', Data='${event.data}'`);
+
           try {
              const data = JSON.parse(event.data);
-             const eventType = event.event; // The custom event type from the backend
+             // ** CRITICAL: Use event.event to determine the type **
+             const eventType = event.event || 'message'; // Default to 'message' if no event type specified
 
-             // --- Log parsed data and type for debugging ---
-             logger.debug(`[streamChatMessage] Parsed Event: Type=\'${eventType}\', ParsedData:`, data);
-             // --- END LOGGING ---
+             logger.debug(`[streamChatMessage] Parsed Event: Type='${eventType}', ParsedData:`, data);
 
-             // Call the appropriate handler based on the custom event type
+             // Call the appropriate handler based on the EXPLICIT event type
              switch (eventType) {
-               case 'start':
-                 if (eventHandlers.onStart) eventHandlers.onStart(data);
+               case 'user_message_created':
+                 if (eventHandlers.onUserMessageCreated) eventHandlers.onUserMessageCreated(data);
                  break;
-               case 'token':
+               case 'ai_message_created':
+                 if (eventHandlers.onAiMessageCreated) eventHandlers.onAiMessageCreated(data);
+                 break;
+               case 'agent:explanation': // ** Handle new event **
+                 if (eventHandlers.onExplanation) eventHandlers.onExplanation(data);
+                 break;
+               case 'agent:using_tool':
+                 if (eventHandlers.onUsingTool) eventHandlers.onUsingTool(data);
+                 break;
+               case 'agent:tool_result':
+                 if (eventHandlers.onAgentToolResult) eventHandlers.onAgentToolResult(data);
+                 break;
+               case 'token': // ** Only handle 'token' event specifically for text streaming **
                  if (eventHandlers.onToken) eventHandlers.onToken(data);
                  break;
-               case 'tool_call':
-                 if (eventHandlers.onToolCall) eventHandlers.onToolCall(data);
+               case 'agent:final_answer':
+                  if (eventHandlers.onAgentFinalAnswer) eventHandlers.onAgentFinalAnswer(data);
+                  break;
+               case 'agent:error': // Handle specific agent error event
+                  if (eventHandlers.onError) eventHandlers.onError({ ...data, type: 'agent' }); // Add type hint
+                  break;
+               case 'error': // Handle generic stream error event from backend
+                 if (eventHandlers.onError) eventHandlers.onError({ ...data, type: 'stream' }); // Add type hint
                  break;
-               case 'tool_result':
-                 if (eventHandlers.onToolResult) eventHandlers.onToolResult(data);
+               case 'end':
+                 if (eventHandlers.onEnd) eventHandlers.onEnd(data);
+                 // Backend signals end, we can close here if desired, or wait for onclose
+                 // abortController.abort();
                  break;
-               case 'generated_code':
-                 if (eventHandlers.onGeneratedCode) eventHandlers.onGeneratedCode(data);
-                 break;
-                case 'thinking':
-                case 'agent:thinking':
-                  if (eventHandlers.onThinking) eventHandlers.onThinking(data);
-                  break;
-                case 'agent:using_tool':
-                  if (eventHandlers.onUsingTool) eventHandlers.onUsingTool(data);
-                  break;
-                case 'agent:tool_result':
-                  if (eventHandlers.onAgentToolResult) eventHandlers.onAgentToolResult(data);
-                  break;
-                case 'agent:error':
-                  if (eventHandlers.onError) eventHandlers.onError(data);
-                  break;
-                case 'agent:final_answer':
-                   if (eventHandlers.onAgentFinalAnswer) eventHandlers.onAgentFinalAnswer(data);
-                   break;
-                case 'user_message_created':
-                  if (eventHandlers.onUserMessageCreated) eventHandlers.onUserMessageCreated(data);
-                   break;
-                 case 'ai_message_created':
-                   if (eventHandlers.onAiMessageCreated) eventHandlers.onAiMessageCreated(data);
-                   break;
+               // Deprecated/Old events - Log if they appear
+               case 'start':
+               case 'agent:thinking':
+               case 'agent:status':
                case 'completed':
-                 if (eventHandlers.onCompleted) eventHandlers.onCompleted(data);
+               case 'finish':
+                 logger.warn(`[streamChatMessage] Received deprecated/unhandled SSE event type: '${eventType}'. Ignoring.`);
                  break;
-               case 'error': // Specific 'error' event from the backend stream
-                 if (eventHandlers.onError) eventHandlers.onError(data);
+               case 'message': // Handle default 'message' events if backend sends them unexpectedly
+                 logger.warn(`[streamChatMessage] Received generic 'message' event. Content:`, data);
+                 // Decide how to handle - maybe treat as text token?
+                 // if (eventHandlers.onToken) eventHandlers.onToken(data);
                  break;
-                case 'end': // Specific 'end' event from the backend stream
-                  if (eventHandlers.onEnd) eventHandlers.onEnd(data);
-                  // Consider closing the connection here if 'end' is definitive
-                  // abortController.abort(); 
-                  break;
                default:
-                 // --- Log unhandled event types ---
-                 logger.warn(`[streamChatMessage] Received unhandled SSE event type: '${eventType}'`);
+                 logger.warn(`[streamChatMessage] Received unknown SSE event type: '${eventType}'. Data:`, data);
              }
           } catch (error) {
             logger.error('[streamChatMessage] Error parsing SSE message data:', error, 'Raw data:', event.data);
-            // Handle JSON parsing error if needed
           }
         },
 
         onclose: () => {
-          logger.info('[streamChatMessage] SSE Connection closed.');
-          // This is called when the connection is intentionally closed or lost.
-          // Call onEnd if it hasn't been called by a specific 'end' event?
+          logger.info('[streamChatMessage] SSE Connection closed by server or network.');
+          // Call onEnd handler if provided, signalling closure
           if (eventHandlers.onEnd) {
-             // Check if completed handler was called to avoid duplicate 'end' signals?
-             // Maybe not necessary depending on backend logic.
-             // eventHandlers.onEnd({ status: 'closed' });
+             eventHandlers.onEnd({ status: 'closed' });
           }
         },
 
         onerror: (err) => {
-          logger.error('[streamChatMessage] SSE fetchEventSource Error:', err);
-          // This handles network errors or errors thrown by onopen/onmessage
+          logger.error('[streamChatMessage] SSE fetchEventSource Error (Network/Setup):', err);
           if (eventHandlers.onError) {
             // Avoid double-reporting errors already handled in onopen
-            if (!String(err.message).includes('failed (')) { // Basic check
-                 eventHandlers.onError({ message: `Streaming connection error: ${err.message || 'Network issue'}` });
+            if (!String(err.message).includes('connecting to stream')) {
+                 eventHandlers.onError({ message: `Streaming connection error: ${err.message || 'Network issue'}`, type: 'network' });
             }
           }
-          // IMPORTANT: Throwing the error here will stop the reconnection attempts
-          // by fetchEventSource. If you want it to retry on network errors,
-          // remove the 'throw err;' line or add specific conditions.
-          throw err; 
+          // IMPORTANT: Stop retries on error. If retries are desired for specific network issues, add logic here.
+          throw err;
         }
       });
 
     } catch (error) {
        logger.error('[streamChatMessage] Error setting up fetchEventSource:', error);
        if (eventHandlers.onError) {
-         eventHandlers.onError({ message: `Failed to set up streaming: ${error.message}` });
+         eventHandlers.onError({ message: `Failed to set up streaming: ${error.message}`, type: 'setup' });
        }
-       // Ensure cleanup happens even if initial setup fails
-       abortController.abort();
+       abortController.abort(); // Ensure cleanup
     }
   };
 
   setupStream();
 
-  // Return control object with a method to close the connection
   return {
     close: () => {
         logger.info('[streamChatMessage] Aborting SSE connection via close().');
         abortController.abort();
     }
   };
-}; 
+};
