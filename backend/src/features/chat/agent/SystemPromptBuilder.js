@@ -182,7 +182,7 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
 2.  A concise, user-friendly explanation of your current plan/action in \`<user_explanation> ... </user_explanation>\` tags. This text will be shown directly to the user. Keep it brief and focus on what you are doing for them (e.g., "Analyzing the sales data...", "Checking the budget details...", "Preparing the summary report..."). **DO NOT mention internal tool names here.**
 
 **Output Format:**
-1.  Provide your internal reasoning in \`<thinking> ... </thinking>\`.
+1.  Provide your internal reasoning in \`<thinking> ... </thinking>\`. **When planning for a comprehensive report, explicitly state in your \`<thinking>\` block that you will generate analysis code that includes insights, and then generate report code to display both data and insights.**
 2.  **Immediately** following, provide the user explanation in \`<user_explanation> ... </user_explanation>\`.
 3.  **Immediately** following the closing \`</user_explanation>\` tag, provide EITHER:
     a.  A **single JSON object** for a tool call (e.g., \`parse_csv_data\`). Format:
@@ -401,24 +401,24 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
     }
 
     _buildWorkflowGuidance() {
-        // Emphasize using the user-facing explanation
-        return `**Workflow & Tool Usage Guidance (Internal Logic):**
-*   Dataset schema and sample data are provided. You do NOT need \`list_datasets\` or \`get_dataset_schema\` unless the user explicitly asks or context seems missing.
-*   Analyze 'Current Turn Progress' / previous step results before deciding action.
-*   **Typical Workflow for Analysis & Custom Ratio Calculation (via Code Gen):**
-    1.  **(Parse Data)** Use \`parse_csv_data\` if needed. Explain as "Loading data" in \`<user_explanation>\`.
-    2.  **(Generate Analysis Code)** Use \`generate_analysis_code\`. Explain as "Preparing analysis code" in \`<user_explanation>\`.
-    3.  **(Execute Code)** Use \`execute_analysis_code\`. Explain as "Running the calculation" in \`<user_explanation>\`.
-    4.  **(Analyze Result)** Internally analyze the numeric result from code execution.
-    5.  **(Generate Report - Optional)** If user requested report: Use \`generate_report_code\`. Explain as "Generating the report visualization" in \`<user_explanation>\`.
-    6.  **(Answer User)** Use \`_answerUserTool\`. Explain as "Summarizing the findings" or "Presenting the report" in \`<user_explanation>\`.
-*   **Workflow for COMMON Financial Ratios (Direct Calculation):**
-    1.  **(Parse Data)** Use \`parse_csv_data\` if needed. Explain as "Loading data" in \`<user_explanation>\`.
-    2.  **(Identify Columns)** Determine needed columns. If unsure, use \`ask_user_for_clarification\`. Explain intent in \`<user_explanation>\`.
-    3.  **(Calculate Ratios)** Use \`calculate_financial_ratios\`. Explain as "Calculating financial ratios" in \`<user_explanation>\`.
-    4.  **(Analyze Result)** Internally analyze numeric result.
-    5.  **(Generate Report - Optional)** Use \`generate_report_code\`. Explain as "Generating report" in \`<user_explanation>\`.
-    6.  **(Answer User)** Use \`_answerUserTool\`. Explain as "Summarizing findings" in \`<user_explanation>\`.`;
+        return `**WORKFLOW GUIDANCE:**
+*   **Data Loading First:** Generally, use \`parse_csv_data\` or \`check_data_loaded\` first if data isn't already loaded for the current analysis task.
+*   **Code for Calculations:** For calculations or specific data transformations not covered by other tools, use \`generate_analysis_code\` then \`execute_analysis_code\`.
+*   **Report Generation:** To visualize results or present data in a structured way (charts, tables), use \`generate_report_code\` AFTER analysis code has been successfully executed (its result will be passed automatically).
+*   **Tool Selection:** Choose the MOST appropriate tool for the specific task. Don't use general code generation if a specific tool (like \`calculate_financial_ratios\`) can directly answer the request.
+*   **Iterative Refinement:** If code execution fails, use the error information to refine the goal for \`generate_analysis_code\` (if the error was in the analysis code) or \`generate_report_code\` (if the error was in the report component) and try again. If the agent gets stuck in a loop of failed code execution, consider using \`_answerUserTool\` to explain the issue.
+
+*   **Workflow for Comprehensive Reports / Insights:**
+    If the user asks for 'insights', 'commentary', 'recommendations', an 'executive summary', or a 'comprehensive report', you **MUST** follow this specific workflow:
+    1.  **(Parse Data)** Use \`parse_csv_data\` if needed. Explain as 'Loading data'.
+    2.  **(Generate ENHANCED Analysis Code)** Use \`generate_analysis_code\`. Your \`analysis_goal\` MUST explicitly ask for calculations like variances, ratios, trends, AND **textual insights/recommendations** to be included in the \`sendResult\` object. Explain as 'Performing in-depth analysis'.
+    3.  **(Execute Code)** Use \`execute_analysis_code\`. Explain as 'Running detailed calculations'.
+    4.  **(Generate ENHANCED Report Code)** Use \`generate_report_code\`. Your \`analysis_summary\` should mention that insights are included. Explain as 'Generating comprehensive report'.
+    5.  **(Answer User)** Use \`_answerUserTool\` with a brief message like 'Here is the comprehensive report you requested.' Explain as 'Presenting the detailed report'.
+
+*   **Tool Usage Clarification:** Use \`calculate_financial_ratios\` for direct ratio requests. Use the 'Comprehensive Report' workflow involving \`generate_analysis_code\` for requests needing deeper insights, commentary, custom analysis, or when the required data structure for ratios isn't immediately obvious. The comprehensive workflow is generally preferred for complex or multi-faceted analysis requests.
+
+`;
     }
 
     _buildModificationHandling() {

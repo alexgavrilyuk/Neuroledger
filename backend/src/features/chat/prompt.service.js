@@ -28,7 +28,7 @@ const assembleContext = async (userId, selectedDatasetIds) => {
         if (teamMemberships?.length > 0) {
             const teamIds = teamMemberships.map(m => m.teamId);
             const teams = await Team.find({ _id: { $in: teamIds } }).select('name settings.aiContext').lean();
-            teams.forEach(t => { if (t.settings?.aiContext) teamContexts.push(`Team \"${t.name}\": ${t.settings.aiContext}`); });
+            teams.forEach(t => { if (t.settings?.aiContext) teamContexts.push(`Team "${t.name}": ${t.settings.aiContext}`); });
         }
         if (teamContexts.length > 0) teamContext = teamContexts.join('\n  - ');
         contextString = `User Context: ${userContext || 'N/A'}\nTeam Contexts:\n  - ${teamContext || 'N/A'}`;
@@ -69,23 +69,90 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
     **Dataset Schema Context:**
     ${schemaDetails}
 
+    **Expanded Calculation Requirements:**
+    Beyond the primary goal, your generated code **MUST** attempt to calculate the following if relevant columns exist in the provided schema (check \`datasetSchema\`):
+    - **Variance Analysis:** If columns suggesting 'Actual' and 'Budget' values are present (e.g., 'Actual Sales', 'Budgeted Sales'), calculate both the absolute difference (\`Actual - Budget\`) and the percentage difference (\`((Actual - Budget) / Budget) * 100\`). Handle potential division by zero.
+    - **Common Financial Ratios:** If standard financial columns are present (e.g., 'Revenue', 'COGS', 'Operating Expenses', 'Current Assets', 'Current Liabilities', 'Total Debt', 'Total Equity'), calculate relevant ratios like Gross Profit Margin, Operating Margin, Current Ratio, Debt-to-Equity. Check for column existence before attempting calculation. Handle division by zero.
+    - **Trend Analysis (Basic):** If a date/time column and key numeric columns exist, calculate period-over-period percentage change for primary metrics (like total revenue or net income) if feasible within the sandbox constraints.
+
+    **CRITICAL: Generate Textual Insights:**
+    Based on your calculations (variances, ratios, trends), your code **MUST** generate an array of brief, human-readable insight strings. These strings should summarize key findings.
+    Examples: \`'Net income was $500 (15.2%) below budget.'\`, \`'Gross margin improved slightly to 45.5%.'\`, \`'Sales grew 8% compared to the previous period.'\`, \`'High missing values found in the Marketing Spend column.'\`
+
+    **Output Structure (\`sendResult\`):**
+    Your code **MUST** call \`sendResult(resultObject)\` exactly once. The \`resultObject\` **MUST** be a JSON object containing:
+    - \`summaryKPIs\` (object): Key aggregated values (e.g., \`totalRevenue\`, \`netIncome\`).
+    - \`calculatedRatios\` (object, optional): Calculated ratios (e.g., \`grossMarginPercent\`).
+    - \`varianceAnalysis\` (object, optional): Calculated variances (e.g., \`incomeVariancePercent\`).
+    - \`trendAnalysis\` (object, optional): Calculated trends (e.g., \`revenueMoMGrowth\`).
+    - \`chartData\` (object or array, optional): Data specifically formatted for potential charts (e.g., monthly breakdowns, category totals).
+    - \`generatedInsights\` (array of strings): The textual insights derived from the analysis.
+    - \`recommendations\` (array of strings, optional): Brief, actionable recommendations based on the insights.
+
     **Code Requirements Recap:**
     *   Read ONLY from \`inputData\`.
-    *   Perform calculations based on 'Analysis Goal'.
+    *   Perform calculations based on 'Analysis Goal' and 'Expanded Calculation Requirements'.
     *   Use ONLY standard JS built-ins.
     *   Handle data issues (nulls, types) defensively.
     *   **Dynamically find column keys** (case-insensitive/keyword match), do not hardcode names.
     *   **Safely parse numbers** (handle symbols like '$', ',', potentially empty strings). Use a helper like \`safeParseFloat\`.
-    *   Call \`sendResult(yourFinalJsonObject)\`.
+    *   Call \`sendResult(yourFinalJsonObject)\` with the structure defined above.
     *   Output ONLY raw Javascript code, no explanations or markdown.
+    *   **Execution Flow:** Your script MUST execute top-to-bottom and culminate in the **single** \`sendResult()\` call. If you define functions, **ensure the main analysis function is EXPLICITLY CALLED at the end of the script.** Do not assume the environment will call functions for you.
 
-    **Example Helper & Ratio Calculation:**
+    **Example Structure (Illustrating Function Call):**
     \`\`\`javascript
-    function safeParseFloat(value) { /* ... remove symbols, handle null/empty, parseFloat, return 0 on NaN ... */ }
-    function calculateMargin(data) { /* ... find keys, iterate, use safeParseFloat, check for div by zero, return { key: value } or { error: msg } ... */ }
-    if (!Array.isArray(inputData) || inputData.length === 0) { sendResult({ error: "Input data is empty." }); }
-    else { const result = calculateMargin(inputData); sendResult(result); }
+    function safeParseFloat(value) { /* ... robust implementation ... */ }
+    function formatCurrency(value) { /* ... implementation ... */ }
+
+    // Main analysis function definition
+    function performFullAnalysis(data) {
+      // ... your complex analysis logic using 'data' ...
+      const insights = [];
+      const recommendations = [];
+      let summaryKPIs = {};
+      let calculatedRatios = {};
+      let varianceAnalysis = {};
+      let chartData = {};
+      // ... calculate KPIs, ratios, variances, chart data ...
+      // ... generate insights & recommendations based on calculations ...
+      if (someCondition) {
+        insights.push("Key insight based on condition.");
+        // recommendations.push("Actionable step based on condition.");
+      }
+      // ... more complex logic ...
+
+      // Prepare the final result object matching the required Output Structure
+      const resultObject = {
+        summaryKPIs: summaryKPIs,
+        calculatedRatios: calculatedRatios,
+        varianceAnalysis: varianceAnalysis,
+        chartData: chartData,
+        generatedInsights: insights,
+        recommendations: recommendations
+      };
+
+      // The single, final call to sendResult INSIDE the main function
+      sendResult(resultObject);
+    }
+
+    // --- CRITICAL SCRIPT END ---
+    // Entry point: Check inputData and EXPLICITLY call the main analysis function.
+    if (!Array.isArray(inputData) || inputData.length === 0) {
+      // Handle empty/invalid input case
+      sendResult({ error: "Input data is empty or invalid.", summaryKPIs: {}, generatedInsights: ["Error: Input data was empty."], recommendations: [] });
+    } else {
+      try {
+        // Explicitly call the main analysis function defined above
+        performFullAnalysis(inputData);
+      } catch (error) {
+        // Basic error handling INSIDE the sandbox
+        sendResult({ error: \`Analysis failed: \${error.message}\`, summaryKPIs: {}, generatedInsights: [\`Error during analysis: \${error.message}\`], recommendations: [] });
+      }
+    }
     \`\`\`
+
+    **Flexibility:** Your code must be **flexible**. Analyze the provided \`datasetSchema\` to determine *which* calculations are possible and relevant. Do not attempt calculations if required columns are missing. Gracefully handle missing or invalid data within \`inputData\`.
 
     **Error Feedback Handling (If applicable):** Your \`Analysis Goal\` might include error feedback from a previous failed execution attempt (indicated by text like "Fix the following error..."). Analyze the error message AND the original goal carefully to provide corrected code that avoids the previous error, while still adhering to all sandbox constraints. Focus on fixing the specific error mentioned.
 
@@ -157,6 +224,15 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
              const keys = Object.keys(parsedData);
              const previewObj = {};
              keys.slice(0, 5).forEach(key => { previewObj[key] = parsedData[key]; });
+             // --- NEW: Show a glimpse of insights/recommendations if present ---
+             if (parsedData.generatedInsights) {
+                 previewObj.generatedInsights = parsedData.generatedInsights.slice(0, 2); // Show first 2 insights
+                 if (parsedData.generatedInsights.length > 2) previewObj.generatedInsights.push('...');
+             }
+              if (parsedData.recommendations) {
+                 previewObj.recommendations = parsedData.recommendations.slice(0, 2); // Show first 2 recommendations
+                 if (parsedData.recommendations.length > 2) previewObj.recommendations.push('...');
+             }
              dataPreview = JSON.stringify(previewObj, null, 2);
              if (keys.length > 5) dataPreview += '\n... (truncated object)';
         } else {
@@ -171,7 +247,7 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
     **CRITICAL SANDBOX CONSTRAINTS:**
     1.  **NO \`import\` or \`export\` statements.** Use libraries available globally (e.g., \`window.React\`, \`window.Recharts\`).
     2.  **DEFINE ONLY ONE FUNCTION:** \`function ReportComponent(props) { ... }\`. Do NOT include any other code outside this function definition (no surrounding HTML, script tags, or example usage like \`ReactDOM.render\`).
-    3.  **ACCESS DATA VIA PROP:** The analysis result data will be passed as a prop named \`reportData\`. Access it via \`props.reportData\`.
+    3.  **ACCESS DATA VIA PROP:** The analysis result data will be passed as a prop named \`reportData\`. Access it via \`props.reportData\`. This object will contain fields like \`summaryKPIs\`, \`calculatedRatios\`, \`varianceAnalysis\`, \`trendAnalysis\`, \`chartData\`, \`generatedInsights\` (an array of strings), and \`recommendations\` (an array of strings).
     4.  **USE AVAILABLE LIBRARIES:** You can use \`React\`, \`ReactDOM\`, \`Recharts\`, \`lodash\` (\`_\`), \`papaparse\` (\`Papa\`), \`xlsx\` (\`XLSX\`). Access them directly (e.g., \`React.useState\`, \`Recharts.LineChart\`).
 
     **TASK:** Generate the React code for \`ReportComponent\` based on the following analysis:
@@ -183,7 +259,7 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
     \`\`\`json
     ${dataPreview}
     \`\`\`
-    *Note: The actual \`props.reportData\` object will contain the full analysis results.*
+    *Note: The actual \`props.reportData\` object will contain the full analysis results, including fields like \`summaryKPIs\`, \`calculatedRatios\`, \`varianceAnalysis\`, \`chartData\`, \`generatedInsights\` (array of strings), and \`recommendations\` (array of strings).*
 
     **User Preferences (Optional):**
     - Report Title: ${title || 'Generate an appropriate title based on the analysis summary'}
@@ -191,71 +267,77 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
     - Focus Columns: ${columns_to_visualize ? columns_to_visualize.join(', ') : 'Visualize relevant data from props.reportData'}
 
     **Output Requirements:**
-    *   Create clear and informative visualizations using Recharts where appropriate. Use simple text displays for key metrics if charts are not suitable.
+    *   Create clear and informative visualizations using Recharts (using data from \`props.reportData.chartData\`).
+    *   Display key metrics from \`props.reportData.summaryKPIs\`.
+    *   **CRITICAL: Render the textual insights from \`props.reportData.generatedInsights\` under a clear heading (e.g., 'Key Observations').**
+    *   **CRITICAL: Render the recommendations from \`props.reportData.recommendations\` under a clear heading (e.g., 'Actionable Recommendations').**
+    *   Structure the report logically (e.g., Summary/KPIs -> Charts -> Observations -> Recommendations).
     *   Handle potential missing data in \`props.reportData\` gracefully.
-    *   Style components minimally using inline styles or basic CSS class names (Tailwind might not be available).
+    *   Style components minimally using inline styles or basic CSS class names.
     *   The component should be functional and render the analysis data effectively.
     *   **OUTPUT ONLY THE JAVASCRIPT CODE FOR THE \`ReportComponent\` FUNCTION.**
 
-    **GOOD EXAMPLE (Structure only):**
+    **GOOD EXAMPLE (Structure including Insights/Recommendations):**
     \`\`\`javascript
     function ReportComponent(props) {
-      const { React, Recharts } = window; // Destructure globals if needed
-      const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = Recharts;
+      const { React, Recharts } = window;
+      const { /* Destructure chart components */ } = Recharts;
       const reportData = props.reportData || {};
-      const categoryData = reportData.categoryTotals ? Object.entries(reportData.categoryTotals).map(([name, value]) => ({ name, value })) : [];
+      const insights = reportData.generatedInsights || [];
+      const recommendations = reportData.recommendations || [];
+      const kpis = reportData.summaryKPIs || {};
+      const chartData = reportData.chartData || {}; // e.g., { monthly: [], categories: [] }
 
-      // Simple inline styles
-      const containerStyle = { padding: '20px', fontFamily: 'sans-serif' };
-      const titleStyle = { fontSize: '1.5em', marginBottom: '15px' };
-      const kpiContainerStyle = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '15px', marginBottom: '20px' };
-      const kpiItemStyle = { border: '1px solid #eee', padding: '10px', borderRadius: '5px' };
-      const kpiLabelStyle = { fontSize: '0.8em', color: '#666', marginBottom: '5px' };
-      const kpiValueStyle = { fontSize: '1.2em', fontWeight: 'bold' };
-      const chartContainerStyle = { height: '300px', marginBottom: '20px' };
+      // ... helper functions (formatCurrency etc.) ...
 
-      // Helper to format currency
-      const formatCurrency = (value) => {
-        if (typeof value !== 'number') return 'N/A';
-        return '$' + value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-      };
+      // Styles
+      const sectionStyle = { marginTop: '25px', paddingTop: '15px', borderTop: '1px solid #eee' };
+      const headingStyle = { fontSize: '1.1em', fontWeight: '600', marginBottom: '10px', color: '#333' };
+      const listStyle = { listStyleType: 'disc', marginLeft: '20px', paddingLeft: '5px' };
+      const listItemStyle = { marginBottom: '5px', fontSize: '0.9em', color: '#555' };
 
-      return React.createElement('div', { style: containerStyle },
-        React.createElement('h2', { style: titleStyle }, "${title || 'Financial Summary'}"),
+      return React.createElement('div', { /* container styles */ },
+        React.createElement('h2', { /* title styles */ }, "\${title || 'Financial Analysis Report'}"),
 
-        // KPIs
-        React.createElement('div', { style: kpiContainerStyle },
-           React.createElement('div', { style: kpiItemStyle }, React.createElement('div', {style: kpiLabelStyle}, 'Total Income'), React.createElement('div', {style: kpiValueStyle}, formatCurrency(reportData.totalIncome))),
-           React.createElement('div', { style: kpiItemStyle }, React.createElement('div', {style: kpiLabelStyle}, 'Total Expenses'), React.createElement('div', {style: kpiValueStyle}, formatCurrency(reportData.totalExpenses))),
-           React.createElement('div', { style: kpiItemStyle }, React.createElement('div', {style: kpiLabelStyle}, 'Overall Profit'), React.createElement('div', {style: kpiValueStyle}, formatCurrency(reportData.overallProfit))),
-           // Add more KPIs for budget/variance if present in reportData...
+        // KPIs Section
+        React.createElement('div', { /* kpi container styles */ },
+           // ... render KPIs from kpis object ...
         ),
 
-         // Example Chart (Bar Chart for Category Expenses)
-         categoryData.length > 0 && React.createElement('div', { style: chartContainerStyle },
-           React.createElement(ResponsiveContainer, { width: '100%', height: '100%' },
-             React.createElement(BarChart, { data: categoryData, margin: { top: 5, right: 30, left: 20, bottom: 5 } },
-               React.createElement(CartesianGrid, { strokeDasharray: '3 3' }),
-               React.createElement(XAxis, { dataKey: 'name', angle: -30, textAnchor: 'end', height: 50, fontSize: 10 }),
-               React.createElement(YAxis, { fontSize: 10 }),
-               React.createElement(Tooltip, { formatter: (value) => formatCurrency(value) }),
-               React.createElement(Legend, { wrapperStyle: { fontSize: '10px'} }),
-               React.createElement(Bar, { dataKey: 'value', fill: '#8884d8', name: 'Expenses' })
-             )
-           )
-         )
-         // Add other chart types or tables as needed based on preferences/data...
+        // Charts Section
+        React.createElement('div', { style: sectionStyle },
+            React.createElement('h3', { style: headingStyle }, 'Performance Charts'),
+            // ... render charts using chartData.monthly, chartData.categories etc. ...
+        ),
+
+        // Key Observations Section
+        insights.length > 0 && React.createElement('div', { style: sectionStyle },
+          React.createElement('h3', { style: headingStyle }, 'Key Observations'),
+          React.createElement('ul', { style: listStyle },
+            insights.map((insight, index) =>
+              React.createElement('li', { key: 'insight-' + index, style: listItemStyle }, insight)
+            )
+          )
+        ),
+
+        // Recommendations Section
+        recommendations.length > 0 && React.createElement('div', { style: sectionStyle },
+          React.createElement('h3', { style: headingStyle }, 'Actionable Recommendations'),
+          React.createElement('ul', { style: listStyle },
+            recommendations.map((rec, index) =>
+              React.createElement('li', { key: 'rec-' + index, style: listItemStyle }, rec)
+            )
+          )
+        )
       );
     }
     \`\`\`
 
     Generate the code for \`ReportComponent\` now. Remember, ONLY the function code.
     `;
-    // --- END REFINED PROMPT ---
+    // --- END NEW ---
     return reportCodeGenSystemPrompt;
 };
-
-
 
 /**
  * Generates React component code for visualizing analysis results.
@@ -275,7 +357,7 @@ const generateReportCode = async ({ userId, analysisSummary, dataJson, title, ch
         const provider = await getProvider(userId);
         // Simple user message, all logic is in system prompt
         const messages = [{ role: "user", content: "Generate the React component code exactly as specified in the system prompt." }];
-        const apiOptions = { model: modelToUse, system: systemPrompt, messages, max_tokens: 8000, temperature: 0.1 }; // Increased max_tokens slightly if needed
+        const apiOptions = { model: modelToUse, system: systemPrompt, messages, max_tokens: 28000, temperature: 0.1 }; // Increased max_tokens slightly if needed
 
         const startTime = Date.now(); // Start timer
         const apiResponse = await provider.generateContent(apiOptions);
@@ -374,7 +456,6 @@ const getHistorySummary = async (historyToSummarize, userId) => {
         logger.error(`[History Summarization] Error during summarization API call: ${error.message}`, error); return null;
     }
 };
-
 
 module.exports = {
     assembleContext,
