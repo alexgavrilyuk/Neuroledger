@@ -1,5 +1,5 @@
 // backend/src/features/chat/tools/tool.schemas.js
-// ENTIRE FILE - PHASE 6 & 7
+// ENTIRE FILE - UPDATED FOR PHASES 8, 9, 10
 
 const MONGODB_OBJECTID_PATTERN = '^[a-f\\d]{24}$'; // Regex pattern for MongoDB ObjectId
 
@@ -51,7 +51,7 @@ const parseCsvDataArgsSchema = {
 
 /**
  * Schema for arguments of the `generate_analysis_code` tool.
- * Includes optional 'previous_error' for refinement (Phase 8 prep).
+ * Includes optional 'previous_error' for refinement (Phase 8).
  */
 const generateAnalysisCodeArgsSchema = {
   type: 'object',
@@ -66,6 +66,7 @@ const generateAnalysisCodeArgsSchema = {
       description: 'The MongoDB ObjectId of the dataset being analyzed (used for schema context).',
       pattern: MONGODB_OBJECTID_PATTERN,
     },
+    // PHASE 8 ADDITION: Optional error feedback
     previous_error: {
         type: 'string',
         description: 'Optional. If provided, this contains the error message from the previous failed execution attempt. Use this error context to fix the code.',
@@ -97,7 +98,7 @@ const executeAnalysisCodeArgsSchema = {
 
 /**
  * Schema for arguments of the `generate_report_code` tool.
- * Includes optional args for customization (Phase 10 prep).
+ * Includes optional args for customization (Phase 10).
  */
 const generateReportCodeArgsSchema = {
   type: 'object',
@@ -112,6 +113,7 @@ const generateReportCodeArgsSchema = {
       description: 'The MongoDB ObjectId of the dataset related to the analysis (provides context).',
       pattern: MONGODB_OBJECTID_PATTERN,
     },
+    // PHASE 10 ADDITIONS: Optional report args
     title: {
         type: 'string',
         description: 'Optional: A title for the report component.',
@@ -153,7 +155,7 @@ const answerUserToolArgsSchema = {
 };
 
 /**
- * Schema for arguments of the `ask_user_for_clarification` tool (Phase 9 prep).
+ * Schema for arguments of the `ask_user_for_clarification` tool (Phase 9).
  */
 const askUserForClarificationArgsSchema = {
     type: 'object',
@@ -170,7 +172,7 @@ const askUserForClarificationArgsSchema = {
 };
 
 /**
- * PHASE 7: Schema for arguments of the `calculate_financial_ratios` tool.
+ * Schema for arguments of the `calculate_financial_ratios` tool.
  */
 const calculateFinancialRatiosArgsSchema = {
   type: 'object',
@@ -243,6 +245,6 @@ module.exports = {
   executeAnalysisCodeArgsSchema,
   generateReportCodeArgsSchema,
   answerUserToolArgsSchema,
-  askUserForClarificationArgsSchema,
-  calculateFinancialRatiosArgsSchema, // PHASE 7: Export new schema
+  askUserForClarificationArgsSchema, // PHASE 9: Export new schema
+  calculateFinancialRatiosArgsSchema,
 };

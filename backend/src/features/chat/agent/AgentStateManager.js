@@ -1,8 +1,5 @@
-// ================================================================================
-// FILE: backend/src/features/chat/agent/AgentStateManager.js
-// PURPOSE: Manages the state ('turnContext') for a single agent turn.
-// CORRECTION: Modified setIntermediateResult to store parsedData.
-// ================================================================================
+// backend/src/features/chat/agent/AgentStateManager.js
+// ENTIRE FILE - UPDATED FOR PHASE 12
 
 const logger = require('../../../shared/utils/logger');
 const { toolDefinitions } = require('../tools/tool.definitions');
@@ -12,12 +9,6 @@ const { toolDefinitions } = require('../tools/tool.definitions');
  * Holds intermediate results, steps taken, and final outcomes.
  */
 class AgentStateManager {
-    /**
-     * Initializes the state manager for a turn.
-     * @param {object} [initialState={}] - Optional initial state properties.
-     * @param {any} [initialState.previousAnalysisResult] - Analysis data from a previous turn.
-     * @param {string} [initialState.previousGeneratedCode] - Code generated in a previous turn.
-     */
     constructor(initialState = {}) {
         this.context = {
             originalQuery: '',
@@ -25,11 +16,11 @@ class AgentStateManager {
             intermediateResults: {
                 datasetSchemas: {},
                 datasetSamples: {},
-                parsedData: {}, // Initialize as an empty object
+                parsedData: {},
                 analysisResult: initialState.previousAnalysisResult || null,
-                generatedAnalysisCode: null, // Will be set/overwritten
+                generatedAnalysisCode: null,
                 generatedReportCode: initialState.previousGeneratedCode || null,
-                fragments: [],
+                fragments: [], // PHASE 12: Stores UI fragments
                 previousAnalysisResultSummary: null,
                 hasPreviousGeneratedCode: !!initialState.previousGeneratedCode,
             },
@@ -38,40 +29,57 @@ class AgentStateManager {
             fullChatHistory: [],
             finalAnswer: null,
             error: null,
-            errorCode: null, // Added for final error state
+            errorCode: null,
             toolErrorCounts: {},
+            status: 'processing', // PHASE 9: Add status field
         };
         logger.debug(`[AgentStateManager] Initialized with previousAnalysis: ${!!initialState.previousAnalysisResult}, previousCode: ${!!initialState.previousGeneratedCode}`);
     }
 
     setQuery(query) { this.context.originalQuery = query; }
 
+    // PHASE 12: Refined addStep to manage fragments
     addStep(stepData) {
-        const newStep = { ...stepData, attempt: stepData.attempt || 1, error: stepData.error || null, errorCode: stepData.errorCode || null };
+        const newStep = {
+            tool: stepData.tool,
+            args: stepData.args,
+            resultSummary: stepData.resultSummary || 'Executing...',
+            attempt: stepData.attempt || 1,
+            error: stepData.error || null,
+            errorCode: stepData.errorCode || null,
+            result: null // Store raw result here? Maybe too large.
+        };
         this.context.steps.push(newStep);
+
         // Only add visual step fragments for tool calls, not internal markers
         if (!stepData.tool.startsWith('_')) {
             this.context.intermediateResults.fragments.push({
-                 type: 'step', tool: stepData.tool, resultSummary: stepData.resultSummary || 'Executing...',
-                 error: stepData.error || null, errorCode: stepData.errorCode || null,
-                 status: stepData.error ? 'error' : (stepData.resultSummary === 'Executing...' ? 'running' : 'completed')
+                 type: 'step',
+                 tool: stepData.tool,
+                 resultSummary: stepData.resultSummary || 'Executing...',
+                 error: stepData.error || null,
+                 errorCode: stepData.errorCode || null,
+                 status: 'running' // Initial status for a new step fragment
              });
+             logger.debug(`[AgentStateManager] Added 'running' step fragment for tool: ${stepData.tool}`);
+        } else {
+             logger.debug(`[AgentStateManager] Skipping fragment creation for internal step: ${stepData.tool}`);
         }
     }
 
+    // PHASE 12: Refined updateLastStep to manage fragments
     updateLastStep(resultSummary, error = null, result = null, errorCode = null) {
         const lastStepIndex = this.context.steps.length - 1;
         if (lastStepIndex >= 0) {
             const step = this.context.steps[lastStepIndex];
             step.resultSummary = resultSummary;
             step.error = error;
-            step.result = result; // Store raw result on step? Might be large. Consider summarizing if needed.
+            step.result = result; // Store raw result on step?
             step.errorCode = errorCode;
 
-            // Find the corresponding *step fragment* to update its status/summary
-            // It might not be the *absolute* last fragment if text was added after
+            // Find the corresponding *running* step fragment to update its status/summary
             const relevantFragmentIndex = this.context.intermediateResults.fragments.findLastIndex(
-                 f => f.type === 'step' && f.tool === step.tool
+                 f => f.type === 'step' && f.tool === step.tool && f.status === 'running'
             );
 
             if (relevantFragmentIndex !== -1) {
@@ -80,48 +88,48 @@ class AgentStateManager {
                  fragment.error = error;
                  fragment.errorCode = errorCode;
                  fragment.status = error ? 'error' : 'completed';
+                 logger.debug(`[AgentStateManager] Updated step fragment for tool ${step.tool}. Status: ${fragment.status}`);
             } else {
-                 logger.warn(`[AgentStateManager] Could not find matching step fragment to update for tool: ${step.tool}`);
+                 logger.warn(`[AgentStateManager] Could not find matching RUNNING step fragment to update for tool: ${step.tool}`);
+                 // Optional: Add a new completed/error fragment if the running one wasn't found?
+                 // This might happen if an internal step occurred between the tool start and end.
+                 if (!step.tool.startsWith('_')) {
+                      this.context.intermediateResults.fragments.push({
+                          type: 'step', tool: step.tool, resultSummary: resultSummary,
+                          error: error, errorCode: errorCode, status: error ? 'error' : 'completed'
+                      });
+                      logger.warn(`[AgentStateManager] Added a new completed/error fragment as fallback for tool: ${step.tool}`);
+                 }
             }
 
         } else { logger.warn('[AgentStateManager] Attempted to updateLastStep, but no steps exist.'); }
     }
 
-    /**
-     * Stores intermediate results from successful tool executions.
-     * CRITICAL: Specifically handles storing parsed data for `parse_csv_data`.
-     *
-     * @param {string} toolName - The name of the tool that succeeded.
-     * @param {object} resultData - The `result` field from the tool's output.
-     * @param {object} [args={}] - The arguments originally passed to the tool.
-     */
+    // PHASE 12: Add method to add text fragments
+    addTextFragment(text) {
+        if (text && typeof text === 'string' && text.trim()) {
+            this.context.intermediateResults.fragments.push({ type: 'text', content: text.trim() });
+            logger.debug(`[AgentStateManager] Added text fragment.`);
+        }
+    }
+
     setIntermediateResult(toolName, resultData, args = {}) {
         switch (toolName) {
-            // *** CORRECTED CASE for parse_csv_data ***
             case 'parse_csv_data':
-                // Expect resultData = { parsedData: Array<object>, rowCount: number, summary: string }
                 if (resultData?.parsedData && Array.isArray(resultData.parsedData) && args.dataset_id) {
-                    // Store the actual parsed data array, keyed by dataset ID
                     this.context.intermediateResults.parsedData[args.dataset_id] = resultData.parsedData;
                     logger.info(`[AgentStateManager] Stored parsed data for dataset ${args.dataset_id} (${resultData.rowCount} rows).`);
                 } else {
                     logger.error(`[AgentStateManager] parse_csv_data result missing parsedData array or dataset_id. Cannot store intermediate data.`, { resultData, args });
                 }
                 break;
-            // *** END CORRECTION ***
-
             case 'execute_analysis_code':
-                // resultData here is the *inner* result from the sandbox, passed up by the tool wrapper
-                // { status: 'success', result: sandboxResult, logs?, errorCode? }
-                this.context.intermediateResults.analysisResult = resultData; // Store the result from sandbox
-                // Clear analysis code as it was just executed (or failed execution)
-                // It might be regenerated in the refinement loop.
+                this.context.intermediateResults.analysisResult = resultData;
                 this.context.intermediateResults.generatedAnalysisCode = null;
                 logger.info(`[AgentStateManager] Stored analysis execution result.`);
                 break;
              case 'generate_analysis_code':
                  if (resultData.code) {
-                     // This will correctly overwrite previous attempts during refinement
                      this.context.intermediateResults.generatedAnalysisCode = resultData.code;
                      logger.info(`[AgentStateManager] Stored/Updated generated analysis code (length: ${resultData.code.length}).`);
                  } else { logger.warn(`[AgentStateManager] generate_analysis_code success result missing code.`); }
@@ -142,30 +150,36 @@ class AgentStateManager {
     }
 
     getIntermediateResult(key, subKey = null) {
-        // Log retrieval for debugging the callback
         const result = subKey ? this.context.intermediateResults[key]?.[subKey] : this.context.intermediateResults[key];
-        logger.debug(`[AgentStateManager] getIntermediateResult called for key: ${key}, subKey: ${subKey}. Result found: ${!!result}`);
+        // logger.debug(`[AgentStateManager] getIntermediateResult called for key: ${key}, subKey: ${subKey}. Result found: ${!!result}`); // Too verbose
         return result;
     }
 
+    // PHASE 12: Refined setFinalAnswer to manage fragments
     setFinalAnswer(answer) {
         this.context.finalAnswer = answer || '';
         const fragments = this.context.intermediateResults.fragments;
         const lastFragment = fragments[fragments.length - 1];
-        // Append to last text fragment or add new one
+        // If the last fragment is already text, update it. Otherwise, add a new one.
+        // This prevents multiple consecutive text fragments.
         if (lastFragment?.type === 'text') {
-            lastFragment.content = this.context.finalAnswer; // Overwrite/set final text
+            lastFragment.content = this.context.finalAnswer;
+            logger.debug('[AgentStateManager] Updated last text fragment with final answer.');
         } else {
             fragments.push({ type: 'text', content: this.context.finalAnswer });
+            logger.debug('[AgentStateManager] Added new text fragment for final answer.');
         }
+        this.context.status = 'completed'; // Mark overall status as completed
     }
 
+    // PHASE 12: Refined setError to manage fragments
     setError(errorMsg, errorCode = null) {
         this.context.error = errorMsg;
         this.context.errorCode = errorCode;
         this.context.finalAnswer = `Error: ${errorMsg}`; // Set final answer to error message
         // Add error fragment
         this.context.intermediateResults.fragments.push({ type: 'error', content: errorMsg, errorCode: errorCode });
+        this.context.status = 'error'; // Mark overall status as error
     }
 
     setChatHistory(history) { this.context.fullChatHistory = history; }
@@ -175,12 +189,11 @@ class AgentStateManager {
     getSteps() { return this.context.steps; }
     incrementToolErrorCount(toolName) { this.context.toolErrorCounts[toolName] = (this.context.toolErrorCounts[toolName] || 0) + 1; }
     getToolErrorCount(toolName) { return this.context.toolErrorCounts[toolName] || 0; }
-    isFinished() { return !!this.context.finalAnswer || !!this.context.error; }
+    isFinished() { return !!this.context.finalAnswer || !!this.context.error || this.context.status === 'awaiting_user_input'; } // Include clarification state
 
     getContextForLLM() {
         let previousAnalysisResultSummary = null;
         const currentAnalysisResult = this.context.intermediateResults.analysisResult;
-        // Previous result here refers to the result from the sandbox in *this turn*
         if (currentAnalysisResult) {
             try {
                 const summary = JSON.stringify(currentAnalysisResult);
@@ -188,8 +201,7 @@ class AgentStateManager {
             }
             catch { previousAnalysisResultSummary = "Analysis results from this turn are available."; }
         }
-        // If no result from this turn, check if one was carried over
-        else if (this.context.intermediateResults.previousAnalysisResult) { // From constructor
+        else if (this.context.intermediateResults.previousAnalysisResult) {
              try {
                  const summary = JSON.stringify(this.context.intermediateResults.previousAnalysisResult);
                  previousAnalysisResultSummary = `Analysis results from a previous turn are available: ${summary.substring(0, 150)}${summary.length > 150 ? '...' : ''}`;
@@ -200,11 +212,11 @@ class AgentStateManager {
             originalQuery: this.context.originalQuery,
             fullChatHistory: this.context.fullChatHistory,
             currentTurnSteps: this.context.steps.map(s => ({ tool: s.tool, args: s.args, resultSummary: s.resultSummary, error: s.error, errorCode: s.errorCode, attempt: s.attempt })),
-            availableTools: toolDefinitions.map(({ argsSchema, ...rest }) => rest), // Exclude argsSchema from LLM context
+            availableTools: toolDefinitions.map(({ argsSchema, ...rest }) => rest),
             userContext: this.context.userContext,
             teamContext: this.context.teamContext,
-            analysisResult: this.context.intermediateResults.analysisResult, // Pass the actual result data if available for reasoning
-            previousAnalysisResultSummary: previousAnalysisResultSummary, // Pass the summary string
+            analysisResult: this.context.intermediateResults.analysisResult,
+            previousAnalysisResultSummary: previousAnalysisResultSummary,
             hasPreviousGeneratedCode: !!this.context.intermediateResults.generatedReportCode,
             datasetSchemas: this.context.intermediateResults.datasetSchemas,
             datasetSamples: this.context.intermediateResults.datasetSamples,
@@ -212,12 +224,16 @@ class AgentStateManager {
     }
 
     getContextForDB() {
-        const finalStatus = this.context.error ? 'error' : 'completed';
+        // Determine final status based on context state
+        let finalStatus = this.context.status; // Use the explicitly set status
+        if (finalStatus === 'processing') { // If loop ended without explicit status set
+             finalStatus = this.context.error ? 'error' : 'completed';
+        }
+
         return {
             status: finalStatus,
-            // completedAt: new Date(), // completedAt should be set when finalizing run
             steps: this.context.steps,
-            messageFragments: this.context.intermediateResults.fragments,
+            messageFragments: this.context.intermediateResults.fragments, // Save fragments
             aiResponseText: this.context.finalAnswer,
             errorMessage: this.context.error,
             errorCode: this.context.errorCode,
@@ -228,7 +244,7 @@ class AgentStateManager {
 
     getFinalStatusObject() {
         return {
-            status: this.context.error ? 'error' : 'completed',
+            status: this.context.error ? 'error' : (this.context.status === 'awaiting_user_input' ? 'awaiting_user_input' : 'completed'),
             aiResponseText: this.context.finalAnswer,
             aiGeneratedCode: this.context.intermediateResults.generatedReportCode,
             error: this.context.error,

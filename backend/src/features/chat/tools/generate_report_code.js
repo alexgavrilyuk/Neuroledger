@@ -1,8 +1,5 @@
-// ================================================================================
-// FILE: backend/src/features/chat/tools/generate_report_code.js
-// PURPOSE: Tool logic for generating React report code.
-// PHASE 2 UPDATE: Added specific error codes for missing analysis/service failures.
-// ================================================================================
+// backend/src/features/chat/tools/generate_report_code.js
+// ENTIRE FILE - UPDATED FOR PHASE 10
 
 const logger = require('../../../shared/utils/logger');
 const promptService = require('../prompt.service');
@@ -22,6 +19,9 @@ const { createToolWrapper } = require('./BaseToolWrapper');
  * @param {object} args - Tool arguments provided by the LLM.
  * @param {string} args.analysis_summary - A summary of the analysis goal and key results, used to guide the LLM.
  * @param {string} args.dataset_id - The MongoDB ObjectId of the dataset related to the analysis (provides context).
+ * @param {string} [args.title] - Optional title for the report.
+ * @param {string} [args.chart_type] - Optional preferred chart type.
+ * @param {Array<string>} [args.columns_to_visualize] - Optional specific columns to focus on.
  * @param {object} context - Additional context provided by the orchestrator.
  * @param {string} context.userId - The ID of the user making the request.
  * @param {string} context.sessionId - The ID of the current chat session.
@@ -30,7 +30,8 @@ const { createToolWrapper } = require('./BaseToolWrapper');
  * @returns {Promise<{status: 'success'|'error', result?: GeneratedReportResult, error?: string, errorCode?: string}>} Result object
  */
 async function generate_report_code_logic(args, context) {
-    const { analysis_summary, dataset_id } = args; // dataset_id is mainly for context now
+    // Destructure new optional args for Phase 10
+    const { analysis_summary, dataset_id, title, chart_type, columns_to_visualize } = args;
     const { userId, sessionId, analysisResult, datasetSchemas = {} } = context;
 
     // Argument validation handled by wrapper schema
@@ -60,6 +61,10 @@ async function generate_report_code_logic(args, context) {
             userId: userId,
             analysisSummary: analysis_summary,
             dataJson: dataJsonString, // Pass the stringified analysis result
+            // --- PHASE 10: Pass new args ---
+            title: title,
+            chart_type: chart_type,
+            columns_to_visualize: columns_to_visualize
             // Pass schema if needed by prompt template (currently prompt service doesn't use it directly for report gen)
             // datasetSchema: schemaData,
         };

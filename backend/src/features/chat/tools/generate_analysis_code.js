@@ -1,8 +1,5 @@
-// ================================================================================
-// FILE: backend/src/features/chat/tools/generate_analysis_code.js
-// PURPOSE: Tool logic for generating analysis code using the prompt service.
-// PHASE 2 UPDATE: Added specific error codes for schema/service failures.
-// ================================================================================
+// backend/src/features/chat/tools/generate_analysis_code.js
+// ENTIRE FILE - UPDATED FOR PHASE 8
 
 const logger = require('../../../shared/utils/logger');
 const promptService = require('../prompt.service');
@@ -22,6 +19,7 @@ const { createToolWrapper } = require('./BaseToolWrapper');
  * @param {object} args - Tool arguments provided by the LLM.
  * @param {string} args.analysis_goal - A detailed description of the analysis task requested by the user.
  * @param {string} args.dataset_id - The MongoDB ObjectId of the dataset the analysis pertains to (used for schema context).
+ * @param {string} [args.previous_error] - Optional error message from a previous failed execution attempt.
  * @param {object} context - Additional context provided by the orchestrator.
  * @param {string} context.userId - The ID of the user making the request.
  * @param {string} context.sessionId - The ID of the current chat session.
@@ -29,7 +27,8 @@ const { createToolWrapper } = require('./BaseToolWrapper');
  * @returns {Promise<{status: 'success'|'error', result?: GeneratedCodeResult, error?: string, errorCode?: string}>} Result object
  */
 async function generate_analysis_code_logic(args, context) {
-    const { analysis_goal, dataset_id } = args;
+    // Destructure new optional arg for Phase 8
+    const { analysis_goal, dataset_id, previous_error } = args;
     const { userId, sessionId, datasetSchemas = {} } = context;
 
     // Argument validation for analysis_goal is handled by the wrapper via schema now
@@ -60,6 +59,8 @@ async function generate_analysis_code_logic(args, context) {
             userId: userId,
             analysisGoal: analysis_goal,
             datasetSchema: schemaData, // Pass the full schema object
+            // --- PHASE 8: Pass the error to the service ---
+            previousError: previous_error
         };
 
         // 3. Call prompt service to generate code

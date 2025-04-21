@@ -1,11 +1,11 @@
 // backend/src/features/chat/agent/ToolExecutor.js
-// ENTIRE FILE - UPDATED FOR PHASE 6 FIX
+// ENTIRE FILE - UPDATED FOR PHASE 12 LOGGING
 
 const logger = require('../../../shared/utils/logger');
 const path = require('path');
 const fs = require('fs');
 
-// --- Dynamic Tool Loading (No changes here) ---
+// --- Dynamic Tool Loading ---
 const toolsDirectory = path.join(__dirname, '../tools');
 const toolImplementations = {};
 const knownToolNames = [];
@@ -22,9 +22,16 @@ try {
         .forEach(file => {
             const toolName = path.basename(file, '.js');
             let adjustedToolName = toolName;
+            // Map filenames to tool names used in definitions/schemas
             if (toolName === 'answer_user') adjustedToolName = '_answerUserTool';
-            if (toolName === 'ask_user_for_clarification') adjustedToolName = 'ask_user_for_clarification';
-            if (toolName === 'calculate_financial_ratios') adjustedToolName = 'calculate_financial_ratios';
+            else if (toolName === 'ask_user_for_clarification') adjustedToolName = 'ask_user_for_clarification';
+            else if (toolName === 'calculate_financial_ratios') adjustedToolName = 'calculate_financial_ratios';
+            else if (toolName === 'execute_analysis_code') adjustedToolName = 'execute_analysis_code';
+            else if (toolName === 'generate_analysis_code') adjustedToolName = 'generate_analysis_code';
+            else if (toolName === 'generate_report_code') adjustedToolName = 'generate_report_code';
+            else if (toolName === 'get_dataset_schema') adjustedToolName = 'get_dataset_schema';
+            else if (toolName === 'list_datasets') adjustedToolName = 'list_datasets';
+            else if (toolName === 'parse_csv_data') adjustedToolName = 'parse_csv_data';
             // Add more mappings if needed
 
             try {
@@ -59,30 +66,30 @@ class ToolExecutor {
      * @returns {Promise<object>} The result object from the executed tool.
      */
     async execute(toolName, llmArgs, executionContext, substitutedArgs = {}) {
-        const { sessionId } = executionContext; // Extract sessionId for logging
-        logger.debug(`[ToolExecutor ${sessionId}] Attempting to execute tool: ${toolName}`);
+        const { sessionId, traceId } = executionContext; // Extract traceId for logging
+        logger.debug(`[Trace:${traceId}] [ToolExecutor ${sessionId}] Attempting to execute tool: ${toolName}`);
 
         const toolFn = toolImplementations[toolName];
 
         if (!toolFn) {
             const errorMsg = `Unknown tool requested: ${toolName}`;
-            logger.error(`[ToolExecutor ${sessionId}] ${errorMsg}`);
+            logger.error(`[Trace:${traceId}] [ToolExecutor ${sessionId}] ${errorMsg}`);
             return { status: 'error', error: errorMsg, args: llmArgs, errorCode: 'UNKNOWN_TOOL' };
         }
 
         try {
-            // Call the (wrapped) tool function, passing llmArgs and substitutedArgs separately
+            // PHASE 12: Add debug log before calling the wrapped function
+            logger.debug(`[Trace:${traceId}] [ToolExecutor ${sessionId}] Calling wrapped function for tool: ${toolName}`);
             const result = await toolFn(llmArgs, executionContext, substitutedArgs);
-            logger.debug(`[ToolExecutor ${sessionId}] Tool ${toolName} execution finished via wrapper. Status: ${result.status}`);
-            // The wrapped function handles merging, execution, and result formatting
+            // PHASE 12: Add debug log after receiving result from wrapper
+            logger.debug(`[Trace:${traceId}] [ToolExecutor ${sessionId}] Tool ${toolName} execution finished via wrapper. Status: ${result.status}`);
             return result;
         } catch (error) {
-            // This catch is a final fallback for errors during the async call to the wrapper itself
-            logger.error(`[ToolExecutor ${sessionId}] Unexpected error calling wrapped toolFn for ${toolName}: ${error.message}`, { stack: error.stack, llmArgs, substitutedArgs });
+            logger.error(`[Trace:${traceId}] [ToolExecutor ${sessionId}] Unexpected error calling wrapped toolFn for ${toolName}: ${error.message}`, { stack: error.stack, llmArgs, substitutedArgs });
             return {
                 status: 'error',
                 error: `Unexpected failure during tool execution call: ${error.message}`,
-                args: { ...llmArgs, ...substitutedArgs }, // Report combined args on error
+                args: { ...llmArgs, ...substitutedArgs },
                 errorCode: 'TOOL_WRAPPER_ERROR'
             };
         }

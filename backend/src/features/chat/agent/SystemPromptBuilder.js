@@ -1,5 +1,5 @@
 // backend/src/features/chat/agent/SystemPromptBuilder.js
-// ENTIRE FILE - FULLY UPDATED
+// ENTIRE FILE - UPDATED FOR PHASES 9, 11
 
 const { toolDefinitions } = require('../tools/tool.definitions'); // Import tool definitions
 
@@ -26,17 +26,15 @@ const formatPercentage = (value, decimals = 1) => {
 const formatJsonValue = (value) => {
     if (value === null || value === undefined) return 'N/A';
     if (typeof value === 'number') {
-        // Heuristic for percentages (0-1 range or > 1 and <= 100)
         if ((value >= 0 && value <= 1 && String(value).includes('.')) || (value > 1 && value <= 100)) {
             if (Math.abs(value) <= 100) return formatPercentage(value, 1);
         }
-        return formatCurrency(value); // Default to currency for other numbers
+        return formatCurrency(value);
     }
-    if (typeof value === 'string') return `"${value.substring(0, 200)}${value.length > 200 ? '...' : ''}"`; // Keep quotes, truncate long strings
+    if (typeof value === 'string') return `"${value.substring(0, 200)}${value.length > 200 ? '...' : ''}"`;
     if (typeof value === 'boolean') return value ? 'Yes' : 'No';
     if (Array.isArray(value)) {
         if (value.length === 0) return '[]';
-        // Summarize arrays beyond a certain length or complexity
         if (value.length > 5 || (value[0] && typeof value[0] === 'object')) {
             return `[Array with ${value.length} items]`;
         }
@@ -45,13 +43,12 @@ const formatJsonValue = (value) => {
     if (typeof value === 'object') {
         const keys = Object.keys(value);
         if (keys.length === 0) return '{}';
-        // Summarize objects beyond a certain size
         if (keys.length > 5) {
             return `Object with ${keys.length} properties`;
         }
-        return `{ ${keys.map(k => `${k}: ${formatJsonValue(value[k])}`).join(', ')} }`; // Show limited key-values
+        return `{ ${keys.map(k => `${k}: ${formatJsonValue(value[k])}`).join(', ')} }`;
     }
-    return String(value).substring(0, 200); // Truncate other types
+    return String(value).substring(0, 200);
 };
 
 
@@ -60,17 +57,16 @@ const formatJsonValue = (value) => {
  * summarizing nested structures beyond a certain depth and truncating long values.
  * @param {any} obj - The object or value to format.
  * @param {string} [prefix=''] - Indentation prefix for nested levels.
- * @param {number} [maxDepth=3] - Maximum depth to fully expand objects/arrays. Increased slightly.
+ * @param {number} [maxDepth=3] - Maximum depth to fully expand objects/arrays.
  * @param {number} [currentDepth=0] - Current recursion depth.
  * @returns {string} A formatted string representation.
  */
 const formatAnalysisObject = (obj, prefix = '', maxDepth = 3, currentDepth = 0) => {
     let result = '';
-    // Max output length to prevent excessive context
     const MAX_FORMATTED_LENGTH = 2000;
 
     function formatRecursive(currentObj, currentPrefix, depth) {
-        if (result.length > MAX_FORMATTED_LENGTH) return; // Stop if too long
+        if (result.length > MAX_FORMATTED_LENGTH) return;
 
         if (typeof currentObj !== 'object' || currentObj === null || depth > maxDepth) {
             const formattedVal = `${currentPrefix}${formatJsonValue(currentObj)}\n`;
@@ -88,9 +84,8 @@ const formatAnalysisObject = (obj, prefix = '', maxDepth = 3, currentDepth = 0) 
                  result += `${currentPrefix}[Array truncated...]\n`; return;
             }
              result += arraySummary;
-            // Optionally show first few items if space allows and depth not exceeded
              if (depth < maxDepth) {
-                 for (let i = 0; i < Math.min(currentObj.length, 3); i++) { // Show first 3 items max
+                 for (let i = 0; i < Math.min(currentObj.length, 3); i++) {
                      if (result.length > MAX_FORMATTED_LENGTH) { result += `${currentPrefix}  [More items truncated...]\n`; break; }
                      formatRecursive(currentObj[i], `${currentPrefix}  - `, depth + 1);
                  }
@@ -101,7 +96,6 @@ const formatAnalysisObject = (obj, prefix = '', maxDepth = 3, currentDepth = 0) 
              return;
         }
 
-        // Handle objects
         for (const key in currentObj) {
             if (result.length > MAX_FORMATTED_LENGTH) { result += `${currentPrefix}[More properties truncated...]\n`; break; }
             if (Object.prototype.hasOwnProperty.call(currentObj, key)) {
@@ -127,7 +121,6 @@ const formatAnalysisObject = (obj, prefix = '', maxDepth = 3, currentDepth = 0) 
 
     formatRecursive(obj, prefix, currentDepth);
     if (result.length > MAX_FORMATTED_LENGTH) {
-         // Ensure truncation message is appended if limit exceeded during recursion
          if (!result.endsWith('[Data truncated...]\n') && !result.endsWith('[More items truncated...]\n') && !result.endsWith('[More properties truncated...]\n')) {
              result = result.substring(0, MAX_FORMATTED_LENGTH - 20) + '... [Truncated]\n';
          }
@@ -141,19 +134,14 @@ const formatAnalysisObject = (obj, prefix = '', maxDepth = 3, currentDepth = 0) 
  * various context sections.
  */
 class SystemPromptBuilder {
-    /**
-     * Builds the complete system prompt string.
-     * @param {object} context - The context object containing all necessary data.
-     *                           Expected shape matches `AgentStateManager.getContextForLLM()`.
-     * @returns {string} The fully assembled system prompt string.
-     */
     build(context) {
         const parts = [
             this._buildIntroduction(),
-            this._buildCoreThinkingInstruction(), // Updated
+            this._buildCoreThinkingInstruction(),
             this._buildCriticalWarnings(),
             this._buildChatHistory(context.fullChatHistory),
             this._buildCurrentProgress(context.currentTurnSteps),
+            // PHASE 11: Update artifact prompt section
             this._buildPreviousArtifacts(context.previousAnalysisResultSummary, context.hasPreviousGeneratedCode),
             this._buildAnalysisResult(context.analysisResult),
             this._buildUserTeamContext(context.userContext, context.teamContext),
@@ -162,8 +150,10 @@ class SystemPromptBuilder {
             this._buildFewShotExamples(),
             this._buildCoreInstructions(),
             this._buildWorkflowGuidance(),
+            // PHASE 11: Update modification handling prompt section
             this._buildModificationHandling(),
             this._buildErrorHandling(),
+            // PHASE 9: Add clarification guidance
             this._buildClarificationGuidance(),
             this._buildFinalInstruction()
         ];
@@ -174,7 +164,6 @@ class SystemPromptBuilder {
         return "You are NeuroLedger AI, an expert Financial Analyst agent. Your goal is to help the user analyze their financial data and answer their questions accurately and insightfully.";
     }
 
-    // ** UPDATED: Add <user_explanation> requirement **
     _buildCoreThinkingInstruction() {
         return `**CORE REQUIREMENT: THINK BEFORE ACTING & EXPLAIN TO USER**
 Before outputting ANY tool call OR your final answer, YOU MUST first provide **BOTH**:
@@ -215,10 +204,9 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
              historyText += `*Summary of Earlier Conversation:*\n${chatHistory[0].content.replace('Previous conversation summary:\n','')}\n---\n*Recent Messages:*\n`;
              chatHistory = chatHistory.slice(1);
         }
-        const displayHistory = chatHistory.slice(-10); // Keep recent N turns for context
+        const displayHistory = chatHistory.slice(-10);
         historyText += displayHistory.map(msg => {
             const prefix = msg.role === 'user' ? 'User' : 'Assistant';
-            // Truncate long messages in history for brevity
             const content = (msg.content || '').substring(0, 500);
             const ellipsis = (msg.content || '').length > 500 ? '...' : '';
             return `${prefix}: ${content}${ellipsis}`;
@@ -231,8 +219,8 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
         if (!steps || steps.length === 0) return '**Current Turn Progress:**\nNo actions taken yet this turn.';
         let text = '**Current Turn Progress:**\nActions taken so far in this turn:\n';
         steps.forEach((step, index) => {
-            if (step.tool.startsWith('_')) return; // Skip internal steps like _refiningCode
-            text += `${index + 1}. Tool Used: \`${step.tool}\` (Attempt: ${step.attempt || 1})\n`; // Show tool name internally
+            if (step.tool.startsWith('_')) return;
+            text += `${index + 1}. Tool Used: \`${step.tool}\` (Attempt: ${step.attempt || 1})\n`;
              let argsSummary = 'No args';
              if (step.args && Object.keys(step.args).length > 0) {
                  const argsToSummarize = {};
@@ -252,14 +240,16 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
         return text;
     }
 
+    // PHASE 11: Update artifact prompt section
     _buildPreviousArtifacts(summary, hasCode) {
         if (!summary && !hasCode) return '';
         let text = '**Context from Previous Report Generation (If applicable):**\n';
-        text += `- Summary of Previous Analysis Used: ${summary || 'None available'}\n`;
+        text += `- Summary of Previous Analysis Used: ${summary || 'None available'}\n`; // Clarify this is summary OF the data used
         text += `- Previously Generated Code Available: ${hasCode ? 'Yes' : 'No'}\n`;
         return text;
     }
 
+    // PHASE 11: Update analysis result prompt section
     _buildAnalysisResult(analysisResult) {
         if (!analysisResult) return '**Current Turn Analysis Results:**\nNo analysis has been performed or resulted in data *this turn*. Check previous turn artifacts if modifying.';
         try {
@@ -287,7 +277,7 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
         datasetIds.forEach(datasetId => {
             const schema = schemas[datasetId] || {};
             const sample = samples[datasetId];
-            text += `\n## Dataset ID: \`${datasetId}\`\n`; // Highlight the ID
+            text += `\n## Dataset ID: \`${datasetId}\`\n`;
             text += `   Name: ${schema.name || 'Unknown Name'}\n`;
             text += `   Description: ${schema.description || 'No description available'}\n\n`;
             text += `### Schema Information:\n`;
@@ -301,7 +291,6 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
                 text += `\n### Sample Data (Last ${sample.sampleRows.length} rows of ${sample.totalRows} total):\n`;
                 try {
                      const sampleString = JSON.stringify(sample.sampleRows, null, 2);
-                     // Increased sample display limit
                      const truncatedSample = sampleString.substring(0, 1500) + (sampleString.length > 1500 ? '\n...' : '');
                      text += `   \`\`\`json\n   ${truncatedSample}\n   \`\`\`\n`;
                 } catch { text += `   [Could not display sample data]\n`; }
@@ -311,13 +300,11 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
     }
 
     _buildToolDefinitions() {
-        // Using the imported toolDefinitions directly
         const formattedTools = toolDefinitions.map(tool => {
             const escapedDescription = tool.description.replace(/"/g, '\\"').replace(/\n/g, '\\n');
             let escapedOutput = '';
             if (typeof tool.output === 'string') { escapedOutput = tool.output.replace(/"/g, '\\"').replace(/\n/g, '\\n     '); }
             else { try { escapedOutput = JSON.stringify(tool.output); } catch { escapedOutput = '[Output format unavailable]'; } }
-            // Don't include argsSchema in the prompt for the LLM
             return `  {\n     "name": "${tool.name}",\n     "description": "${escapedDescription}",\n     "output": "${escapedOutput}"\n   }`;
         }).join(',\n');
 
@@ -325,7 +312,6 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
     }
 
      _buildFewShotExamples() {
-          // Include <user_explanation> in examples
           return `**Examples of Interaction Flow:**
 
           *Example 1: User asks for schema*
@@ -389,11 +375,27 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
             }
           }
           \`\`\`
+
+          *Example 3: Handling Ambiguity*
+          User Request: "Show the profit margin." (Dataset schema lacks obvious 'Profit' column but has 'Revenue', 'COGS')
+          Your Response:
+          \`<thinking>
+          1. User wants profit margin, but the schema doesn't have a 'Profit' column directly.
+          2. I see 'Revenue' and 'COGS' columns. Profit margin is usually (Revenue - COGS) / Revenue.
+          3. I should ask the user to confirm if using these columns is correct before proceeding with calculations.
+          4. I will use the \`ask_user_for_clarification\` tool.
+          </thinking>
+          <user_explanation>To calculate the profit margin, I need to know which columns represent revenue and costs. Could you clarify which columns to use?</user_explanation>\`
+          \`\`\`json
+          {
+            "tool": "ask_user_for_clarification",
+            "args": { "question": "I can calculate the profit margin using the 'Revenue' and 'COGS' columns. Is that correct?" }
+          }
+          \`\`\`
           `;
       }
 
     _buildCoreInstructions() {
-        // Keep user-friendly progress update guidance
         return `**IMPORTANT INSTRUCTIONS (User Experience Focus):**
 *   **User-Friendly Explanations:** In your \`<user_explanation>\` block, explain your progress towards the user's goal in simple, non-technical language. Focus on *what* you are doing for the user (e.g., "Loading your data", "Preparing the analysis code", "Running the calculations", "Generating the report").
 *   **DO NOT Mention Internals:** In your \`<user_explanation>\` and final \`textResponse\`, **DO NOT** mention internal tool names (like \\\`parse_csv_data\\\`, \\\`generate_analysis_code\\\`, etc.), internal variables, or system identifiers like MongoDB ObjectIds. Keep the language focused on the user's perspective and the task progress.
@@ -402,7 +404,7 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
 
     _buildWorkflowGuidance() {
         return `**WORKFLOW GUIDANCE:**
-*   **Data Loading First:** Generally, use \`parse_csv_data\` or \`check_data_loaded\` first if data isn't already loaded for the current analysis task.
+*   **Data Loading First:** Generally, use \`parse_csv_data\` first if data isn't already loaded for the current analysis task.
 *   **Code for Calculations:** For calculations or specific data transformations not covered by other tools, use \`generate_analysis_code\` then \`execute_analysis_code\`.
 *   **Report Generation:** To visualize results or present data in a structured way (charts, tables), use \`generate_report_code\` AFTER analysis code has been successfully executed (its result will be passed automatically).
 *   **Tool Selection:** Choose the MOST appropriate tool for the specific task. Don't use general code generation if a specific tool (like \`calculate_financial_ratios\`) can directly answer the request.
@@ -421,10 +423,16 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
 `;
     }
 
+    // PHASE 11: Update modification handling prompt section
     _buildModificationHandling() {
-        return `**MODIFICATION HANDLING:** If the user asks to **modify** the *most recently generated report* AND the modification **does not require new calculations**:
-    a. Explain you are "Updating the report component" in \`<user_explanation>\`.
-    b. Use only \`generate_report_code\`.`;
+        return `**MODIFICATION HANDLING:** If the user asks to **modify** the *most recently generated report* (e.g., 'change the title', 'use a line chart instead') AND you determine the modification **does not require recalculating the underlying data**:
+    a. Acknowledge the modification request in your \`<thinking>\` block and state you will use the previously calculated analysis results.
+    b. Confirm that \`Previous Turn Artifacts\` indicates existing analysis results or generated code.
+    c. Your **only** action should be to use the \`generate_report_code\` tool.
+    d. In the \`analysis_summary\` argument, describe the requested change (e.g., "User wants to change the title to 'New Title' and use a LineChart for the existing monthly revenue data."). Keep it concise.
+    e. Include any specific modification arguments (\`title\`, \`chart_type\`, etc.) based on the user's request in the \`args\` for \`generate_report_code\`.
+    f. Pass the original \`dataset_id\` associated with the analysis.
+    g. **DO NOT** call \`parse_csv_data\` or \`execute_analysis_code\`. The system will automatically provide the previous analysis data to the report generator based on context.`;
     }
 
      _buildErrorHandling() {
@@ -434,8 +442,9 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
     c. DO NOT attempt to call the *same* tool again unless the error code explicitly suggests a retry AND you modify args. Prefer \`ask_user_for_clarification\` if missing info caused the error.`;
     }
 
+     // PHASE 9: Add clarification guidance
      _buildClarificationGuidance() {
-         return `**Requesting Clarification:** If the user's request is ambiguous or missing information, use \`ask_user_for_clarification\`. Explain *why* you need clarification in \`<user_explanation>\`.`;
+         return `**Requesting Clarification:** If the user's request is ambiguous (e.g., asks for 'profit margin' but required columns like 'Revenue' or 'COGS' aren't obvious from the schema) or if a previous tool failed because information was missing, use the \`ask_user_for_clarification\` tool to ask a specific question. Explain *why* you need clarification in \`<user_explanation>\`.`;
      }
 
     _buildFinalInstruction() {

@@ -1,8 +1,5 @@
-// ================================================================================
-// FILE: backend/src/features/chat/prompt.service.js
-// PURPOSE: Handles LLM interactions, using provider abstraction.
-// PHASE 5 UPDATE: Added guidance on handling error feedback in generateAnalysisCodePrompt.
-// ================================================================================
+// backend/src/features/chat/prompt.service.js
+// ENTIRE FILE - UPDATED FOR PHASES 8, 10
 
 const User = require('../users/user.model');
 const Dataset = require('../datasets/dataset.model');
@@ -18,7 +15,7 @@ const { getProvider, getUserModelPreference } = require('../../shared/llm_provid
  * @returns {Promise<{contextString: string, userContext: string, teamContext: string}>}
  */
 const assembleContext = async (userId, selectedDatasetIds) => {
-    // (No changes needed for Phase 5)
+    // (No changes needed for Phase 8/10)
     let contextString = ""; let userContext = ''; let teamContext = '';
     try {
         const user = await User.findById(userId).select('settings').lean();
@@ -41,18 +38,33 @@ const assembleContext = async (userId, selectedDatasetIds) => {
 
 /**
  * Generates the system prompt specifically for ANALYSIS code generation.
- * PHASE 5 UPDATE: Added guidance on handling error feedback.
+ * PHASE 8 UPDATE: Added guidance on handling error feedback.
  * @param {object} params - Parameters for prompt generation.
  * @param {string} params.analysisGoal - The specific goal, potentially including error feedback.
  * @param {object} params.datasetSchema - Schema information.
+ * @param {string} [params.previousError] - Optional error message from previous execution.
  * @returns {string} - The generated system prompt string.
  */
-const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
+const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema, previousError }) => { // Added previousError
     if (!analysisGoal || !datasetSchema) throw new Error('Missing goal or schema for analysis code prompt.');
     let schemaDetails = `Dataset Description: ${datasetSchema.description || 'N/A'}\nColumns:\n`;
     if (datasetSchema.schemaInfo?.length > 0) {
         schemaDetails += datasetSchema.schemaInfo.map(col => `- ${col.name} (${col.type || 'string'}): ${datasetSchema.columnDescriptions?.[col.name] || 'No description'}`).join('\n');
     } else { schemaDetails += '(No schema information available)'; }
+
+    // --- PHASE 8: Add error feedback section ---
+    let errorFeedbackSection = '';
+    if (previousError) {
+        errorFeedbackSection = `
+**Previous Execution Failed:**
+The code generated previously failed with the following error:
+\`\`\`error
+${previousError}
+\`\`\`
+Please analyze this error and the original goal/schema. Generate **corrected** Javascript code that fixes the issue and adheres to all sandbox constraints.
+        `;
+    }
+    // --- END PHASE 8 ---
 
     const analysisCodeGenSystemPrompt = `You are an expert Javascript data analyst writing code to run in a **HIGHLY RESTRICTED SANDBOX ENVIRONMENT (Node.js vm module)**.
 
@@ -66,6 +78,8 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
     **Analysis Goal:**
     ${analysisGoal}
 
+    ${errorFeedbackSection} // Inject the error feedback section here
+
     **Dataset Schema Context:**
     ${schemaDetails}
 
@@ -77,7 +91,7 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
 
     **CRITICAL: Generate Textual Insights:**
     Based on your calculations (variances, ratios, trends), your code **MUST** generate an array of brief, human-readable insight strings. These strings should summarize key findings.
-    Examples: \`'Net income was $500 (15.2%) below budget.'\`, \`'Gross margin improved slightly to 45.5%.'\`, \`'Sales grew 8% compared to the previous period.'\`, \`'High missing values found in the Marketing Spend column.'\`
+    Examples: \`'Net income was $500 (15.2%) below budget.'\`, \`'Gross margin improved slightly to 45.5%.'\`, \`'Sales grew 8% compared to the previous period.'\`
 
     **Output Structure (\`sendResult\`):**
     Your code **MUST** call \`sendResult(resultObject)\` exactly once. The \`resultObject\` **MUST** be a JSON object containing:
@@ -154,8 +168,6 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
 
     **Flexibility:** Your code must be **flexible**. Analyze the provided \`datasetSchema\` to determine *which* calculations are possible and relevant. Do not attempt calculations if required columns are missing. Gracefully handle missing or invalid data within \`inputData\`.
 
-    **Error Feedback Handling (If applicable):** Your \`Analysis Goal\` might include error feedback from a previous failed execution attempt (indicated by text like "Fix the following error..."). Analyze the error message AND the original goal carefully to provide corrected code that avoids the previous error, while still adhering to all sandbox constraints. Focus on fixing the specific error mentioned.
-
     Generate the Javascript code now.
     `;
     return analysisCodeGenSystemPrompt;
@@ -163,16 +175,21 @@ const generateAnalysisCodePrompt = ({ analysisGoal, datasetSchema }) => {
 
 /**
  * Generates Node.js analysis code using the LLM based on a goal and schema.
+ * PHASE 8 UPDATE: Accepts and passes previousError.
  * @param {object} params - Parameters for code generation.
+ * @param {string} params.userId - User ID.
+ * @param {string} params.analysisGoal - The analysis goal.
+ * @param {object} params.datasetSchema - Dataset schema info.
+ * @param {string} [params.previousError] - Optional error from previous execution.
  * @returns {Promise<{code: string | null}>} - The generated code string or null on failure.
  */
-const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => {
-    // (Code remains the same as Phase 4)
+const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema, previousError }) => { // Added previousError
     const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(userId);
     logger.info(`[Analysis Code Gen] Using ${preferredProvider} model: ${modelToUse} for user ${userId}`);
     const startTime = Date.now();
     logger.info('Generating analysis Node.js code for goal: "%s..." using provider', analysisGoal.substring(0, 50));
-    const systemPrompt = generateAnalysisCodePrompt({ analysisGoal, datasetSchema });
+    // Pass previousError to prompt builder
+    const systemPrompt = generateAnalysisCodePrompt({ analysisGoal, datasetSchema, previousError });
     try {
         const provider = await getProvider(userId);
         const messages = [{ role: "user", content: "Generate the sandboxed Javascript analysis code based **strictly** on the system prompt instructions, using ONLY the `inputData` variable and calling `sendResult`."}];
@@ -203,6 +220,7 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
 
 /**
  * Generates the system prompt specifically for REPORT code generation.
+ * PHASE 10 UPDATE: Incorporates optional arguments.
  * @param {object} params - Parameters for prompt generation.
  * @param {string} params.analysisSummary - A summary of the analysis performed.
  * @param {string} params.dataJson - A JSON string representation of the analysis result data.
@@ -211,12 +229,10 @@ const generateAnalysisCode = async ({ userId, analysisGoal, datasetSchema }) => 
  * @param {Array<string>} [params.columns_to_visualize] - Optional specific columns preference.
  * @returns {string} - The generated system prompt string.
  */
-const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type, columns_to_visualize }) => {
-    // --- NEW: Add data preview to prompt ---
+const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type, columns_to_visualize }) => { // Added new args
     let dataPreview = "No data preview available.";
     try {
         const parsedData = JSON.parse(dataJson);
-        // Create a more limited preview (e.g., first 5 keys/values, or first 5 array elements)
         if (Array.isArray(parsedData)) {
             dataPreview = JSON.stringify(parsedData.slice(0, 3), null, 2);
              if (parsedData.length > 3) dataPreview += '\n... (truncated array)';
@@ -224,31 +240,27 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
              const keys = Object.keys(parsedData);
              const previewObj = {};
              keys.slice(0, 5).forEach(key => { previewObj[key] = parsedData[key]; });
-             // --- NEW: Show a glimpse of insights/recommendations if present ---
              if (parsedData.generatedInsights) {
-                 previewObj.generatedInsights = parsedData.generatedInsights.slice(0, 2); // Show first 2 insights
+                 previewObj.generatedInsights = parsedData.generatedInsights.slice(0, 2);
                  if (parsedData.generatedInsights.length > 2) previewObj.generatedInsights.push('...');
              }
               if (parsedData.recommendations) {
-                 previewObj.recommendations = parsedData.recommendations.slice(0, 2); // Show first 2 recommendations
+                 previewObj.recommendations = parsedData.recommendations.slice(0, 2);
                  if (parsedData.recommendations.length > 2) previewObj.recommendations.push('...');
              }
              dataPreview = JSON.stringify(previewObj, null, 2);
              if (keys.length > 5) dataPreview += '\n... (truncated object)';
-        } else {
-             dataPreview = String(parsedData).substring(0, 200); // Primitive preview
-        }
+        } else { dataPreview = String(parsedData).substring(0, 200); }
     } catch { /* Ignore parsing errors for preview */ }
-    // --- END NEW ---
 
-    // --- NEW: Refined Prompt ---
+    // --- PHASE 10: Incorporate optional args into prompt ---
     const reportCodeGenSystemPrompt = `You are an expert React developer tasked with creating a **self-contained React component** named \`ReportComponent\` to visualize financial analysis results. This component will run in a sandboxed iframe environment.
 
     **CRITICAL SANDBOX CONSTRAINTS:**
     1.  **NO \`import\` or \`export\` statements.** Use libraries available globally (e.g., \`window.React\`, \`window.Recharts\`).
-    2.  **DEFINE ONLY ONE FUNCTION:** \`function ReportComponent(props) { ... }\`. Do NOT include any other code outside this function definition (no surrounding HTML, script tags, or example usage like \`ReactDOM.render\`).
-    3.  **ACCESS DATA VIA PROP:** The analysis result data will be passed as a prop named \`reportData\`. Access it via \`props.reportData\`. This object will contain fields like \`summaryKPIs\`, \`calculatedRatios\`, \`varianceAnalysis\`, \`trendAnalysis\`, \`chartData\`, \`generatedInsights\` (an array of strings), and \`recommendations\` (an array of strings).
-    4.  **USE AVAILABLE LIBRARIES:** You can use \`React\`, \`ReactDOM\`, \`Recharts\`, \`lodash\` (\`_\`), \`papaparse\` (\`Papa\`), \`xlsx\` (\`XLSX\`). Access them directly (e.g., \`React.useState\`, \`Recharts.LineChart\`).
+    2.  **DEFINE ONLY ONE FUNCTION:** \`function ReportComponent(props) { ... }\`. Do NOT include any other code outside this function definition.
+    3.  **ACCESS DATA VIA PROP:** The analysis result data will be passed as a prop named \`reportData\`. Access it via \`props.reportData\`. This object will contain fields like \`summaryKPIs\`, \`calculatedRatios\`, \`varianceAnalysis\`, \`chartData\`, \`generatedInsights\` (array of strings), and \`recommendations\` (array of strings).
+    4.  **USE AVAILABLE LIBRARIES:** You can use \`React\`, \`ReactDOM\`, \`Recharts\`, \`lodash\` (\`_\`), \`papaparse\` (\`Papa\`), \`xlsx\` (\`XLSX\`). Access them directly.
 
     **TASK:** Generate the React code for \`ReportComponent\` based on the following analysis:
 
@@ -259,7 +271,7 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
     \`\`\`json
     ${dataPreview}
     \`\`\`
-    *Note: The actual \`props.reportData\` object will contain the full analysis results, including fields like \`summaryKPIs\`, \`calculatedRatios\`, \`varianceAnalysis\`, \`chartData\`, \`generatedInsights\` (array of strings), and \`recommendations\` (array of strings).*
+    *Note: The actual \`props.reportData\` object will contain the full analysis results.*
 
     **User Preferences (Optional):**
     - Report Title: ${title || 'Generate an appropriate title based on the analysis summary'}
@@ -267,14 +279,14 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
     - Focus Columns: ${columns_to_visualize ? columns_to_visualize.join(', ') : 'Visualize relevant data from props.reportData'}
 
     **Output Requirements:**
-    *   Create clear and informative visualizations using Recharts (using data from \`props.reportData.chartData\`).
+    *   Create clear visualizations using Recharts (using data from \`props.reportData.chartData\`).
     *   Display key metrics from \`props.reportData.summaryKPIs\`.
     *   **CRITICAL: Render the textual insights from \`props.reportData.generatedInsights\` under a clear heading (e.g., 'Key Observations').**
     *   **CRITICAL: Render the recommendations from \`props.reportData.recommendations\` under a clear heading (e.g., 'Actionable Recommendations').**
     *   Structure the report logically (e.g., Summary/KPIs -> Charts -> Observations -> Recommendations).
     *   Handle potential missing data in \`props.reportData\` gracefully.
     *   Style components minimally using inline styles or basic CSS class names.
-    *   The component should be functional and render the analysis data effectively.
+    *   **Take user preferences (Title, Chart Type, Focus Columns) into account where possible.** Use a Table if specified or if data is best presented tabularly.
     *   **OUTPUT ONLY THE JAVASCRIPT CODE FOR THE \`ReportComponent\` FUNCTION.**
 
     **GOOD EXAMPLE (Structure including Insights/Recommendations):**
@@ -297,7 +309,7 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
       const listItemStyle = { marginBottom: '5px', fontSize: '0.9em', color: '#555' };
 
       return React.createElement('div', { /* container styles */ },
-        React.createElement('h2', { /* title styles */ }, "\${title || 'Financial Analysis Report'}"),
+        React.createElement('h2', { /* title styles */ }, "${title || 'Financial Analysis Report'}"), // Use provided title
 
         // KPIs Section
         React.createElement('div', { /* kpi container styles */ },
@@ -307,7 +319,7 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
         // Charts Section
         React.createElement('div', { style: sectionStyle },
             React.createElement('h3', { style: headingStyle }, 'Performance Charts'),
-            // ... render charts using chartData.monthly, chartData.categories etc. ...
+            // ... render charts using chartData, respecting chart_type and columns_to_visualize if provided ...
         ),
 
         // Key Observations Section
@@ -335,64 +347,56 @@ const generateReportCodePrompt = ({ analysisSummary, dataJson, title, chart_type
 
     Generate the code for \`ReportComponent\` now. Remember, ONLY the function code.
     `;
-    // --- END NEW ---
+    // --- END PHASE 10 ---
     return reportCodeGenSystemPrompt;
 };
 
 /**
  * Generates React component code for visualizing analysis results.
+ * PHASE 10 UPDATE: Accepts and passes optional arguments.
  * @param {object} params - Parameters for report generation.
+ * @param {string} params.userId - User ID.
+ * @param {string} params.analysisSummary - Summary of analysis.
+ * @param {string} params.dataJson - Stringified analysis result data.
+ * @param {string} [params.title] - Optional title preference.
+ * @param {string} [params.chart_type] - Optional chart type preference.
+ * @param {Array<string>} [params.columns_to_visualize] - Optional columns preference.
  * @returns {Promise<{react_code: string | null}>} - The generated React code string or null on failure.
  */
-const generateReportCode = async ({ userId, analysisSummary, dataJson, title, chart_type, columns_to_visualize }) => {
+const generateReportCode = async ({ userId, analysisSummary, dataJson, title, chart_type, columns_to_visualize }) => { // Added new args
     const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(userId);
     logger.info(`[Report Code Gen] Using ${preferredProvider} model: ${modelToUse} for user ${userId}`);
     if (!analysisSummary || !dataJson) throw new Error('Missing analysis summary or data for report code generation.');
     if (typeof dataJson !== 'string') throw new Error('Invalid dataJson format: Expected string.');
 
-    // Generate the refined prompt
+    // Generate the refined prompt including optional args
     const systemPrompt = generateReportCodePrompt({ analysisSummary, dataJson, title, chart_type, columns_to_visualize });
 
     try {
         const provider = await getProvider(userId);
-        // Simple user message, all logic is in system prompt
         const messages = [{ role: "user", content: "Generate the React component code exactly as specified in the system prompt." }];
-        const apiOptions = { model: modelToUse, system: systemPrompt, messages, max_tokens: 28000, temperature: 0.1 }; // Increased max_tokens slightly if needed
+        const apiOptions = { model: modelToUse, system: systemPrompt, messages, max_tokens: 28000, temperature: 0.1 };
 
-        const startTime = Date.now(); // Start timer
+        const startTime = Date.now();
         const apiResponse = await provider.generateContent(apiOptions);
-        const durationMs = Date.now() - startTime; // End timer
+        const durationMs = Date.now() - startTime;
 
         const generatedCode = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
 
-        if (!generatedCode) {
-            throw new Error(`AI assistant failed to generate report code.`);
-        }
+        if (!generatedCode) throw new Error(`AI assistant failed to generate report code.`);
 
         let cleanedCode = generatedCode;
-        // Remove markdown fences first
         const codeBlockRegex = /^```(?:jsx?|javascript)?\s*([\s\S]*?)\s*```$/m;
         const match = cleanedCode.match(codeBlockRegex);
-        if (match && match[1]) {
-            cleanedCode = match[1].trim();
-            logger.debug('[generateReportCode] Removed markdown fences.');
-        }
-
-        // Basic cleaning - remove imports/exports, ensure ReportComponent exists
+        if (match && match[1]) cleanedCode = match[1].trim();
         cleanedCode = cleanedCode.replace(/^import\s+.*\s+from\s+['"].*['"];?/gm, '');
         cleanedCode = cleanedCode.replace(/^export\s+default\s+\w+;?/gm, '');
         cleanedCode = cleanedCode.replace(/^export\s+(const|function)\s+/gm, '$1 ');
 
-        if (!cleanedCode.includes('function ReportComponent')) {
-             logger.warn('[generateReportCode] Generated report code is missing "function ReportComponent" definition. Returning as is, iframe may fail.');
-             // Return the code anyway, let the iframe handle the error
-        } else if (cleanedCode.includes('import ') || cleanedCode.includes('export ')) {
-            logger.error('[generateReportCode] Generated code still included disallowed import/export after cleaning!', { cleanedCode: cleanedCode.substring(0, 500) });
-            throw new Error('Generated code included disallowed import/export statement.');
-        } else {
-            logger.info(`React report code generated successfully using ${modelToUse}. Length: ${cleanedCode.length}, Time: ${durationMs}ms`);
-        }
+        if (!cleanedCode.includes('function ReportComponent')) logger.warn('[generateReportCode] Generated report code is missing "function ReportComponent" definition.');
+        if (cleanedCode.includes('import ') || cleanedCode.includes('export ')) throw new Error('Generated code included disallowed import/export statement.');
 
+        logger.info(`React report code generated successfully using ${modelToUse}. Length: ${cleanedCode.length}, Time: ${durationMs}ms`);
         return { react_code: cleanedCode };
 
     } catch (error) {
@@ -446,7 +450,8 @@ const getHistorySummary = async (historyToSummarize, userId) => {
     const { provider: preferredProvider, model: modelToUse } = await getUserModelPreference(userId);
     let summarizationModel = modelToUse; if (preferredProvider === 'claude') { summarizationModel = 'claude-3-haiku-20240307'; logger.debug(`[History Summarization] Overriding model to ${summarizationModel} for summarization.`); }
     else { logger.debug(`[History Summarization] Using preferred model ${summarizationModel} for summarization.`); }
-    const systemPrompt = "You are a concise summarization assistant..."; const messages = [{ role: "user", content: `Please summarize this conversation history:\n\n${historyToSummarize}` }];
+    const systemPrompt = "You are a concise summarization assistant. Summarize the key points, questions, answers, decisions, and especially any data analysis results or report details from the following conversation history between a User and an AI Financial Analyst. Focus on information relevant for continuing the analysis. Keep it concise but retain crucial details.";
+    const messages = [{ role: "user", content: `Please summarize this conversation history:\n\n${historyToSummarize}` }];
     try {
         const provider = await getProvider(userId); const apiOptions = { model: summarizationModel, system: systemPrompt, messages, max_tokens: 25000, temperature: 0.2 };
         const apiResponse = await provider.generateContent(apiOptions); const summaryText = apiResponse?.content?.[0]?.type === 'text' ? apiResponse.content[0].text.trim() : null;
