@@ -1,6 +1,4 @@
 // backend/src/features/chat/agent/SystemPromptBuilder.js
-// ENTIRE FILE - UPDATED FOR PHASES 9, 11
-
 const { toolDefinitions } = require('../tools/tool.definitions'); // Import tool definitions
 
 // Helper function to format currency values for the prompt.
@@ -17,12 +15,7 @@ const formatPercentage = (value, decimals = 1) => {
     return numericValue.toFixed(decimals) + '%';
 };
 
-/**
- * Helper to format individual JSON values appropriately (currency, percentage, etc.).
- * Used by `formatAnalysisObject`.
- * @param {any} value - The value to format.
- * @returns {string} Formatted string representation.
- */
+// Helper function to format individual JSON values appropriately (currency, percentage, etc.).
 const formatJsonValue = (value) => {
     if (value === null || value === undefined) return 'N/A';
     if (typeof value === 'number') {
@@ -141,7 +134,6 @@ class SystemPromptBuilder {
             this._buildCriticalWarnings(),
             this._buildChatHistory(context.fullChatHistory),
             this._buildCurrentProgress(context.currentTurnSteps),
-            // PHASE 11: Update artifact prompt section
             this._buildPreviousArtifacts(context.previousAnalysisResultSummary, context.hasPreviousGeneratedCode),
             this._buildAnalysisResult(context.analysisResult),
             this._buildUserTeamContext(context.userContext, context.teamContext),
@@ -149,11 +141,9 @@ class SystemPromptBuilder {
             this._buildToolDefinitions(),
             this._buildFewShotExamples(),
             this._buildCoreInstructions(),
-            this._buildWorkflowGuidance(),
-            // PHASE 11: Update modification handling prompt section
+            this._buildWorkflowGuidance(), // Updated in Phase 3
             this._buildModificationHandling(),
             this._buildErrorHandling(),
-            // PHASE 9: Add clarification guidance
             this._buildClarificationGuidance(),
             this._buildFinalInstruction()
         ];
@@ -174,7 +164,7 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
 1.  Provide your internal reasoning in \`<thinking> ... </thinking>\`. **When planning for a comprehensive report, explicitly state in your \`<thinking>\` block that you will generate analysis code that includes insights, and then generate report code to display both data and insights.**
 2.  **Immediately** following, provide the user explanation in \`<user_explanation> ... </user_explanation>\`.
 3.  **Immediately** following the closing \`</user_explanation>\` tag, provide EITHER:
-    a.  A **single JSON object** for a tool call (e.g., \`parse_csv_data\`). Format:
+    a.  A **single JSON object** for a tool call (e.g., \`get_dataset_schema\`). Format:
         \`\`\`json
         {
           "tool": "<tool_name>",
@@ -204,10 +194,10 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
              historyText += `*Summary of Earlier Conversation:*\n${chatHistory[0].content.replace('Previous conversation summary:\n','')}\n---\n*Recent Messages:*\n`;
              chatHistory = chatHistory.slice(1);
         }
-        const displayHistory = chatHistory.slice(-10);
+        const displayHistory = chatHistory.slice(-10); // Limit displayed history length
         historyText += displayHistory.map(msg => {
             const prefix = msg.role === 'user' ? 'User' : 'Assistant';
-            const content = (msg.content || '').substring(0, 500);
+            const content = (msg.content || '').substring(0, 500); // Truncate long messages
             const ellipsis = (msg.content || '').length > 500 ? '...' : '';
             return `${prefix}: ${content}${ellipsis}`;
         }).join('\n\n');
@@ -219,12 +209,13 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
         if (!steps || steps.length === 0) return '**Current Turn Progress:**\nNo actions taken yet this turn.';
         let text = '**Current Turn Progress:**\nActions taken so far in this turn:\n';
         steps.forEach((step, index) => {
-            if (step.tool.startsWith('_')) return;
+            if (step.tool.startsWith('_')) return; // Skip internal steps like _refiningCode
             text += `${index + 1}. Tool Used: \`${step.tool}\` (Attempt: ${step.attempt || 1})\n`;
              let argsSummary = 'No args';
              if (step.args && Object.keys(step.args).length > 0) {
                  const argsToSummarize = {};
                  for (const key in step.args) {
+                     // Avoid logging potentially large code strings in args summary
                      if (typeof step.args[key] === 'string' && step.args[key].length > 50) { argsToSummarize[key] = step.args[key].substring(0, 50) + '...'; }
                      else if (key !== 'code' && key !== 'react_code') { argsToSummarize[key] = step.args[key]; }
                  }
@@ -240,22 +231,19 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
         return text;
     }
 
-    // PHASE 11: Update artifact prompt section
     _buildPreviousArtifacts(summary, hasCode) {
         if (!summary && !hasCode) return '';
         let text = '**Context from Previous Report Generation (If applicable):**\n';
-        text += `- Summary of Previous Analysis Used: ${summary || 'None available'}\n`; // Clarify this is summary OF the data used
+        text += `- Summary of Previous Analysis Used: ${summary || 'None available'}\n`;
         text += `- Previously Generated Code Available: ${hasCode ? 'Yes' : 'No'}\n`;
         return text;
     }
 
-    // PHASE 11: Update analysis result prompt section
     _buildAnalysisResult(analysisResult) {
         if (!analysisResult) return '**Current Turn Analysis Results:**\nNo analysis has been performed or resulted in data *this turn*. Check previous turn artifacts if modifying.';
         try {
             const formatted = formatAnalysisObject(analysisResult);
             if (!formatted.trim()) return '**Current Turn Analysis Results (MUST USE for Summarization/Report Args):**\n(Analysis result is empty or contains no data)';
-            // Make header clearer for LLM
             return `**Actual Analysis Results (Data available for next step):**\n\`\`\`json\n${formatted}\n\`\`\``;
         } catch (e) {
             console.error('[SystemPromptBuilder] Error formatting analysisResult:', e);
@@ -332,19 +320,19 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
 
           *Example 2: User asks for analysis requiring code execution*
           User Request: "Calculate the total revenue from dataset 6abcdef1234567890abcdef"
-          Your Response (after parsing data in a previous step):
+          Your Response (Data is assumed ready):
           \`<thinking>
-          1. User wants total revenue. Data for 6abc...def is parsed.
+          1. User wants total revenue. Data for 6abc...def is ready.
           2. Schema context shows a 'Revenue' column.
           3. Need to generate code to sum the 'Revenue' column.
           4. Goal for code gen: 'Sum the Revenue column'.
-          5. Use \`generate_analysis_code\`.
+          5. Use \`generate_analysis_code\`. Ensure code includes insights.
           </thinking>
-          <user_explanation>Okay, I've loaded the data. Now I'll prepare the calculation to find the total revenue.</user_explanation>\`
+          <user_explanation>Okay, the data is ready. Now I'll prepare the calculation to find the total revenue.</user_explanation>\`
           \`\`\`json
           {
             "tool": "generate_analysis_code",
-            "args": { "analysis_goal": "Sum the Revenue column", "dataset_id": "6abcdef1234567890abcdef" }
+            "args": { "analysis_goal": "Sum the Revenue column and provide insights", "dataset_id": "6abcdef1234567890abcdef" }
           }
           \`\`\`
           (After successful code generation, Observation contains summary)
@@ -360,11 +348,10 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
             "args": { "dataset_id": "6abcdef1234567890abcdef" }
           }
           \`\`\`
-          (After successful code execution, Observation contains summary like: {"result_preview": {"totalRevenue": 150000}})
+          (After successful code execution, Observation contains summary like: {"result_preview": {"totalRevenue": 150000, "generatedInsights": ["Total revenue is $150,000."]}})
           Your FINAL Response:
           \`<thinking>
-          1. Code execution completed successfully. The result was {totalRevenue: 150000}.
-          2. Need to present this final answer to the user using \`_answerUserTool\`.
+          1. Code execution completed successfully. The result was {totalRevenue: 150000, generatedInsights: [...]}.\n2. Need to present this final answer to the user using \`_answerUserTool\`. Include the insight.
           </thinking>
           <user_explanation>The analysis is complete.</user_explanation>\`
           \`\`\`json
@@ -380,10 +367,7 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
           User Request: "Show the profit margin." (Dataset schema lacks obvious 'Profit' column but has 'Revenue', 'COGS')
           Your Response:
           \`<thinking>
-          1. User wants profit margin, but the schema doesn't have a 'Profit' column directly.
-          2. I see 'Revenue' and 'COGS' columns. Profit margin is usually (Revenue - COGS) / Revenue.
-          3. I should ask the user to confirm if using these columns is correct before proceeding with calculations.
-          4. I will use the \`ask_user_for_clarification\` tool.
+          1. User wants profit margin, but the schema doesn't have a 'Profit' column directly.\n2. I see 'Revenue' and 'COGS' columns. Profit margin is usually (Revenue - COGS) / Revenue.\n3. I should ask the user to confirm if using these columns is correct before proceeding with calculations.\n4. I will use the \`ask_user_for_clarification\` tool.
           </thinking>
           <user_explanation>To calculate the profit margin, I need to know which columns represent revenue and costs. Could you clarify which columns to use?</user_explanation>\`
           \`\`\`json
@@ -398,51 +382,37 @@ Before outputting ANY tool call OR your final answer, YOU MUST first provide **B
     _buildCoreInstructions() {
         return `**IMPORTANT INSTRUCTIONS (User Experience Focus):**
 *   **User-Friendly Explanations:** In your \`<user_explanation>\` block, explain your progress towards the user's goal in simple, non-technical language. Focus on *what* you are doing for the user (e.g., "Loading your data", "Preparing the analysis code", "Running the calculations", "Generating the report").
-*   **DO NOT Mention Internals:** In your \`<user_explanation>\` and final \`textResponse\`, **DO NOT** mention internal tool names (like \\\`parse_csv_data\\\`, \\\`generate_analysis_code\\\`, etc.), internal variables, or system identifiers like MongoDB ObjectIds. Keep the language focused on the user's perspective and the task progress.
+*   **DO NOT Mention Internals:** In your \`<user_explanation>\` and final \`textResponse\`, **DO NOT** mention internal tool names (like \\\`get_dataset_schema\\\`, \\\`generate_analysis_code\\\`, etc.), internal variables, or system identifiers like MongoDB ObjectIds. Keep the language focused on the user's perspective and the task progress.
 *   **Action AFTER Explanation:** Output the required JSON tool call object (or \\\`_answerUserTool\\\` call) **immediately after** the closing \`</user_explanation>\` tag.`;
     }
 
+    // Updated for Phase 3 - Background Parsing
     _buildWorkflowGuidance() {
         return `**WORKFLOW GUIDANCE:**
-*   **Data Loading First:** Generally, use \`parse_csv_data\` first if data isn't already loaded for the current analysis task.
+*   **Data Availability:** Data for selected datasets is processed automatically in the background after upload. You can generally assume data is ready for analysis tools like \`execute_analysis_code\` or \`calculate_financial_ratios\`. If a tool fails because data isn't ready (e.g., error code PARSING_IN_PROGRESS or PARSING_FAILED), inform the user and suggest they wait or check the dataset status. Do NOT repeatedly try to access data that failed parsing.
 *   **Code for Calculations:** For calculations or specific data transformations not covered by other tools, use \`generate_analysis_code\` then \`execute_analysis_code\`.
-*   **Report Generation:** To visualize results or present data in a structured way (charts, tables), use \`generate_report_code\` AFTER analysis code has been successfully executed (its result will be passed automatically).
+*   **Report Generation:** To visualize results or present data in a structured way (charts, tables), use \`generate_report_code\` AFTER analysis code has been successfully executed.
 *   **Tool Selection:** Choose the MOST appropriate tool for the specific task. Don't use general code generation if a specific tool (like \`calculate_financial_ratios\`) can directly answer the request.
-*   **Iterative Refinement:** If code execution fails, use the error information to refine the goal for \`generate_analysis_code\` (if the error was in the analysis code) or \`generate_report_code\` (if the error was in the report component) and try again. If the agent gets stuck in a loop of failed code execution, consider using \`_answerUserTool\` to explain the issue.
-
+*   **Iterative Refinement:** If code execution fails, use the error information to refine the goal for \`generate_analysis_code\` or \`generate_report_code\` and try again.
 *   **Workflow for Comprehensive Reports / Insights:**
     If the user asks for 'insights', 'commentary', 'recommendations', an 'executive summary', or a 'comprehensive report', you **MUST** follow this specific workflow:
-    1.  **(Parse Data)** Use \`parse_csv_data\` if needed. Explain as 'Loading data'.
-    2.  **(Generate ENHANCED Analysis Code)** Use \`generate_analysis_code\`. Your \`analysis_goal\` MUST explicitly ask for calculations like variances, ratios, trends, AND **textual insights/recommendations** to be included in the \`sendResult\` object. Explain as 'Performing in-depth analysis'.
-    3.  **(Execute Code)** Use \`execute_analysis_code\`. Explain as 'Running detailed calculations'.
-    4.  **(Generate ENHANCED Report Code)** Use \`generate_report_code\`. Your \`analysis_summary\` should mention that insights are included. Explain as 'Generating comprehensive report'.
-    5.  **(Answer User)** Use \`_answerUserTool\` with a brief message like 'Here is the comprehensive report you requested.' Explain as 'Presenting the detailed report'.
-
+    1.  (Assume Data Parsed) Check dataset schema if needed (\`get_dataset_schema\`).
+    2.  (Generate ENHANCED Analysis Code) Use \`generate_analysis_code\`. Your \`analysis_goal\` MUST explicitly ask for calculations like variances, ratios, trends, AND **textual insights/recommendations** to be included in the \`sendResult\` object. Explain as 'Performing in-depth analysis'.
+    3.  (Execute Code) Use \`execute_analysis_code\`. Explain as 'Running detailed calculations'.
+    4.  (Generate ENHANCED Report Code) Use \`generate_report_code\`. Your \`analysis_summary\` should mention that insights are included. Explain as 'Generating comprehensive report'.
+    5.  (Answer User) Use \`_answerUserTool\` with a brief message like 'Here is the comprehensive report you requested.' Explain as 'Presenting the detailed report'.
 *   **Tool Usage Clarification:** Use \`calculate_financial_ratios\` for direct ratio requests. Use the 'Comprehensive Report' workflow involving \`generate_analysis_code\` for requests needing deeper insights, commentary, custom analysis, or when the required data structure for ratios isn't immediately obvious. The comprehensive workflow is generally preferred for complex or multi-faceted analysis requests.
-
 `;
     }
 
-    // PHASE 11: Update modification handling prompt section
     _buildModificationHandling() {
-        return `**MODIFICATION HANDLING:** If the user asks to **modify** the *most recently generated report* (e.g., 'change the title', 'use a line chart instead') AND you determine the modification **does not require recalculating the underlying data**:
-    a. Acknowledge the modification request in your \`<thinking>\` block and state you will use the previously calculated analysis results.
-    b. Confirm that \`Previous Turn Artifacts\` indicates existing analysis results or generated code.
-    c. Your **only** action should be to use the \`generate_report_code\` tool.
-    d. In the \`analysis_summary\` argument, describe the requested change (e.g., "User wants to change the title to 'New Title' and use a LineChart for the existing monthly revenue data."). Keep it concise.
-    e. Include any specific modification arguments (\`title\`, \`chart_type\`, etc.) based on the user's request in the \`args\` for \`generate_report_code\`.
-    f. Pass the original \`dataset_id\` associated with the analysis.
-    g. **DO NOT** call \`parse_csv_data\` or \`execute_analysis_code\`. The system will automatically provide the previous analysis data to the report generator based on context.`;
+        return `**MODIFICATION HANDLING:** If the user asks to **modify** the *most recently generated report* (e.g., 'change the title', 'use a line chart instead') AND you determine the modification **does not require recalculating the underlying data**:\n    a. Acknowledge the modification request in your \`<thinking>\` block and state you will use the previously calculated analysis results.\n    b. Confirm that \`Previous Turn Artifacts\` indicates existing analysis results or generated code.\n    c. Your **only** action should be to use the \`generate_report_code\` tool.\n    d. In the \`analysis_summary\` argument, describe the requested change (e.g., "User wants to change the title to 'New Title' and use a LineChart for the existing monthly revenue data."). Keep it concise.\n    e. Include any specific modification arguments (\`title\`, \`chart_type\`, etc.) based on the user's request in the \`args\` for \`generate_report_code\`.\n    f. Pass the original \`dataset_id\` associated with the analysis.\n    g. **DO NOT** call \`execute_analysis_code\`. The system will automatically provide the previous analysis data to the report generator based on context.`;
     }
 
      _buildErrorHandling() {
-         return `**ERROR HANDLING:** If the *last step* shows an 'Error:',
-    a. Explain to the user (in \`<user_explanation>\`) that a step failed (e.g., "I encountered an error while running the analysis.").
-    b. Use \`_answerUserTool\` to inform the user you cannot proceed with that specific path.
-    c. DO NOT attempt to call the *same* tool again unless the error code explicitly suggests a retry AND you modify args. Prefer \`ask_user_for_clarification\` if missing info caused the error.`;
+         return `**ERROR HANDLING:** If the *last step* shows an 'Error:',\n    a. Explain to the user (in \`<user_explanation>\`) that a step failed (e.g., "I encountered an error while running the analysis.").\n    b. Use \`_answerUserTool\` to inform the user you cannot proceed with that specific path.\n    c. DO NOT attempt to call the *same* tool again unless the error code explicitly suggests a retry AND you modify args. Prefer \`ask_user_for_clarification\` if missing info caused the error.`;
     }
 
-     // PHASE 9: Add clarification guidance
      _buildClarificationGuidance() {
          return `**Requesting Clarification:** If the user's request is ambiguous (e.g., asks for 'profit margin' but required columns like 'Revenue' or 'COGS' aren't obvious from the schema) or if a previous tool failed because information was missing, use the \`ask_user_for_clarification\` tool to ask a specific question. Explain *why* you need clarification in \`<user_explanation>\`.`;
      }

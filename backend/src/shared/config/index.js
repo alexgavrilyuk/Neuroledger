@@ -1,5 +1,4 @@
 // backend/src/shared/config/index.js
-// ** UPDATED FILE - Add Cloud Tasks Config **
 require('dotenv').config();
 
 // Validate essential environment variables
@@ -8,12 +7,15 @@ const requiredEnv = [
   'MONGODB_URI',
   'FIREBASE_PROJECT_ID',
   'GCS_BUCKET_NAME',
-  'CLAUDE_API_KEY'
+  'CLAUDE_API_KEY',
+  'SERVICE_URL', // Ensure SERVICE_URL is required for task handlers
+  'CLOUD_TASKS_LOCATION',
+  'GOOGLE_CLOUD_PROJECT',
+  'CLOUD_TASKS_SERVICE_ACCOUNT' // Required for OIDC token generation
 ];
 
 requiredEnv.forEach((varName) => {
   if (!process.env[varName]) {
-    // Use console.error for startup errors before logger might be fully configured
     console.error(`Error: Environment variable ${varName} is missing.`);
     process.exit(1);
   }
@@ -29,12 +31,12 @@ module.exports = {
   openaiApiKey: process.env.OPENAI_API_KEY,
 
   // Cloud Tasks configuration
-  projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.FIREBASE_PROJECT_ID,
-  cloudTasksLocation: process.env.CLOUD_TASKS_LOCATION || 'us-central1',
+  projectId: process.env.GOOGLE_CLOUD_PROJECT,
+  cloudTasksLocation: process.env.CLOUD_TASKS_LOCATION,
   qualityAuditQueueName: process.env.QUALITY_AUDIT_QUEUE || 'neuroledger-quality-audit-queue',
   chatAiQueueName: process.env.CHAT_AI_QUEUE_NAME || 'neuroledger-chat-ai-queue',
+  datasetParserQueueName: process.env.DATASET_PARSER_QUEUE || 'neuroledger-dataset-parser-queue',
   cloudTasksServiceAccount: process.env.CLOUD_TASKS_SERVICE_ACCOUNT,
-  serviceUrl: process.env.SERVICE_URL,
+  serviceUrl: process.env.SERVICE_URL, // Base URL of the deployed service
 
-  // Add other configurations as needed
 };

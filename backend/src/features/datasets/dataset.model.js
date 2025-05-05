@@ -1,36 +1,34 @@
 // backend/src/features/datasets/dataset.model.js
-// ** UPDATED FILE - Added quality audit fields **
 const mongoose = require('mongoose');
 
 const ColumnSchema = new mongoose.Schema({
-    name: { type: String, required: true }, // Original header name
-    type: { type: String, default: 'string' }, // Inferred type (keep simple for now)
-    // Add more like 'format' later if needed
+    name: { type: String, required: true },
+    type: { type: String, default: 'string' },
 }, { _id: false });
 
 const DatasetSchema = new mongoose.Schema({
-  name: { // User-provided name or filename initially
+  name: {
     type: String,
     required: true,
     trim: true,
   },
-  description: { // Optional description added later
+  description: {
     type: String,
     trim: true,
     default: '',
   },
-  gcsPath: { // Path within the GCS bucket (e.g., 'user_id/uuid_filename.csv')
+  gcsPath: {
     type: String,
     required: true,
     unique: true,
   },
-  originalFilename: { // The original name of the uploaded file
+  originalFilename: {
       type: String,
       required: true,
   },
   fileSizeBytes: {
       type: Number,
-      required: false, // Can be added during metadata creation
+      required: false,
   },
   ownerId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -38,19 +36,19 @@ const DatasetSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
-  teamId: { // For team sharing
+  teamId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Team',
     index: true,
     default: null,
   },
-  schemaInfo: [ColumnSchema], // Array of columns derived from headers
-  columnDescriptions: { // User-provided descriptions (Phase 8)
+  schemaInfo: [ColumnSchema],
+  columnDescriptions: {
     type: Map,
     of: String,
     default: {},
   },
-  isIgnored: { // Flag to hide dataset from prompt selection maybe?
+  isIgnored: {
     type: Boolean,
     default: false,
   },
@@ -62,7 +60,23 @@ const DatasetSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
-  // NEW: Quality audit related fields
+  // --- NEW: Parsed Data Status Fields ---
+  parsedDataStatus: {
+    type: String,
+    enum: ['not_parsed', 'queued', 'processing', 'completed', 'error'],
+    default: 'not_parsed',
+    index: true,
+  },
+  parsedDataGridFSId: { // Store the ID of the parsed JSON file in GridFS
+    type: mongoose.Schema.Types.ObjectId,
+    default: null,
+  },
+  parsedDataError: { // Store parsing error messages
+    type: String,
+    default: null,
+  },
+  // --- END NEW ---
+  // Quality audit related fields
   qualityStatus: {
     type: String,
     enum: ['not_run', 'processing', 'ok', 'warning', 'error'],
@@ -88,6 +102,5 @@ DatasetSchema.pre('save', function(next) {
   this.lastUpdatedAt = new Date();
   next();
 });
-
 
 module.exports = mongoose.model('Dataset', DatasetSchema);

@@ -1,10 +1,6 @@
 // backend/src/features/chat/tools/tool.definitions.js
-// ENTIRE FILE - UPDATED FOR PHASE 9
-
 /**
  * Defines the structure and description of tools available to the LLM agent.
- * This array is used by SystemPromptBuilder to inform the LLM about capabilities.
- * Argument details are now primarily defined in tool.schemas.js and enforced by BaseToolWrapper.
  */
 const toolDefinitions = [
     // Dataset Interaction Tools
@@ -20,10 +16,11 @@ const toolDefinitions = [
     },
     {
         name: 'parse_csv_data',
-        description: 'Parses the raw CSV/XLSX content of a specific dataset by its ID. This makes the data available in memory for analysis code execution. Must be called before `execute_analysis_code`.',
-        output: 'On success, returns an object with status: success and result: an object containing a summary (e.g., "Successfully parsed 100 rows."). The actual data is stored internally for the next step. On failure, returns an object with status: error, an error message, and an errorCode (e.g., CSV_PARSE_ERROR, DATA_FETCH_FAILED).'
+        // MODIFIED Description:
+        description: 'Checks if the data for a specific dataset ID has been successfully processed and is ready for analysis. Returns an error if processing is ongoing or failed. This step is implicitly required before analysis, but you usually do not need to call it directly unless checking status.',
+        // MODIFIED Output:
+        output: 'On success, returns an object with status: success and result: an object containing a summary message. On failure (e.g., processing, error), returns an object with status: error, an error message, and an errorCode.'
     },
-
     // Code Generation & Execution Tools
     {
         name: 'generate_analysis_code',
@@ -32,7 +29,8 @@ const toolDefinitions = [
     },
     {
         name: 'execute_analysis_code',
-        description: 'Executes the generated Node.js analysis code in a secure sandbox. Requires `parse_csv_data` to have been successfully called for the relevant dataset ID first. The system automatically uses the code generated in the previous step.',
+        // MODIFIED Description (removed explicit mention of parse_csv_data requirement):
+        description: 'Executes the generated Node.js analysis code in a secure sandbox using pre-processed data for the specified dataset ID. The system automatically uses the code generated in the previous step.',
         output: 'On success, returns an object with status: success and result: the JSON output from the executed code. On failure, returns an object with status: error, an error message, an errorCode (e.g., CODE_EXECUTION_FAILED, CODE_EXECUTION_TIMEOUT, PARSED_DATA_MISSING), and potentially console logs.'
     },
     {
@@ -40,21 +38,19 @@ const toolDefinitions = [
         description: 'Generates React component code (JSX) to visualize or report the results of a previous analysis. Use this AFTER `execute_analysis_code` has successfully returned results. Provide a summary of the results to guide the generation. Can optionally accept `title`, `chart_type`, and `columns_to_visualize` arguments for customization.',
         output: 'On success, returns an object with status: success and result: an object containing the generated React component code string. On failure, returns an object with status: error, an error message, and an errorCode (e.g., CODE_GENERATION_FAILED, MISSING_ANALYSIS_DATA).'
     },
-
      // Financial Ratio Tool
      {
         name: 'calculate_financial_ratios',
-        description: 'Calculates common financial ratios (e.g., Gross Profit Margin, Net Profit Margin, Current Ratio, Debt-to-Equity) directly from parsed dataset data. Requires the dataset to be parsed first using `parse_csv_data`. Provide the `dataset_id` of the parsed data, an array of desired `ratios`, and the exact `column_names` required for those ratios.',
+        // MODIFIED Description (removed explicit mention of parse_csv_data requirement):
+        description: 'Calculates common financial ratios (e.g., Gross Profit Margin, Net Profit Margin, Current Ratio, Debt-to-Equity) directly from pre-processed dataset data. Provide the `dataset_id` of the processed data, an array of desired `ratios`, and the exact `column_names` required for those ratios.',
         output: 'On success, returns an object with status: success and result: an object containing calculated ratios { ratioName: value, ... }. On failure, status: error and error message with errorCode.'
     },
-
-    // Clarification Tool (Phase 9)
+    // Clarification Tool
     {
         name: 'ask_user_for_clarification',
         description: 'Use this tool ONLY when you need more information from the user to proceed. Ask a specific question to resolve ambiguity or gather missing details (like column names).',
         output: 'Pauses the agent turn and sends the question to the user. Does not return a value to the agent loop directly.'
     },
-
     // Final Output Tool
     {
         name: '_answerUserTool',
