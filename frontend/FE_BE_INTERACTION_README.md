@@ -1,6 +1,5 @@
 Okay, this is a crucial document to keep accurate. Here is the complete, updated `FE_BE_INTERACTION_README.md` reflecting the agent architecture and changes up to Phase 12.
 
-```markdown
 # NeuroLedger: Frontend / Backend API Interaction
 
 This document defines the contract for communication between the NeuroLedger frontend (React) and backend (Node.js/Express) services, including REST API endpoints and Server-Sent Events (SSE) for real-time chat interactions.
@@ -92,18 +91,19 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `400`, `401`, `403`, `500`.
 
 *   **`POST /api/v1/datasets/proxy-upload`**
-    *   **Description:** Uploads file via backend proxy. User must be admin of the team if `teamId` is provided.
-    *   **Auth:** Required (Login + Active Subscription).
-    *   **Request:** `multipart/form-data` with `file` field (File, max 50MB) and optional `teamId` field (string, ObjectId).
-    *   **Success (201 Created):** `{ status: 'success', data: Dataset }`
-    *   **Errors:** `400`, `401`, `403`, `500`.
+    *   **Auth**: Required (Login + Active Subscription)
+    *   **Request**: `multipart/form-data` with `file` field (File, max 50MB) and optional `teamId` field (string, ObjectId)
+    *   **Description**: Uploads file via backend proxy. **IMPORTANT: Triggers an asynchronous background parsing task. Initial `parsedDataStatus` will be 'not_parsed', then transition to 'queued'.**
+    *   **Success (201 Created)**: `{ status: 'success', data: Dataset }` (Immediate response, parsing occurs in background)
+    *   **Errors**: `400` (No file), `403` (Not team member/admin if `teamId` provided), `500` (Upload/metadata error)
 
 *   **`POST /api/v1/datasets`**
-    *   **Description:** Creates dataset metadata AFTER successful direct client-to-GCS upload. User must be admin of the team if `teamId` is provided.
-    *   **Auth:** Required (Login + Active Subscription).
-    *   **Request Body:** `{ gcsPath: string, originalFilename: string, name?: string, fileSizeBytes?: number, teamId?: string }`
-    *   **Success (201 Created):** `{ status: 'success', data: Dataset }`
-    *   **Errors:** `400`, `401`, `403`, `500`.
+    *   **Auth**: Required (Login + Active Subscription)
+    *   **Request Body**: `{ gcsPath: string, originalFilename: string, name?: string, fileSizeBytes?: number, teamId?: string }`
+    *   **Description**: Creates dataset metadata AFTER successful direct client-to-GCS upload. **IMPORTANT: Triggers an asynchronous background parsing task. Initial `parsedDataStatus` will be 'not_parsed', then transition to 'queued'.**
+    *   **Success (201 Created)**: `{ status: 'success', data: Dataset }` (Immediate response, parsing occurs in background)
+    *   **Errors**: `400` (Missing required fields), `403` (Not team admin if `teamId` provided), `500` (DB error)
+
 
 *   **`GET /api/v1/datasets`**
     *   **Description:** Lists datasets accessible to the user (personal + teams user is member of). Includes `isTeamDataset` and `teamName`.
@@ -112,11 +112,15 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Errors:** `401`, `403`, `500`.
 
 *   **`GET /api/v1/datasets/{id}`**
-    *   **Description:** Gets details for a single dataset. Accessible if user is owner OR member of the team.
-    *   **Auth:** Required (Login + Active Subscription).
-    *   **Request Params:** `id` (MongoDB ObjectId).
-    *   **Success (200 OK):** `{ status: 'success', data: Dataset }`
-    *   **Errors:** `400`, `401`, `403`, `404`, `500`.
+    *   **Auth**: Required (Login + Active Subscription)
+    *   **Description**: Gets details for a single dataset. **Accessible if user is owner OR member of the team the dataset belongs to.**
+    *   **Request Params**: `id` (MongoDB ObjectId)
+    *   **Success (200 OK)**: `{ status: 'success', data: Dataset }`
+        *   **NEW Fields in Response**:
+            - `parsedDataStatus`: Indicates current parsing state
+            - `parsedDataGridFSId`: Reference to GridFS document (if parsing completed)
+            - `parsedDataError`: Error message (if parsing failed)
+    *   **Errors**: `400` (Invalid ID), `404` (Not found or not accessible)
 
 *   **`GET /api/v1/datasets/{id}/schema`**
     *   **Description:** Gets schema info (`schemaInfo`, `columnDescriptions`, `description`). Accessible if user is owner OR member of the team.
@@ -145,6 +149,14 @@ This document defines the contract for communication between the NeuroLedger fro
     *   **Request Params:** `id` (MongoDB ObjectId).
     *   **Success (200 OK):** `{ status: 'success', message: 'Dataset deleted successfully' }`
     *   **Errors:** `400`, `401`, `403`, `404`, `500`.
+
+*   **`POST /api/v1/internal/datasets/parse-worker`**
+    *   **Auth**: Protected by Cloud Tasks OIDC Token Validation
+    *   **Description**: INTERNAL endpoint triggered by Cloud Tasks for asynchronous dataset parsing.
+    *   **Request Body**: `{ datasetId: string }`
+    *   **Purpose**: Processes background parsing task for a specific dataset
+    *   **Success (200 OK)**: `{ status: 'success', message: 'Task received for parsing.' }`
+    *   **Errors**: `401` (Invalid token), `400` (Invalid payload)
 
 ---
 
@@ -341,6 +353,9 @@ interface Dataset {
   lastUpdatedAt: string; // ISO Date string
   qualityStatus: 'not_run' | 'processing' | 'ok' | 'warning' | 'error';
   // Other quality fields omitted for brevity
+  parsedDataStatus: 'not_parsed' | 'queued' | 'processing' | 'completed' | 'error';
+  parsedDataGridFSId?: string | null;
+  parsedDataError?: string | null;
 }
 
 interface ListedDataset extends Dataset {
@@ -440,11 +455,22 @@ The primary mechanism for real-time chat updates is Server-Sent Events (SSE) via
 *   **`end`**: Final event before the connection closes.
     *   Payload: `{ status: 'completed' | 'error' | 'closed' }`
 
+### 7. Background Task Queues
+
+*   **`DATASET_PARSER_QUEUE`**:
+    *   **Purpose**: Asynchronous parsing of uploaded datasets
+    *   **Trigger**: Immediately after dataset metadata creation
+    *   **Flow**:
+        1. Download original file from GCS
+        2. Parse file content (CSV/XLSX)
+        3. Store parsed data in GridFS
+        4. Update dataset parsing status
+
 ### Frontend Handling
 
 The frontend (`ChatContext`) uses `@microsoft/fetch-event-source` to connect to the stream, handle authentication headers, and process incoming events. It updates the `messages` state, specifically the `messageFragments` array of the relevant AI message, based on the received events (`agent:explanation`, `agent:using_tool`, `agent:tool_result`, `agent:error`, `agent:needs_clarification`). The final text and report data are set via `agent:final_answer`.
 
-## 7. WebSocket Events (Fallback/Legacy)
+## 8. WebSocket Events (Fallback/Legacy)
 
 WebSocket events (via Socket.IO) are still emitted by the *non-streaming* task handler (`chat.taskHandler.js`) upon final completion or error, primarily for backward compatibility or simpler non-streaming UI updates.
 

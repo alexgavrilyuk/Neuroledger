@@ -85,14 +85,23 @@ The chat feature employs an asynchronous, agent-driven architecture:
 
 ### Tool System (`tools/` subdirectory)
 
-*   **`tool.definitions.js`**: An array defining the `name`, `description`, and `output` format for each available tool. Used by `SystemPromptBuilder`.
+*   **`tool.definitions.js`**: An array defining the `name`, `description`, and `output` format for each available tool. Used by `SystemPromptBuilder`. The descriptions now reflect that datasets are pre-parsed via background tasks rather than during chat interaction.
 *   **`tool.schemas.js`**: Defines JSON Schemas (using Ajv format) for the expected arguments (`args`) of each tool. Used for validation. Includes schemas for optional arguments added in later phases.
 *   **`BaseToolWrapper.js`**: A higher-order function that wraps individual tool logic. It performs:
     *   Logging of tool calls.
     *   Argument validation against the corresponding schema in `tool.schemas.js` using Ajv.
     *   Merging of LLM-provided arguments and system-substituted arguments (like code).
     *   Standardized error handling and result formatting (including `errorCode`).
-*   **Individual Tool Files (`*.js`)**: Each file implements the specific logic for a single tool (e.g., `list_datasets.js`, `parse_csv_data.js`, `generate_analysis_code.js`, `execute_analysis_code.js`, `generate_report_code.js`, `get_dataset_schema.js`, `calculate_financial_ratios.js`, `ask_user_for_clarification.js`, `answer_user.js`). Each exports a function wrapped by `createToolWrapper`.
+*   **Individual Tool Files (`*.js`)**: Each file implements the specific logic for a single tool:
+    *   **`list_datasets.js`**: Lists available datasets for the user/team.
+    *   **`parse_csv_data.js`**: Now functions as a status checker that verifies if a dataset has been successfully parsed by the background task, rather than performing the parsing itself. Returns success if data is ready or an appropriate error status if parsing is still in progress or failed.
+    *   **`get_dataset_schema.js`**: Retrieves schema information for a dataset.
+    *   **`generate_analysis_code.js`**: Generates Node.js code for data analysis based on a goal.
+    *   **`execute_analysis_code.js`**: Executes the generated analysis code using pre-parsed data retrieved via the `getParsedDataCallback` provided by `AgentRunner`. The data is retrieved from persistent storage using `datasetService.getParsedDataFromStorage`.
+    *   **`generate_report_code.js`**: Generates React component code based on analysis results.
+    *   **`calculate_financial_ratios.js`**: Directly calculates common financial ratios from pre-parsed dataset data via the `getParsedDataCallback`.
+    *   **`ask_user_for_clarification.js`**: Allows the agent to pause and ask the user a specific question.
+    *   **`answer_user.js`**: Signals the final answer to the user.
 
 ## Dependencies
 

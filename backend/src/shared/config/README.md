@@ -25,6 +25,8 @@ This directory centralizes the loading, validation, and exporting of application
             *   `projectId`: Google Cloud Project ID (defaults to `FIREBASE_PROJECT_ID`).
             *   `cloudTasksLocation`: Region for the Cloud Tasks queue (defaults to `us-central1`).
             *   `qualityAuditQueueName`: Name of the queue used for data quality audits (defaults to `neuroledger-quality-audit-queue`).
+            *   `chatAiQueueName`: Name of the queue used for AI chat processing (defaults to `neuroledger-chat-ai-queue`).
+            *   **NEW:** `datasetParserQueueName`: Name of the queue used for dataset parsing tasks (defaults to `neuroledger-dataset-parser-queue`).
             *   `cloudTasksServiceAccount`: Email of the service account used for OIDC token generation (optional).
             *   `serviceUrl`: Base URL of the deployed service where the task handler resides (required for Cloud Tasks HTTP targets).
 
@@ -40,7 +42,7 @@ const config = require('./shared/config'); // Adjust path as necessary
 const port = config.port;
 const mongoURI = config.mongoURI;
 const bucketName = config.gcsBucketName;
-const queueName = config.qualityAuditQueueName;
+const queueName = config.datasetParserQueueName; // NEW: Access dataset parser queue name
 // etc.
 ```
 
